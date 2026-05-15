@@ -1,0 +1,103 @@
+\chapter{Arquitectura propuesta}
+
+\section{Principios de diseno}
+
+La arquitectura se basa en cuatro principios:
+
+\begin{enumerate}
+  \item separar codigo, memoria academica y recursos;
+  \item mantener los datos crudos inmutables;
+  \item representar decisiones mediante contratos estructurados;
+  \item ejecutar transformaciones mediante modulos Python deterministas.
+\end{enumerate}
+
+\section{Separacion entre agentes y ejecutores}
+
+Los agentes no escriben ni ejecutan codigo arbitrario sobre los datos. Su papel
+es proponer configuraciones, interpretar perfiles y decidir la siguiente fase
+del flujo. Los ejecutores leen artefactos desde disco, aplican operaciones
+deterministas y devuelven rutas, metricas y logs.
+
+\section{Nodos previstos}
+
+El grafo minimo previsto contiene:
+
+\begin{itemize}
+  \item supervisor;
+  \item agente limpiador;
+  \item ejecutor de limpieza;
+  \item agente estructurador;
+  \item ejecutor de estructuracion;
+  \item agente modelador;
+  \item ejecutor de modelado;
+  \item evaluador;
+  \item redactor;
+  \item revision humana para trabajos costosos.
+\end{itemize}
+
+\section{Estado global}
+
+El estado global de LangGraph no almacenara datasets completos. Debe contener
+rutas, resumenes y artefactos:
+
+\begin{itemize}
+  \item identificador de ejecucion;
+  \item contexto del proyecto;
+  \item rutas de datos crudos, perfiles, datos limpios, tensores e informes;
+  \item configuraciones de limpieza, estructuracion y modelado;
+  \item metricas y evaluacion;
+  \item errores, aprobaciones humanas y artefactos generados.
+\end{itemize}
+
+En la implementacion inicial se ha definido un modelo canonico `TFMStateModel`
+validado con Pydantic y una vista `TFMState` basada en `TypedDict` para su uso
+en LangGraph. Esta separacion permite validar contratos de forma estricta antes
+de entregar el estado al grafo y, al mismo tiempo, mantener una representacion
+ligera y serializable.
+
+El estado inicial del caso CWRU queda fijado en la fase `dataset\_manifest`,
+con el nodo siguiente `manifest\_executor`. El directorio crudo se registra como
+\path{codigo/data/raw/cwru_bearing/mat}, el canal principal es `DE\_time` y la
+frecuencia objetivo es 12 kHz. Las rutas de artefactos posteriores permanecen
+como valores nulos hasta que los ejecutores correspondientes las generen.
+
+\section{Contratos estructurados}
+
+Los contratos iniciales incluyen:
+
+\begin{itemize}
+  \item `ProjectContext`, que define dominio, maquina, dataset, objetivo,
+        canal principal y frecuencia objetivo;
+  \item `DatasetManifestRow` y `DatasetManifest`, que formalizan el inventario
+        de ficheros crudos y sus etiquetas;
+  \item `DatasetProfileSummary`, que resume el perfil sin almacenar senales;
+  \item `CleaningConfig`, `StructuringConfig` y `ModelingConfig`, que fijan las
+        configuraciones que podran proponer los agentes;
+  \item `SupervisorDecision`, `CleaningDecision`, `StructuringDecision`,
+        `ModelingDecision`, `EvaluationDecision` y `ReportDecision`, que
+        estructuran las respuestas de los agentes;
+  \item `ExecutorResult` y resultados especializados, que normalizan las
+        salidas de los ejecutores deterministas;
+  \item `MetricsReport` y `EvaluationResult`, que estructuran la evaluacion;
+  \item `PipelineError`, `HumanApproval` y `ArtifactRef`, que mantienen
+        trazabilidad de errores, revisiones y artefactos.
+\end{itemize}
+
+Estos esquemas aplican validacion estricta y rechazan campos no declarados. Por
+ejemplo, una fila normal del manifiesto debe declarar los campos de fallo como
+nulos, mientras que una fila con fallo debe incluir tipo de fallo y diametro. De
+forma analoga, un resultado de ejecutor con estado fallido debe incluir un error
+estructurado, y una decision no terminal del supervisor debe indicar el siguiente
+nodo del grafo.
+
+\section{Trazabilidad}
+
+Cada ejecucion debe permitir responder:
+
+\begin{itemize}
+  \item que datos se usaron;
+  \item que configuracion fue validada;
+  \item que ejecutor produjo cada artefacto;
+  \item que metricas se obtuvieron;
+  \item que limitaciones permanecen.
+\end{itemize}

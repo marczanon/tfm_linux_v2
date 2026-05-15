@@ -1,0 +1,123 @@
+\chapter{Implementacion}
+
+\section{Estructura del repositorio}
+
+La implementacion se organiza en tres areas:
+
+\begin{itemize}
+  \item `codigo/`: aplicacion, tests, datos, modelos, informes y documentacion
+        tecnica;
+  \item `memoria/`: documento LaTeX del TFM;
+  \item `recursos/`: PDFs, referencias y diagramas auxiliares.
+\end{itemize}
+
+\section{Estado actual}
+
+Hasta este punto se ha creado la estructura inicial de directorios, se han
+descargado los datasets crudos, se ha definido el flujo de datos del MVP y se
+han implementado el contrato inicial del estado global del grafo y los esquemas
+Pydantic de entradas, decisiones y resultados. Los datos crudos se conservan en
+`codigo/data/raw/`, junto con un README de trazabilidad.
+
+\section{Estado global implementado}
+
+El estado global se ha dividido en dos capas:
+
+\begin{itemize}
+  \item `codigo/app/schemas/state.py`: modelos Pydantic estrictos para validar
+        el estado, configuraciones, metricas, errores y artefactos;
+  \item `codigo/app/graph/state.py`: `TypedDict` usado por LangGraph,
+        validador de estado e inicializador del caso CWRU.
+\end{itemize}
+
+El inicializador `create\_initial\_cwru\_state` crea una ejecucion preparada para
+generar el manifiesto del dataset. El estado resultante no contiene senales ni
+arrays, solo rutas, contexto experimental y campos reservados para artefactos
+futuros.
+
+\section{Contratos Pydantic implementados}
+
+Se han anadido tres grupos de contratos:
+
+\begin{itemize}
+  \item `codigo/app/schemas/dataset.py`: manifiesto del dataset, canales y
+        metadatos de fallo;
+  \item `codigo/app/schemas/agent\_decisions.py`: decisiones estructuradas del
+        supervisor, limpiador, estructurador, modelador, evaluador y redactor;
+  \item `codigo/app/schemas/executor\_results.py`: resultados comunes y
+        especializados de ejecutores deterministas.
+\end{itemize}
+
+Estos contratos consolidan la regla arquitectonica de que los agentes producen
+configuraciones o decisiones validables, mientras que los ejecutores devuelven
+rutas, metricas, errores y referencias a artefactos, pero no datos pesados.
+
+\section{Artefactos previstos}
+
+\begin{itemize}
+  \item `codigo/data/interim/cwru\_bearing/manifest.csv`;
+  \item `codigo/data/interim/cwru\_bearing/profile.json`;
+  \item `codigo/data/processed/cwru\_bearing/clean\_signals/`;
+  \item `codigo/data/tensors/cwru\_bearing/windows\_features.csv`;
+  \item `codigo/data/tensors/cwru\_bearing/windows\_raw.npz`;
+  \item `codigo/data/tensors/cwru\_bearing/splits.json`;
+  \item `codigo/reports/cwru\_bearing/`;
+  \item `codigo/models/cwru\_bearing/`.
+\end{itemize}
+
+\section{Ejecutor de manifiesto}
+
+Se ha implementado el primer ejecutor determinista del pipeline, el modulo
+`dataset\_manifest.py`. Su responsabilidad es generar el artefacto:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/data/interim/cwru_bearing/manifest.csv
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+a partir de los ficheros `.mat` crudos de CWRU.
+
+El ejecutor no carga senales completas. Solo inspecciona los nombres de fichero
+y aplica un mapeo controlado de metadatos CWRU: carga, RPM, tipo de fallo,
+diametro y posicion del fallo exterior cuando corresponde. El manifiesto
+generado conserva la frecuencia original de cada fichero y fija una frecuencia
+objetivo de 12 kHz para el MVP.
+
+La ejecucion real sobre los datos descargados ha generado 64 registros: 4
+ficheros normales y 60 ficheros con fallo. El fichero resultante contiene 65
+lineas incluyendo la cabecera.
+
+\section{Dependencias}
+
+Se ha creado `requirements.txt` como punto inicial para construir el entorno de
+Miniconda `tfm\_v2`, fijado sobre Python 3.11. Incluye dependencias de contratos
+y grafo, procesamiento de datos, modelos clasicos, visualizacion tecnica y
+verificacion.
+
+\section{Verificacion actual}
+
+La verificacion de los contratos se ha realizado con tests unitarios en el
+entorno objetivo:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+conda run -n tfm_v2 python -m unittest discover codigo/tests
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Las pruebas validan la creacion del estado inicial CWRU, serializacion JSON,
+rechazo de campos no declarados, restricciones de configuraciones y metricas,
+coherencia del manifiesto, decisiones de agentes, resultados de ejecutores y
+generacion del manifiesto CWRU. En esta fase se han ejecutado 27 tests
+correctamente.
+
+\section{Siguiente paso de implementacion}
+
+El siguiente avance tecnico sera implementar el perfilador de datos, que leera
+el manifiesto generado, inspeccionara los canales reales de cada fichero `.mat`
+y producira `codigo/data/interim/cwru\_bearing/profile.json`.

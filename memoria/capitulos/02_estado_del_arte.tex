@@ -1,0 +1,48 @@
+\chapter{Estado del arte}
+
+\section{Mantenimiento predictivo y deteccion de anomalias}
+
+Esta seccion desarrollara el contexto de mantenimiento predictivo, monitorizacion
+de condicion y deteccion de anomalias en maquinaria rotativa.
+
+Aspectos a cubrir:
+
+\begin{itemize}
+  \item diferencias entre mantenimiento correctivo, preventivo y predictivo;
+  \item papel de las senales de vibracion en rodamientos y motores;
+  \item fallos comunes: pista interior, pista exterior, bola y desbalanceo;
+  \item diferencias entre deteccion de anomalias, diagnostico y pronostico.
+\end{itemize}
+
+\section{Modelos de deteccion de anomalias}
+
+El MVP comparara primero modelos clasicos y reproducibles:
+
+\begin{itemize}
+  \item Isolation Forest;
+  \item One-Class SVM;
+  \item Local Outlier Factor;
+  \item PCA con error de reconstruccion.
+\end{itemize}
+
+Los autoencoders densos y modelos recurrentes se consideraran en fases
+posteriores, cuando el pipeline de tensores este validado.
+
+\section{Sistemas multiagente aplicados a pipelines de datos}
+
+Esta seccion describira el uso de arquitecturas multiagente para dividir
+responsabilidades entre nodos especializados. El enfoque del proyecto separa:
+
+\begin{itemize}
+  \item decisiones de alto nivel tomadas por agentes;
+  \item validacion de contratos mediante esquemas estrictos;
+  \item ejecucion determinista de transformaciones sobre datos;
+  \item auditoria de rutas, configuraciones, metricas y artefactos.
+\end{itemize}
+
+\section{Datasets publicos de referencia}
+
+El dataset principal sera CWRU Bearing Dataset
+\cite{cwru_bearing_data_center,cwru_normal_baseline,cwru_12k_drive_end}. NASA
+IMS Bearing Dataset se reserva como extension para escenarios de degradacion
+temporal \cite{nasa_pcoe_repository,nasa_ims_bearings_zip}.

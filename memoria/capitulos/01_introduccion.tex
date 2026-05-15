@@ -1,0 +1,67 @@
+\chapter{Introduccion}
+
+\section{Contexto}
+
+La deteccion de anomalias en maquinaria industrial es una tarea relevante para
+mejorar la fiabilidad, reducir paradas no planificadas y apoyar estrategias de
+mantenimiento predictivo. En sistemas rotativos, como motores electricos,
+turbinas, bombas o rodamientos, las senales de vibracion permiten observar
+cambios de comportamiento asociados a desgaste, desbalanceo, defectos mecanicos
+o degradacion progresiva.
+
+Este trabajo se centra inicialmente en rodamientos de motores electricos, usando
+como dataset principal CWRU Bearing Dataset \cite{cwru_bearing_data_center}. El
+dataset NASA IMS Bearing se conserva como fuente futura para validar escenarios
+de degradacion run-to-failure \cite{nasa_pcoe_repository}.
+
+\section{Motivacion}
+
+El interes del proyecto no se limita a entrenar un modelo de deteccion de
+anomalias. El objetivo es construir una arquitectura capaz de coordinar el flujo
+completo de datos: ingestion, perfilado, limpieza, estructuracion temporal,
+entrenamiento, evaluacion, auditoria e informe tecnico. Para evitar
+transformaciones opacas o no reproducibles, los agentes proponen decisiones
+estructuradas y los ejecutores deterministas aplican las operaciones reales.
+
+\section{Problema}
+
+El problema abordado es la deteccion automatica de patrones anomalos en senales
+de vibracion procedentes de rodamientos. En el MVP se formulara como una tarea
+binaria:
+
+\begin{itemize}
+  \item clase normal: operacion sin fallo;
+  \item clase anomala: cualquier fallo de rodamiento disponible en el dataset.
+\end{itemize}
+
+La clasificacion por tipo de fallo se mantiene como extension posterior. Esta
+decision reduce el alcance inicial y permite validar primero la trazabilidad del
+pipeline multiagente.
+
+\section{Objetivo general}
+
+Disenar e implementar una arquitectura multiagente basada en LangGraph para
+procesar datos industriales de vibracion y detectar anomalias de forma
+reproducible, auditable y extensible.
+
+\section{Objetivos especificos}
+
+\begin{enumerate}
+  \item Definir una estructura de proyecto que separe codigo, memoria academica
+        y recursos.
+  \item Seleccionar un caso de uso industrial y datasets publicos adecuados.
+  \item Disenar un pipeline de datos reproducible para senales de vibracion.
+  \item Definir contratos estructurados para agentes y ejecutores.
+  \item Implementar ejecutores deterministas para perfilado, limpieza,
+        estructuracion temporal, modelado y evaluacion.
+  \item Construir un MVP local antes de abordar Docker, SLURM o frontend.
+  \item Generar informes tecnicos trazables a partir de metricas y artefactos.
+\end{enumerate}
+
+\section{Alcance y limitaciones iniciales}
+
+El alcance inicial queda limitado a ejecucion local, ficheros crudos en disco y
+un dataset principal. No se abordaran en el MVP la ejecucion distribuida,
+streaming industrial, integracion SLURM, frontend ni persistencia avanzada. NASA
+IMS se mantiene como extension experimental una vez validado el flujo sobre
+CWRU.

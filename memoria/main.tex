@@ -1,0 +1,81 @@
+\documentclass[12pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-tabla]{babel}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\geometry{
+  left=3cm,
+  right=2.5cm,
+  top=2.5cm,
+  bottom=2.5cm
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\setlist[itemize]{leftmargin=*}
+\setlist[enumerate]{leftmargin=*}
+
+\title{
+  Diseno y desarrollo de una arquitectura multiagente basada en LangGraph\\
+  para procesamiento de datos y deteccion de anomalias industriales
+}
+\author{Autor: pendiente}
+\date{Curso academico: pendiente}
+
+\begin{document}
+
+\pagenumbering{gobble}
+\maketitle
+\cleardoublepage
+\pagenumbering{roman}
+
+\chapter*{Resumen}
+Este Trabajo Fin de Master propone una arquitectura multiagente para el
+procesamiento, modelado y deteccion de anomalias en entornos industriales. El
+caso de uso inicial se centra en rodamientos de motores electricos monitorizados
+mediante senales de vibracion. La solucion combina agentes coordinados mediante
+LangGraph con ejecutores Python deterministas, de forma que las decisiones se
+representen mediante contratos estructurados y las transformaciones sobre datos
+sean reproducibles, auditables y testeables.
+
+\chapter*{Abstract}
+This Master's Thesis proposes a multi-agent architecture for data processing,
+modeling and anomaly detection in industrial environments. The initial use case
+focuses on electric motor bearings monitored through vibration signals. The
+solution combines agents coordinated with LangGraph and deterministic Python
+executors, so that decisions are represented through structured contracts and
+data transformations remain reproducible, auditable and testable.
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+\cleardoublepage
+\pagenumbering{arabic}
+
+\input{capitulos/01_introduccion}
+\input{capitulos/02_estado_del_arte}
+\input{capitulos/03_arquitectura}
+\input{capitulos/04_metodologia}
+\input{capitulos/05_implementacion}
+\input{capitulos/06_experimentos}
+\input{capitulos/07_resultados}
+\input{capitulos/08_conclusiones}
+
+\bibliographystyle{plain}
+\bibliography{bibliografia/referencias}
+
+\end{document}

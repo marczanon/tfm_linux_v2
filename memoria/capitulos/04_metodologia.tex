@@ -1,0 +1,89 @@
+\chapter{Metodologia}
+
+\section{Caso de uso industrial}
+
+El caso de uso seleccionado es la deteccion de anomalias en rodamientos de
+motores electricos mediante senales de vibracion. La eleccion permite trabajar
+con datos industriales publicos, etiquetas interpretables y un flujo temporal
+adecuado para ventanas, features y tensores.
+
+\section{Pipeline de datos}
+
+El flujo metodologico para el MVP queda definido como:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+datos .mat crudos
+-> manifiesto del dataset
+-> extraccion de senales
+-> normalizacion de frecuencia de muestreo
+-> perfilado estadistico
+-> limpieza determinista
+-> ventanas temporales
+-> features y tensores
+-> particiones train/validation/test
+-> modelos de anomalias
+-> evaluacion
+-> informe tecnico
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+\section{Manifiesto del dataset}
+
+El primer artefacto metodologico sera un manifiesto con una fila por fichero
+crudo. Este manifiesto conectara los `.mat` originales con el resto del
+pipeline. Las columnas previstas son:
+
+\begin{longtable}{ll}
+\toprule
+Campo & Descripcion \\
+\midrule
+file\_id & identificador del fichero original \\
+dataset & nombre del dataset \\
+source\_path & ruta del fichero crudo \\
+label & clase `normal' o `fault' \\
+fault\_type & tipo de fallo si existe \\
+fault\_diameter\_inch & diametro del defecto \\
+load\_hp & carga del motor \\
+rpm & regimen de giro \\
+sensor\_channel & canal de sensor usado \\
+source\_sample\_rate\_hz & frecuencia de muestreo original \\
+target\_sample\_rate\_hz & frecuencia objetivo del MVP \\
+source\_format & formato original \\
+notes & observaciones \\
+\bottomrule
+\end{longtable}
+
+\section{Extraccion y perfilado}
+
+El canal principal inicial sera `DE\_time`, asociado al acelerometro del lado
+drive-end. El perfilado generara resumenes estadisticos por fichero y por
+etiqueta, incluyendo numero de muestras, canales detectados, valores no finitos,
+media, desviacion tipica, RMS, curtosis, factor de cresta y energia.
+
+\section{Estructuracion temporal}
+
+La frecuencia objetivo inicial sera 12 kHz. Las ventanas candidatas seran de
+2048 o 4096 muestras con solapamiento del 50\%. Esta decision permite comparar
+features tabulares con modelos clasicos y conservar ventanas crudas para
+autoencoders posteriores.
+
+\section{Particiones}
+
+Para evitar fuga de informacion entre ventanas, no se usara un split aleatorio
+ingenuo. La estrategia inicial sera:
+
+\begin{itemize}
+  \item entrenamiento con ventanas normales;
+  \item validacion con ventanas normales retenidas;
+  \item test con ventanas normales retenidas y ventanas con fallo.
+\end{itemize}
+
+\section{Metricas}
+
+Las metricas iniciales seran precision, recall, F1-score, ROC-AUC, PR-AUC, tasa
+de falsos positivos y matriz de confusion. Desde el punto de vista industrial,
+el criterio principal sera mantener alta sensibilidad ante fallos sin disparar
+en exceso los falsos positivos.
