@@ -1,58 +1,58 @@
 \chapter{Arquitectura propuesta}
 
-\section{Principios de diseno}
+\section{Principios de diseño}
 
 La arquitectura se basa en cuatro principios:
 
 \begin{enumerate}
-  \item separar codigo, memoria academica y recursos;
+  \item separar código, memoria académica y recursos;
   \item mantener los datos crudos inmutables;
   \item representar decisiones mediante contratos estructurados;
-  \item ejecutar transformaciones mediante modulos Python deterministas.
+  \item ejecutar transformaciones mediante módulos Python deterministas.
 \end{enumerate}
 
-\section{Separacion entre agentes y ejecutores}
+\section{Separación entre agentes y ejecutores}
 
-Los agentes no escriben ni ejecutan codigo arbitrario sobre los datos. Su papel
+Los agentes no escriben ni ejecutan código arbitrario sobre los datos. Su papel
 es proponer configuraciones, interpretar perfiles y decidir la siguiente fase
 del flujo. Los ejecutores leen artefactos desde disco, aplican operaciones
-deterministas y devuelven rutas, metricas y logs.
+deterministas y devuelven rutas, métricas y logs.
 
 \section{Nodos previstos}
 
-El grafo minimo previsto contiene:
+El grafo mínimo previsto contiene:
 
 \begin{itemize}
   \item supervisor;
   \item agente limpiador;
   \item ejecutor de limpieza;
   \item agente estructurador;
-  \item ejecutor de estructuracion;
+  \item ejecutor de estructuración;
   \item agente modelador;
   \item ejecutor de modelado;
   \item evaluador;
   \item redactor;
-  \item revision humana para trabajos costosos.
+  \item revisión humana para trabajos costosos.
 \end{itemize}
 
 \section{Estado global}
 
-El estado global de LangGraph no almacenara datasets completos. Debe contener
-rutas, resumenes y artefactos:
+El estado global de LangGraph no almacenará datasets completos. Debe contener
+rutas, resúmenes y artefactos:
 
 \begin{itemize}
-  \item identificador de ejecucion;
+  \item identificador de ejecución;
   \item contexto del proyecto;
   \item rutas de datos crudos, perfiles, datos limpios, tensores e informes;
-  \item configuraciones de limpieza, estructuracion y modelado;
-  \item metricas y evaluacion;
+  \item configuraciones de limpieza, estructuración y modelado;
+  \item métricas y evaluación;
   \item errores, aprobaciones humanas y artefactos generados.
 \end{itemize}
 
-En la implementacion inicial se ha definido un modelo canonico `TFMStateModel`
+En la implementación inicial se ha definido un modelo canónico `TFMStateModel`
 validado con Pydantic y una vista `TFMState` basada en `TypedDict` para su uso
-en LangGraph. Esta separacion permite validar contratos de forma estricta antes
-de entregar el estado al grafo y, al mismo tiempo, mantener una representacion
+en LangGraph. Esta separación permite validar contratos de forma estricta antes
+de entregar el estado al grafo y, al mismo tiempo, mantener una representación
 ligera y serializable.
 
 El estado inicial del caso CWRU queda fijado en la fase `dataset\_manifest`,
@@ -66,38 +66,38 @@ como valores nulos hasta que los ejecutores correspondientes las generen.
 Los contratos iniciales incluyen:
 
 \begin{itemize}
-  \item `ProjectContext`, que define dominio, maquina, dataset, objetivo,
+  \item `ProjectContext`, que define dominio, máquina, dataset, objetivo,
         canal principal y frecuencia objetivo;
   \item `DatasetManifestRow` y `DatasetManifest`, que formalizan el inventario
         de ficheros crudos y sus etiquetas;
-  \item `DatasetProfileSummary`, que resume el perfil sin almacenar senales;
+  \item `DatasetProfileSummary`, que resume el perfil sin almacenar señales;
   \item `CleaningConfig`, `StructuringConfig` y `ModelingConfig`, que fijan las
-        configuraciones que podran proponer los agentes;
+        configuraciones que podrán proponer los agentes;
   \item `SupervisorDecision`, `CleaningDecision`, `StructuringDecision`,
         `ModelingDecision`, `EvaluationDecision` y `ReportDecision`, que
         estructuran las respuestas de los agentes;
   \item `ExecutorResult` y resultados especializados, que normalizan las
         salidas de los ejecutores deterministas;
-  \item `MetricsReport` y `EvaluationResult`, que estructuran la evaluacion;
+  \item `MetricsReport` y `EvaluationResult`, que estructuran la evaluación;
   \item `PipelineError`, `HumanApproval` y `ArtifactRef`, que mantienen
         trazabilidad de errores, revisiones y artefactos.
 \end{itemize}
 
-Estos esquemas aplican validacion estricta y rechazan campos no declarados. Por
+Estos esquemas aplican validación estricta y rechazan campos no declarados. Por
 ejemplo, una fila normal del manifiesto debe declarar los campos de fallo como
-nulos, mientras que una fila con fallo debe incluir tipo de fallo y diametro. De
-forma analoga, un resultado de ejecutor con estado fallido debe incluir un error
-estructurado, y una decision no terminal del supervisor debe indicar el siguiente
+nulos, mientras que una fila con fallo debe incluir tipo de fallo y diámetro. De
+forma análoga, un resultado de ejecutor con estado fallido debe incluir un error
+estructurado, y una decisión no terminal del supervisor debe indicar el siguiente
 nodo del grafo.
 
 \section{Trazabilidad}
 
-Cada ejecucion debe permitir responder:
+Cada ejecución debe permitir responder:
 
 \begin{itemize}
-  \item que datos se usaron;
-  \item que configuracion fue validada;
+  \item qué datos se usaron;
+  \item qué configuración fue validada;
   \item que ejecutor produjo cada artefacto;
-  \item que metricas se obtuvieron;
-  \item que limitaciones permanecen.
+  \item qué métricas se obtuvieron;
+  \item qué limitaciones permanecen.
 \end{itemize}

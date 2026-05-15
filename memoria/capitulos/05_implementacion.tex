@@ -1,17 +1,17 @@
-\chapter{Implementacion}
+\chapter{Implementación}
 
 \section{Estructura del repositorio}
 
-La implementacion se organiza en tres areas:
+La implementación se organiza en tres áreas:
 
 \begin{itemize}
-  \item `codigo/`: aplicacion, tests, datos, modelos, informes y documentacion
-        tecnica;
+  \item `codigo/`: aplicación, tests, datos, modelos, informes y documentación
+        técnica;
   \item `memoria/`: documento LaTeX del TFM;
   \item `recursos/`: PDFs, referencias y diagramas auxiliares.
 \end{itemize}
 
-\section{Estado actual}
+\section{Estado Actual}
 
 Hasta este punto se ha creado la estructura inicial de directorios, se han
 descargado los datasets crudos, se ha definido el flujo de datos del MVP y se
@@ -25,19 +25,19 @@ El estado global se ha dividido en dos capas:
 
 \begin{itemize}
   \item `codigo/app/schemas/state.py`: modelos Pydantic estrictos para validar
-        el estado, configuraciones, metricas, errores y artefactos;
+        el estado, configuraciones, métricas, errores y artefactos;
   \item `codigo/app/graph/state.py`: `TypedDict` usado por LangGraph,
         validador de estado e inicializador del caso CWRU.
 \end{itemize}
 
-El inicializador `create\_initial\_cwru\_state` crea una ejecucion preparada para
-generar el manifiesto del dataset. El estado resultante no contiene senales ni
+El inicializador `create\_initial\_cwru\_state` crea una ejecución preparada para
+generar el manifiesto del dataset. El estado resultante no contiene señales ni
 arrays, solo rutas, contexto experimental y campos reservados para artefactos
 futuros.
 
 \section{Contratos Pydantic implementados}
 
-Se han anadido tres grupos de contratos:
+Se han añadido tres grupos de contratos:
 
 \begin{itemize}
   \item `codigo/app/schemas/dataset.py`: manifiesto del dataset, canales y
@@ -48,9 +48,9 @@ Se han anadido tres grupos de contratos:
         especializados de ejecutores deterministas.
 \end{itemize}
 
-Estos contratos consolidan la regla arquitectonica de que los agentes producen
+Estos contratos consolidan la regla arquitectónica de que los agentes producen
 configuraciones o decisiones validables, mientras que los ejecutores devuelven
-rutas, metricas, errores y referencias a artefactos, pero no datos pesados.
+rutas, métricas, errores y referencias a artefactos, pero no datos pesados.
 
 \section{Artefactos previstos}
 
@@ -67,7 +67,7 @@ rutas, metricas, errores y referencias a artefactos, pero no datos pesados.
 
 \section{Ejecutor de manifiesto}
 
-Se ha implementado el primer ejecutor determinista del pipeline, el modulo
+Se ha implementado el primer ejecutor determinista del pipeline, el módulo
 `dataset\_manifest.py`. Su responsabilidad es generar el artefacto:
 
 \begin{center}
@@ -80,26 +80,102 @@ codigo/data/interim/cwru_bearing/manifest.csv
 
 a partir de los ficheros `.mat` crudos de CWRU.
 
-El ejecutor no carga senales completas. Solo inspecciona los nombres de fichero
+El ejecutor no carga señales completas. Solo inspecciona los nombres de fichero
 y aplica un mapeo controlado de metadatos CWRU: carga, RPM, tipo de fallo,
-diametro y posicion del fallo exterior cuando corresponde. El manifiesto
+diámetro y posición del fallo exterior cuando corresponde. El manifiesto
 generado conserva la frecuencia original de cada fichero y fija una frecuencia
 objetivo de 12 kHz para el MVP.
 
-La ejecucion real sobre los datos descargados ha generado 64 registros: 4
+La ejecución real sobre los datos descargados ha generado 64 registros: 4
 ficheros normales y 60 ficheros con fallo. El fichero resultante contiene 65
-lineas incluyendo la cabecera.
+líneas incluyendo la cabecera.
+
+\section{Ejecutor de perfilado}
+
+Se ha implementado el perfilador determinista `data\_profiler.py`. Este ejecutor
+lee el manifiesto, inspecciona los ficheros `.mat` y genera:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/data/interim/cwru_bearing/profile.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El perfil contiene metadatos y estadísticas por canal: número de muestras,
+valores no finitos, mínimo, máximo, media, desviación típica, RMS, curtosis y
+energía. No almacena arrays ni señales completas.
+
+La ejecución real ha perfilado 64 ficheros. El resumen agregado contiene 4
+ficheros normales, 60 ficheros con fallo, frecuencias de muestreo de 48 kHz y
+12 kHz, y los canales detectados `BA\_time`, `DE\_time`, `FE\_time` y `RPM`.
+
+\section{Ejecutor de Limpieza}
+
+Se ha implementado el ejecutor determinista `cleaning.py`. Este ejecutor lee el
+manifiesto y el perfil, extrae el canal principal configurado, elimina valores
+no finitos, remuestrea la señal a 12 kHz cuando procede y guarda una señal
+limpia comprimida por fichero:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/data/processed/cwru_bearing/clean_signals/
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+También genera un resumen de auditoría en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/data/processed/cwru_bearing/cleaning_summary.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La ejecución real ha producido 64 ficheros `.npz` comprimidos. Los cuatro
+ficheros normales se han remuestreado de 48 kHz a 12 kHz; los ficheros de fallo
+ya estaban a 12 kHz. El estado del grafo conserva únicamente la ruta del
+directorio limpio y las referencias a artefactos, no las señales.
+
+\section{Ejecutor de Estructuración Temporal}
+
+Se ha implementado el ejecutor determinista `structuring.py`. Este ejecutor lee
+las señales limpias, valida que el canal y la frecuencia coincidan con la
+configuración, genera ventanas temporales con tamaño 2048 y solapamiento del
+50\%, calcula features temporales iniciales y crea particiones reproducibles a
+nivel de fichero.
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/data/tensors/cwru_bearing/windows_features.csv
+codigo/data/tensors/cwru_bearing/windows_raw.npz
+codigo/data/tensors/cwru_bearing/splits.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La estrategia de partición evita mezclar ventanas de un mismo fichero entre
+subconjuntos. Las ventanas normales se reparten entre entrenamiento,
+validación y test, mientras que las ventanas con fallo se reservan para test.
+La ejecución real ha generado 7460 ventanas de 2048 muestras: 175 de
+entrenamiento, 117 de validación y 7168 de test. El tensor crudo tiene forma
+`(7460, 2048)` y el directorio de tensores ocupa aproximadamente 22 MB.
 
 \section{Dependencias}
 
 Se ha creado `requirements.txt` como punto inicial para construir el entorno de
 Miniconda `tfm\_v2`, fijado sobre Python 3.11. Incluye dependencias de contratos
-y grafo, procesamiento de datos, modelos clasicos, visualizacion tecnica y
-verificacion.
+y grafo, procesamiento de datos, modelos clásicos, visualización técnica y
+verificación.
 
-\section{Verificacion actual}
+\section{Verificación Actual}
 
-La verificacion de los contratos se ha realizado con tests unitarios en el
+La verificación de los contratos se ha realizado con tests unitarios en el
 entorno objetivo:
 
 \begin{center}
@@ -110,14 +186,13 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 \end{minipage}
 \end{center}
 
-Las pruebas validan la creacion del estado inicial CWRU, serializacion JSON,
-rechazo de campos no declarados, restricciones de configuraciones y metricas,
+Las pruebas validan la creación del estado inicial CWRU, serialización JSON,
+rechazo de campos no declarados, restricciones de configuraciones y métricas,
 coherencia del manifiesto, decisiones de agentes, resultados de ejecutores y
-generacion del manifiesto CWRU. En esta fase se han ejecutado 27 tests
-correctamente.
+generación del manifiesto, perfilado, limpieza y estructuración temporal CWRU.
+En esta fase se han ejecutado 36 tests correctamente.
 
-\section{Siguiente paso de implementacion}
+\section{Siguiente Paso de Implementación}
 
-El siguiente avance tecnico sera implementar el perfilador de datos, que leera
-el manifiesto generado, inspeccionara los canales reales de cada fichero `.mat`
-y producira `codigo/data/interim/cwru\_bearing/profile.json`.
+El siguiente avance técnico será implementar el modelado base de anomalías,
+empezando por Isolation Forest sobre las features temporales generadas.

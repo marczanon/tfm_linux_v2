@@ -2,7 +2,7 @@
 
 Plantilla inicial de la memoria del TFM.
 
-## Compilacion
+## Compilación
 
 Desde esta carpeta:
 
@@ -18,15 +18,15 @@ El PDF resultante se genera como `main.pdf`.
 ## Estructura
 
 - `main.tex`: documento principal.
-- `capitulos/`: capitulos de la memoria.
+- `capitulos/`: capítulos de la memoria.
 - `bibliografia/referencias.bib`: referencias BibTeX.
-- `figuras/`, `tablas/`, `anexos/`: artefactos academicos auxiliares.
+- `figuras/`, `tablas/`, `anexos/`: artefactos académicos auxiliares.
 
-## Criterio de actualizacion
+## Criterio de actualización
 
-Cada avance tecnico debe reflejar:
+Cada avance técnico debe reflejar:
 
 - que se ha hecho;
-- por que se ha elegido;
-- como se ha validado;
+- por qué se ha elegido;
+- cómo se ha validado;
 - que limitaciones quedan.

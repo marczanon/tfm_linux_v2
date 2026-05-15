@@ -90,25 +90,26 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 23 tests
+Ran 36 tests
 OK
 ```
 
 ## Siguiente entrega implementable
 
-El primer ejecutor determinista ya esta implementado para el manifiesto CWRU.
-El siguiente paso es el perfilador:
+Los ejecutores de manifiesto, perfilado, limpieza y estructuracion temporal ya
+estan implementados. El siguiente paso es el ejecutor de modelado base:
 
 ```text
-codigo/app/executors/data_profiler.py
-codigo/tests/test_data_profiler.py
+codigo/app/executors/modeling.py
+codigo/tests/test_modeling_executor.py
 ```
 
-Ese ejecutor debe generar:
+Ese ejecutor debe consumir:
 
 ```text
-codigo/data/interim/cwru_bearing/profile.json
+codigo/data/tensors/cwru_bearing/splits.json
+codigo/data/tensors/cwru_bearing/windows_features.csv
 ```
 
-y devolver un `ProfileResult` que pueda actualizar el `TFMState` con
-`profile_path` y un `ArtifactRef`.
+y devolver un `ModelingResult` con rutas a modelos, predicciones y referencias
+a artefactos.

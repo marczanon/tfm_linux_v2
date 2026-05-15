@@ -266,16 +266,18 @@ aplicaran esas configuraciones y devolveran rutas, metricas y logs.
 
 ## Siguiente entrega implementable
 
-El ejecutor de manifiesto ya esta implementado. La siguiente tarea tecnica
-deberia ser crear el perfilador de datos:
+Los ejecutores de manifiesto, perfilado, limpieza y estructuracion temporal ya
+estan implementados. La siguiente tarea tecnica deberia ser crear el ejecutor
+de modelado base:
 
 ```text
-codigo/app/executors/data_profiler.py
-codigo/tests/test_data_profiler.py
+codigo/app/executors/modeling.py
+codigo/tests/test_modeling_executor.py
 ```
 
-Este ejecutor debe leer `manifest.csv`, inspeccionar los canales reales de los
-`.mat` y producir `codigo/data/interim/cwru_bearing/profile.json`.
+Este ejecutor debe entrenar modelos iniciales de deteccion de anomalias sobre
+`windows_features.csv`, guardar modelos y predicciones, y producir un resultado
+estructurado que avance el estado hacia evaluacion.
 
 ## Fuentes
 

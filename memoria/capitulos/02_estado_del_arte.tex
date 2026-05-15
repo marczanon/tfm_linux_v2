@@ -1,48 +1,48 @@
 \chapter{Estado del arte}
 
-\section{Mantenimiento predictivo y deteccion de anomalias}
+\section{Mantenimiento predictivo y detección de anomalías}
 
-Esta seccion desarrollara el contexto de mantenimiento predictivo, monitorizacion
-de condicion y deteccion de anomalias en maquinaria rotativa.
+Esta sección desarrollará el contexto de mantenimiento predictivo, monitorización
+de condición y detección de anomalías en maquinaria rotativa.
 
 Aspectos a cubrir:
 
 \begin{itemize}
   \item diferencias entre mantenimiento correctivo, preventivo y predictivo;
-  \item papel de las senales de vibracion en rodamientos y motores;
+  \item papel de las señales de vibración en rodamientos y motores;
   \item fallos comunes: pista interior, pista exterior, bola y desbalanceo;
-  \item diferencias entre deteccion de anomalias, diagnostico y pronostico.
+  \item diferencias entre detección de anomalías, diagnóstico y pronóstico.
 \end{itemize}
 
-\section{Modelos de deteccion de anomalias}
+\section{Modelos de detección de anomalías}
 
-El MVP comparara primero modelos clasicos y reproducibles:
+El MVP comparará primero modelos clásicos y reproducibles:
 
 \begin{itemize}
   \item Isolation Forest;
   \item One-Class SVM;
   \item Local Outlier Factor;
-  \item PCA con error de reconstruccion.
+  \item PCA con error de reconstrucción.
 \end{itemize}
 
-Los autoencoders densos y modelos recurrentes se consideraran en fases
-posteriores, cuando el pipeline de tensores este validado.
+Los autoencoders densos y modelos recurrentes se considerarán en fases
+posteriores, cuando el pipeline de tensores esté validado.
 
 \section{Sistemas multiagente aplicados a pipelines de datos}
 
-Esta seccion describira el uso de arquitecturas multiagente para dividir
+Esta sección describirá el uso de arquitecturas multiagente para dividir
 responsabilidades entre nodos especializados. El enfoque del proyecto separa:
 
 \begin{itemize}
   \item decisiones de alto nivel tomadas por agentes;
-  \item validacion de contratos mediante esquemas estrictos;
-  \item ejecucion determinista de transformaciones sobre datos;
-  \item auditoria de rutas, configuraciones, metricas y artefactos.
+  \item validación de contratos mediante esquemas estrictos;
+  \item ejecución determinista de transformaciones sobre datos;
+  \item auditoría de rutas, configuraciones, métricas y artefactos.
 \end{itemize}
 
-\section{Datasets publicos de referencia}
+\section{Datasets públicos de referencia}
 
-El dataset principal sera CWRU Bearing Dataset
+El dataset principal será CWRU Bearing Dataset
 \cite{cwru_bearing_data_center,cwru_normal_baseline,cwru_12k_drive_end}. NASA
-IMS Bearing Dataset se reserva como extension para escenarios de degradacion
+IMS Bearing Dataset se reserva como extensión para escenarios de degradación
 temporal \cite{nasa_pcoe_repository,nasa_ims_bearings_zip}.

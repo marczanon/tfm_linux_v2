@@ -59,7 +59,7 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 27 tests
+Ran 36 tests
 OK
 ```
 
@@ -82,9 +82,11 @@ El fichero generado tiene 65 lineas contando cabecera.
 
 ## Siguiente paso
 
-Implementar el perfilador de datos, que debe leer `manifest.csv`, inspeccionar
-los canales reales de cada `.mat` y generar:
+El perfilador, el ejecutor de limpieza y la estructuracion temporal ya estan
+implementados. El siguiente paso es implementar el modelado base, que debe
+generar modelos y predicciones a partir de:
 
 ```text
-codigo/data/interim/cwru_bearing/profile.json
+codigo/data/tensors/cwru_bearing/windows_features.csv
+codigo/data/tensors/cwru_bearing/splits.json
 ```

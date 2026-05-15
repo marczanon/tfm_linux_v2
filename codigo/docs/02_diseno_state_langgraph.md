@@ -144,26 +144,26 @@ La verificacion actual cubre:
 Comando usado:
 
 ```bash
-python -m unittest discover codigo/tests
+conda run -n tfm_v2 python -m unittest discover codigo/tests
 ```
 
 Resultado:
 
 ```text
-Ran 6 tests
+Ran 36 tests
 OK
 ```
 
 ## Siguiente entrega implementable
 
-El siguiente paso deberia ser el generador de manifiesto:
+Los ejecutores de manifiesto, perfilado, limpieza y estructuracion temporal ya
+estan implementados. El siguiente paso deberia ser el ejecutor de modelado base:
 
 ```text
-codigo/app/schemas/dataset.py
-codigo/app/executors/dataset_manifest.py
-codigo/tests/test_dataset_manifest.py
+codigo/app/executors/modeling.py
+codigo/tests/test_modeling_executor.py
 ```
 
-El ejecutor debera leer los `.mat` crudos de CWRU, construir
-`manifest.csv`, registrar el artefacto en el estado y avanzar la fase a
-`profiling`.
+El ejecutor debera leer `windows_features.csv`, entrenar modelos iniciales,
+guardar modelos y predicciones, y actualizar el estado con referencias a
+artefactos de modelado.

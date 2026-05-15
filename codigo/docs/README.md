@@ -14,3 +14,9 @@ Documentos iniciales:
   decisiones de agentes y resultados de ejecutores.
 - `04_ejecutor_manifest_cwru.md`: implementacion y verificacion del ejecutor
   determinista que genera `manifest.csv`.
+- `05_ejecutor_profile_cwru.md`: implementacion y verificacion del perfilador
+  determinista que genera `profile.json`.
+- `06_ejecutor_limpieza_cwru.md`: implementacion y verificacion del ejecutor
+  determinista que genera senales limpias.
+- `07_ejecutor_estructuracion_cwru.md`: implementacion y verificacion del
+  ejecutor que genera ventanas, features y particiones reproducibles.
