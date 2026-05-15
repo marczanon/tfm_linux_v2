@@ -1,0 +1,20 @@
+# Entorno objetivo: Python 3.11, conda env tfm_v2.
+
+# Contratos y grafo multiagente
+pydantic>=2.12
+langgraph>=0.2
+
+# Procesamiento de datos y senales
+numpy>=2.0
+pandas>=2.2
+scipy>=1.14
+
+# Modelos base de deteccion de anomalias
+scikit-learn>=1.6
+joblib>=1.4
+
+# Informes y visualizacion tecnica
+matplotlib>=3.9
+
+# Verificacion
+pytest>=8.3

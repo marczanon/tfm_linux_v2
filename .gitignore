@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Entornos locales
+.venv/
+venv/
+env/
+.env
+
+# Datos y artefactos pesados generados
+codigo/data/raw/*
+!codigo/data/raw/README.md
+codigo/data/interim/*
+codigo/data/processed/*
+codigo/data/tensors/*
+codigo/models/*
+codigo/reports/*
+
+# LaTeX
+memoria/*.aux
+memoria/*.bbl
+memoria/*.blg
+memoria/*.lof
+memoria/*.log
+memoria/*.lot
+memoria/*.out
+memoria/*.toc
+memoria/*.fls
+memoria/*.fdb_latexmk
+memoria/*.synctex.gz
+memoria
