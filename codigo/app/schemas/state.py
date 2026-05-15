@@ -195,6 +195,7 @@ class ArtifactRef(StrictBaseModel):
         "tensors",
         "splits",
         "model",
+        "predictions",
         "metrics",
         "report",
         "log",

@@ -6,16 +6,19 @@ Esta sección recogerá las métricas de cada experimento.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lrrrrr}
+\begin{tabular}{lrrrrrr}
 \toprule
-Modelo & Precision & Recall & F1 & ROC-AUC & PR-AUC \\
+Modelo & Precision & Recall & F1 & ROC-AUC & PR-AUC & FPR \\
 \midrule
-Pendiente & -- & -- & -- & -- & -- \\
+Isolation Forest & 0.9997 & 1.0000 & 0.9999 & 1.0000 & 1.0000 & 0.0171 \\
 \bottomrule
 \end{tabular}
-\caption{Plantilla de resultados para modelos de detección de anomalías.}
+\caption{Resultados preliminares del baseline en el split de test CWRU.}
 \label{tab:resultados_modelos}
 \end{table}
+
+La matriz de confusión asociada al split de test es: 115 verdaderos negativos,
+2 falsos positivos, 0 falsos negativos y 7051 verdaderos positivos.
 
 \section{Análisis cualitativo}
 
@@ -26,3 +29,9 @@ carga del motor, robustez por tipo de fallo y trazabilidad de artefactos.
 
 Cada resultado deberá acompañarse de limitaciones, supuestos y riesgos de
 generalización industrial.
+
+Los resultados iniciales se han obtenido sobre CWRU Bearing Dataset, un entorno
+controlado y con diferencias claras entre condiciones normales y de fallo. Por
+ello, las métricas deben interpretarse como una validación del pipeline y del
+baseline, no como una garantía de rendimiento en escenarios industriales no
+vistos.

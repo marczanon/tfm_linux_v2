@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.io import loadmat
 
 from codigo.app.schemas.executor_results import ProfileResult
 from codigo.app.schemas.state import ArtifactRef, PipelineError
+from codigo.app.services.signal_adapters import read_signal_channels
 
 
 def generate_data_profile(
@@ -109,12 +109,9 @@ def _profile_file(row: dict[str, str]) -> dict[str, Any]:
         raise FileNotFoundError(path)
 
     channels = {
-        channel: _channel_stats(key, value)
-        for key, value in loadmat(path).items()
-        if (channel := _channel_name(key)) is not None
+        name: _channel_stats(channel.source_key, channel.values, channel.shape)
+        for name, channel in read_signal_channels(path).items()
     }
-    if not channels:
-        raise ValueError(f"no known CWRU channels found in {path}")
 
     return {
         "file_id": row["file_id"],
@@ -129,24 +126,12 @@ def _profile_file(row: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def _channel_name(mat_key: str) -> str | None:
-    if mat_key.endswith("_DE_time"):
-        return "DE_time"
-    if mat_key.endswith("_FE_time"):
-        return "FE_time"
-    if mat_key.endswith("_BA_time"):
-        return "BA_time"
-    if mat_key.endswith("RPM"):
-        return "RPM"
-    return None
-
-
-def _channel_stats(source_key: str, values: np.ndarray) -> dict[str, Any]:
+def _channel_stats(source_key: str, values: np.ndarray, shape: tuple[int, ...]) -> dict[str, Any]:
     array = np.asarray(values, dtype=float).ravel()
     finite = array[np.isfinite(array)]
     stats = {
         "source_key": source_key,
-        "shape": list(values.shape),
+        "shape": list(shape),
         "n_samples": int(array.size),
         "non_finite_count": int(array.size - finite.size),
     }

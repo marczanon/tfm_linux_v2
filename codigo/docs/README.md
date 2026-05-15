@@ -20,3 +20,9 @@ Documentos iniciales:
   determinista que genera senales limpias.
 - `07_ejecutor_estructuracion_cwru.md`: implementacion y verificacion del
   ejecutor que genera ventanas, features y particiones reproducibles.
+- `08_ejecutor_modelado_cwru.md`: implementacion y verificacion del primer
+  modelo base de deteccion de anomalias con Isolation Forest.
+- `09_ejecutor_evaluacion_cwru.md`: implementacion y verificacion del ejecutor
+  de metricas sobre predicciones.
+- `10_adaptadores_entrada.md`: frontera ligera para leer distintos formatos de
+  senal sin acoplar los ejecutores al tipo de fichero.

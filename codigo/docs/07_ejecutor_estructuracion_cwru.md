@@ -76,7 +76,7 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 36 tests
+Ran 48 tests
 OK
 ```
 
@@ -102,12 +102,12 @@ tamano aproximado = 22 MB
 
 ## Siguiente paso
 
-Implementar los modelos base de deteccion de anomalias:
+El modelado base y la evaluacion ya estan implementados. El siguiente paso es
+el grafo minimo:
 
 ```text
-codigo/app/executors/modeling.py
-codigo/tests/test_modeling_executor.py
+codigo/app/graph/pipeline.py
+codigo/tests/test_graph_pipeline.py
 ```
 
-El primer modelo recomendado es Isolation Forest sobre `windows_features.csv`,
-entrenando con ventanas normales de train y evaluando contra validation/test.
+Debe conectar las fases deterministas y preparar los nodos agenticos futuros.

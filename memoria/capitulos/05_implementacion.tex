@@ -65,6 +65,21 @@ rutas, métricas, errores y referencias a artefactos, pero no datos pesados.
   \item `codigo/models/cwru\_bearing/`.
 \end{itemize}
 
+\section{Adaptadores de Entrada}
+
+Para reducir el acoplamiento al formato CWRU se ha introducido una capa ligera
+de adaptadores en `codigo/app/services/signal\_adapters.py`. Esta capa expone
+dos operaciones comunes: leer todos los canales numéricos de un fichero y cargar
+un canal concreto como vector. Los ejecutores de perfilado y limpieza usan ahora
+esta frontera en lugar de leer directamente ficheros `.mat`.
+
+La implementación inicial soporta `.mat`, `.csv`, `.txt`, `.tsv` y `.npz`. En
+el caso de CWRU, el adaptador reconoce los canales `DE\_time`, `FE\_time`,
+`BA\_time` y `RPM`; en formatos tabulares, interpreta columnas numéricas como
+canales. Para incorporar un nuevo origen, como NASA IMS, el objetivo será crear
+o ampliar un adaptador de entrada y mantener estable el resto del pipeline:
+perfilado, limpieza, estructuración, modelado y evaluación.
+
 \section{Ejecutor de manifiesto}
 
 Se ha implementado el primer ejecutor determinista del pipeline, el módulo
@@ -166,6 +181,61 @@ La ejecución real ha generado 7460 ventanas de 2048 muestras: 175 de
 entrenamiento, 117 de validación y 7168 de test. El tensor crudo tiene forma
 `(7460, 2048)` y el directorio de tensores ocupa aproximadamente 22 MB.
 
+\section{Ejecutor de Modelado Base}
+
+Se ha implementado el ejecutor determinista `modeling.py` con el primer modelo
+base de detección de anomalías: Isolation Forest. El modelo se entrena
+únicamente con ventanas normales del subconjunto de entrenamiento y consume las
+features temporales generadas por la fase anterior.
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/models/cwru_bearing/isolation_forest.joblib
+codigo/models/cwru_bearing/predictions.csv
+codigo/models/cwru_bearing/modeling_summary.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El artefacto `joblib` conserva el modelo entrenado, las columnas usadas y el
+umbral de decisión. Las predicciones guardan, por cada ventana, identificador,
+fichero original, partición, etiqueta real, puntuación de anomalía, umbral y
+predicción binaria. Las métricas finales no se calculan en este ejecutor, sino
+que se reservan para la fase de evaluación.
+
+La ejecución real ha entrenado el modelo con 175 ventanas normales y ha
+generado 7460 predicciones. El umbral estimado ha sido 0.6334 y el resumen de
+modelado registra 403 ventanas predichas como normales y 7057 como anómalas.
+Estos conteos son una salida preliminar del modelo, no una evaluación final de
+rendimiento.
+
+\section{Ejecutor de Evaluación}
+
+Se ha implementado el ejecutor determinista `evaluation.py`. Este módulo lee las
+predicciones del modelo, compara la etiqueta binaria real con la predicción de
+anomalía y calcula métricas técnicas por partición. La partición principal para
+el MVP es `test`.
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/cwru_bearing/evaluation/metrics.json
+codigo/reports/cwru_bearing/evaluation/evaluation_summary.md
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La ejecución real sobre el split de test ha obtenido precision 0.9997, recall
+1.0000, F1-score 0.9999, ROC-AUC 1.0000, PR-AUC 1.0000 y una tasa de falsos
+positivos de 0.0171. La matriz de confusión ha sido: 115 verdaderos negativos,
+2 falsos positivos, 0 falsos negativos y 7051 verdaderos positivos.
+
+Estos resultados deben interpretarse como validación del pipeline y del
+baseline inicial sobre un benchmark controlado. No constituyen todavía una
+garantía de generalización industrial, que se deberá analizar con validaciones
+más exigentes y, posteriormente, con otros datasets como NASA IMS.
+
 \section{Dependencias}
 
 Se ha creado `requirements.txt` como punto inicial para construir el entorno de
@@ -189,10 +259,13 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Las pruebas validan la creación del estado inicial CWRU, serialización JSON,
 rechazo de campos no declarados, restricciones de configuraciones y métricas,
 coherencia del manifiesto, decisiones de agentes, resultados de ejecutores y
-generación del manifiesto, perfilado, limpieza y estructuración temporal CWRU.
-En esta fase se han ejecutado 36 tests correctamente.
+generación del manifiesto, perfilado, limpieza, estructuración temporal y
+modelado base y evaluación CWRU. También validan los adaptadores de entrada para
+formatos `.mat` y `.csv`. En esta fase se han ejecutado 48 tests
+correctamente.
 
 \section{Siguiente Paso de Implementación}
 
-El siguiente avance técnico será implementar el modelado base de anomalías,
-empezando por Isolation Forest sobre las features temporales generadas.
+El siguiente avance técnico será montar el grafo LangGraph mínimo, encadenando
+los ejecutores deterministas y preparando los puntos donde después entrarán los
+agentes especializados.

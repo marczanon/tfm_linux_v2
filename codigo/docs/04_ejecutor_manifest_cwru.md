@@ -59,7 +59,7 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 36 tests
+Ran 48 tests
 OK
 ```
 
@@ -82,11 +82,11 @@ El fichero generado tiene 65 lineas contando cabecera.
 
 ## Siguiente paso
 
-El perfilador, el ejecutor de limpieza y la estructuracion temporal ya estan
-implementados. El siguiente paso es implementar el modelado base, que debe
-generar modelos y predicciones a partir de:
+El perfilador, el ejecutor de limpieza, la estructuracion temporal, el modelado
+base y la evaluacion ya estan implementados. El siguiente paso es montar el
+grafo minimo:
 
 ```text
-codigo/data/tensors/cwru_bearing/windows_features.csv
-codigo/data/tensors/cwru_bearing/splits.json
+codigo/app/graph/pipeline.py
+codigo/tests/test_graph_pipeline.py
 ```

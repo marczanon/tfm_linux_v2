@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.io import loadmat
 from scipy.signal import resample_poly
 
 from codigo.app.schemas.executor_results import CleaningResult
 from codigo.app.schemas.state import ArtifactRef, CleaningConfig, PipelineError
+from codigo.app.services.signal_adapters import load_signal_channel
 
 
 DEFAULT_CLEANING_CONFIG = CleaningConfig(
@@ -128,7 +128,7 @@ def _clean_row(
     output_dir: Path,
     config: CleaningConfig,
 ) -> dict[str, Any]:
-    raw = _load_channel(Path(row["source_path"]), row["sensor_channel"])
+    raw = load_signal_channel(row["source_path"], row["sensor_channel"])
     cleaned, removed = _clean_signal(raw, int(row["source_sample_rate_hz"]), config)
     sample_rate = config.resample_to_hz or int(row["source_sample_rate_hz"])
     output_path = output_dir / f"{row['file_id']}.npz"
@@ -154,21 +154,6 @@ def _clean_row(
         "n_samples_out": int(cleaned.size),
         "non_finite_removed": removed,
     }
-
-
-def _load_channel(path: Path, channel: str) -> np.ndarray:
-    suffix = {
-        "DE_time": "_DE_time",
-        "FE_time": "_FE_time",
-        "BA_time": "_BA_time",
-    }.get(channel)
-    if suffix is None:
-        raise ValueError(f"unsupported signal channel: {channel}")
-
-    for key, value in loadmat(path).items():
-        if key.endswith(suffix):
-            return np.asarray(value, dtype=float).ravel()
-    raise ValueError(f"channel {channel} not found in {path}")
 
 
 def _clean_signal(

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from scipy.io import savemat
 
 from codigo.app.executors.cleaning import clean_dataset, generate_clean_signals
@@ -116,6 +117,40 @@ class CleaningExecutorTests(unittest.TestCase):
         self.assertEqual(result.n_files_cleaned, 1)
         self.assertEqual(result.state_updates["clean_path"], output_dir.as_posix())
         self.assertEqual(len(result.artifacts), 2)
+
+    def test_clean_dataset_uses_csv_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            csv_path = base / "signals.csv"
+            manifest_path = base / "manifest.csv"
+            profile_path = base / "profile.json"
+            output_dir = base / "clean"
+            pd.DataFrame({"sensor_a": [1.0, np.nan, 3.0, 5.0]}).to_csv(csv_path, index=False)
+            write_manifest(manifest_path, csv_path, sample_rate=4)
+            with manifest_path.open(encoding="utf-8") as file:
+                rows = list(csv.DictReader(file))
+            rows[0]["sensor_channel"] = "sensor_a"
+            rows[0]["source_format"] = "csv"
+            with manifest_path.open("w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=FIELDS)
+                writer.writeheader()
+                writer.writerows(rows)
+            write_profile(profile_path)
+
+            summary = clean_dataset(
+                manifest_path,
+                profile_path,
+                output_dir,
+                CleaningConfig(
+                    strategy_id="csv_clean",
+                    remove_non_finite=True,
+                    resample_to_hz=2,
+                    audit_log_path=(base / "summary.json").as_posix(),
+                ),
+            )
+
+        self.assertEqual(summary["files"][0]["channel"], "sensor_a")
+        self.assertEqual(summary["files"][0]["non_finite_removed"], 1)
 
     def test_profile_manifest_mismatch_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

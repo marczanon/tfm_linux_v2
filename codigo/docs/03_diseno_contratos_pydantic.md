@@ -90,26 +90,20 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 36 tests
+Ran 48 tests
 OK
 ```
 
 ## Siguiente entrega implementable
 
-Los ejecutores de manifiesto, perfilado, limpieza y estructuracion temporal ya
-estan implementados. El siguiente paso es el ejecutor de modelado base:
+Los ejecutores de manifiesto, perfilado, limpieza, estructuracion temporal,
+modelado base y evaluacion ya estan implementados. El siguiente paso es el
+grafo LangGraph minimo:
 
 ```text
-codigo/app/executors/modeling.py
-codigo/tests/test_modeling_executor.py
+codigo/app/graph/pipeline.py
+codigo/tests/test_graph_pipeline.py
 ```
 
-Ese ejecutor debe consumir:
-
-```text
-codigo/data/tensors/cwru_bearing/splits.json
-codigo/data/tensors/cwru_bearing/windows_features.csv
-```
-
-y devolver un `ModelingResult` con rutas a modelos, predicciones y referencias
-a artefactos.
+Ese grafo debe usar los resultados estructurados de ejecutores para actualizar
+el `TFMState` sin transportar datos pesados.

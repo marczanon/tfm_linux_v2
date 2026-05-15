@@ -57,7 +57,7 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 36 tests
+Ran 48 tests
 OK
 ```
 
@@ -80,13 +80,12 @@ channels_detected = ['BA_time', 'DE_time', 'FE_time', 'RPM']
 
 ## Siguiente paso
 
-El ejecutor de limpieza y la estructuracion temporal ya estan implementados. El
-siguiente paso es el modelado base:
+El ejecutor de limpieza, la estructuracion temporal, el modelado base y la
+evaluacion ya estan implementados. El siguiente paso es el grafo minimo:
 
 ```text
-codigo/app/executors/modeling.py
-codigo/tests/test_modeling_executor.py
+codigo/app/graph/pipeline.py
+codigo/tests/test_graph_pipeline.py
 ```
 
-Debe leer `windows_features.csv`, entrenar modelos iniciales y guardar modelos
-y predicciones reproducibles.
+Debe encadenar los ejecutores deterministas y actualizar el estado compartido.

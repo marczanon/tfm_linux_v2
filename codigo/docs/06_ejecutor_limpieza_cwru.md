@@ -58,7 +58,7 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 36 tests
+Ran 48 tests
 OK
 ```
 
@@ -81,13 +81,12 @@ frecuencia final = 12000 Hz
 
 ## Siguiente paso
 
-La estructuracion temporal ya esta implementada. El siguiente paso es el
-modelado base:
+La estructuracion temporal, el modelado base y la evaluacion ya estan
+implementados. El siguiente paso es el grafo minimo:
 
 ```text
-codigo/app/executors/modeling.py
-codigo/tests/test_modeling_executor.py
+codigo/app/graph/pipeline.py
+codigo/tests/test_graph_pipeline.py
 ```
 
-Debe entrenar los primeros modelos de deteccion de anomalias sobre las features
-temporales generadas.
+Debe orquestar los ejecutores existentes antes de introducir agentes reales.

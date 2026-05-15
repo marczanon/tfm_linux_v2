@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from scipy.io import savemat
 
 from codigo.app.executors.data_profiler import build_data_profile, generate_data_profile
@@ -115,6 +116,40 @@ class DataProfilerTests(unittest.TestCase):
         self.assertEqual(result.n_files_profiled, 1)
         self.assertEqual(result.state_updates["profile_path"], output_path.as_posix())
         self.assertEqual(profile["fault_type_counts"], {"inner_race": 1})
+
+    def test_build_profile_uses_csv_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            csv_path = base / "signals.csv"
+            manifest_path = base / "manifest.csv"
+            pd.DataFrame({"sensor_a": [1.0, 2.0, np.nan], "tag": ["x", "y", "z"]}).to_csv(csv_path, index=False)
+            write_manifest(
+                manifest_path,
+                [
+                    {
+                        "file_id": "csv-001",
+                        "dataset": "cwru_bearing",
+                        "source_path": csv_path.as_posix(),
+                        "label": "normal",
+                        "fault_type": "",
+                        "fault_diameter_inch": "",
+                        "load_hp": "0",
+                        "rpm": "0",
+                        "sensor_channel": "sensor_a",
+                        "source_sample_rate_hz": "100",
+                        "target_sample_rate_hz": "100",
+                        "source_format": "csv",
+                        "notes": "",
+                    }
+                ],
+            )
+
+            profile = build_data_profile(manifest_path)
+
+        stats = profile["files"][0]["channels"]["sensor_a"]
+        self.assertEqual(profile["channels_detected"], ["sensor_a"])
+        self.assertEqual(stats["n_samples"], 3)
+        self.assertEqual(stats["non_finite_count"], 1)
 
     def test_missing_file_returns_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
