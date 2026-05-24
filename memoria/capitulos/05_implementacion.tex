@@ -205,8 +205,8 @@ predicción binaria. Las métricas finales no se calculan en este ejecutor, sino
 que se reservan para la fase de evaluación.
 
 La ejecución real ha entrenado el modelo con 175 ventanas normales y ha
-generado 7460 predicciones. El umbral estimado ha sido 0.6334 y el resumen de
-modelado registra 403 ventanas predichas como normales y 7057 como anómalas.
+generado 7460 predicciones. El umbral estimado ha sido 0.5992 y el resumen de
+modelado registra 398 ventanas predichas como normales y 7062 como anómalas.
 Estos conteos son una salida preliminar del modelo, no una evaluación final de
 rendimiento.
 
@@ -226,15 +226,354 @@ codigo/reports/cwru_bearing/evaluation/evaluation_summary.md
 \end{minipage}
 \end{center}
 
-La ejecución real sobre el split de test ha obtenido precision 0.9997, recall
-1.0000, F1-score 0.9999, ROC-AUC 1.0000, PR-AUC 1.0000 y una tasa de falsos
-positivos de 0.0171. La matriz de confusión ha sido: 115 verdaderos negativos,
-2 falsos positivos, 0 falsos negativos y 7051 verdaderos positivos.
+La ejecución real sobre el split de test ha obtenido precision 0.9991, recall
+1.0000, F1-score 0.9996, ROC-AUC 1.0000, PR-AUC 1.0000 y una tasa de falsos
+positivos de 0.0513. La matriz de confusión ha sido: 111 verdaderos negativos,
+6 falsos positivos, 0 falsos negativos y 7051 verdaderos positivos.
 
 Estos resultados deben interpretarse como validación del pipeline y del
 baseline inicial sobre un benchmark controlado. No constituyen todavía una
 garantía de generalización industrial, que se deberá analizar con validaciones
 más exigentes y, posteriormente, con otros datasets como NASA IMS.
+
+\section{Grafo LangGraph supervisado}
+
+Se ha implementado el primer grafo LangGraph del MVP en `pipeline.py` y se ha
+incorporado un supervisor en el modulo:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/agents/supervisor.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La version actual ya contempla dos modos: un supervisor LLM que emite una
+`SupervisorDecision` validada por Pydantic y una politica determinista de
+respaldo para pruebas, ejecuciones locales sin modelo y recuperacion ante
+respuestas invalidas.
+
+El grafo ya no avanza directamente de un ejecutor al siguiente. Todas las
+transiciones vuelven al supervisor:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+START
+-> supervisor
+-> manifest_executor
+-> supervisor
+-> profiler_executor
+-> supervisor
+-> cleaner_agent
+-> supervisor
+-> cleaning_executor
+-> supervisor
+-> structuring_agent
+-> supervisor
+-> structuring_executor
+-> supervisor
+-> modeling_agent
+-> supervisor
+-> modeling_executor
+-> supervisor
+-> evaluator
+-> supervisor
+-> evaluation_agent
+-> supervisor
+-> report_writer
+-> supervisor
+-> END
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El grafo valida el estado entrante y saliente con `TFMStateModel`, registra
+mensajes de trazabilidad, acumula referencias a artefactos y detiene la
+ejecucion de forma controlada si un ejecutor devuelve estado `failed`. Cada
+decision del supervisor se almacena en `messages` con rol `supervisor` y
+contenido JSON serializado. El servicio LLM comun vive en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/services/llm.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La integracion inicial usa un cliente JSON para Ollama configurable por
+variables de entorno. Si se activa `TFM\_SUPERVISOR\_MODE=llm`, el supervisor
+solicita al modelo una decision estructurada; si no hay modelo disponible o la
+respuesta no valida, se conserva la decision determinista como fallback.
+
+Incluso cuando decide el LLM, la decision queda acotada por validaciones
+posteriores: la fase actual debe coincidir con el estado real, no se aceptan
+nodos fuera del plan del MVP, la revision humana permanece desactivada en esta
+fase local y cualquier salto invalido fuerza el fallback. De este modo se
+introduce toma de decisiones agentica sin permitir que el modelo ejecute codigo
+ni manipule datos directamente.
+
+\section{Agente Limpiador LLM}
+
+Se ha implementado el primer agente LLM especializado en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/agents/cleaner.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El agente limpiador lee un resumen ligero del perfil del dataset y devuelve una
+`CleaningDecision` validada por Pydantic. Su decision queda guardada como
+`cleaning\_config` en el estado, pero la transformacion real de las senales
+sigue delegada exclusivamente en `codigo/app/executors/cleaning.py`.
+
+La fase de limpieza queda dividida en decision y ejecucion:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+supervisor
+-> cleaner_agent
+-> supervisor
+-> cleaning_executor
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Con Ollama local y el modelo `qwen3.5:4b`, se han validado respuestas reales
+para el supervisor y para el limpiador. El limpiador ha propuesto
+`strategy\_id = cwru\_clean\_llm\_v1`, eliminacion de no finitos, remuestreo a
+12 kHz y normalizacion `none`, cumpliendo el contrato `CleaningDecision`.
+
+\section{Agente Estructurador LLM}
+
+Se ha implementado el agente estructurador LLM en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/agents/structurer.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Este agente decide la estructuracion temporal del dataset: tamano de ventana,
+solapamiento, canal principal, frecuencia objetivo, modo de etiquetas, features
+temporales y rutas esperadas de salida. Su salida principal es una
+`StructuringDecision` validada por Pydantic. Igual que en el resto de fases, el
+agente no genera ventanas ni tensores; la ejecucion real permanece en
+`codigo/app/executors/structuring.py`.
+
+La fase de estructuracion queda dividida en decision y ejecucion:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+supervisor
+-> structuring_agent
+-> supervisor
+-> structuring_executor
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Con `qwen3.5:4b`, el estructurador ha generado una decision valida con ventanas
+de 2048 muestras, solapamiento del 50\%, canal `DE\_time`, frecuencia de 12 kHz,
+modo `binary\_anomaly` y features temporales trazables como RMS, curtosis,
+crest factor y energia.
+
+Durante la integracion se ha detectado que `checkpoint\_id` es un nombre
+reservado por LangGraph 1.1. Por ello se ha retirado de la vista `TypedDict`
+que circula por el grafo. La persistencia futura debera apoyarse en los
+checkpoints propios de LangGraph o en un campo de aplicacion que no colisione
+con nombres reservados.
+
+\section{Agente Modelador LLM}
+
+Se ha implementado el agente modelador LLM en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/agents/modeler.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Este agente decide el modelo base y sus hiperparametros a partir del estado
+ligero del pipeline, la configuracion de estructuracion y un resumen de la
+tabla de features. Su salida principal es una `ModelingDecision` validada por
+Pydantic. El agente no entrena modelos ni genera predicciones; la ejecucion
+real se mantiene en `codigo/app/executors/modeling.py`.
+
+La fase de modelado queda dividida en decision y ejecucion:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+supervisor
+-> modeling_agent
+-> supervisor
+-> modeling_executor
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Aunque el contrato `ModelingConfig` contempla algoritmos futuros como
+One-Class SVM, LOF, PCA o autoencoders, el MVP restringe al agente a
+`isolation\_forest`, que es el unico algoritmo soportado por el ejecutor
+determinista actual. Tambien se acotan la semilla (`random\_state = 42`), el
+split de entrenamiento (`train`), el uso del split de validacion para el umbral
+y los hiperparametros permitidos, evitando que el LLM seleccione opciones que
+la aplicacion aun no puede ejecutar de forma reproducible.
+
+Con `qwen3.5:4b`, el modelador ha generado una decision valida con
+`model\_name = isolation\_forest`, `random\_state = 42`, entrenamiento sobre el
+split `train`, validacion sobre `validation`, `n\_estimators = 200`,
+`n\_jobs = 1` y `threshold\_quantile = 0.99`.
+
+Durante esta validacion se ha ajustado el cliente de Ollama para usar
+`think=false` por defecto en llamadas JSON estrictas, ya que este modelo puede
+devolver el razonamiento en el campo `thinking` y dejar vacio
+`message.content` si no se desactiva ese modo. Esta opcion no queda fijada de
+forma rigida: puede activarse u omitirse mediante:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+TFM_LLM_THINK=true
+TFM_LLM_THINK=auto
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+\section{Agente Evaluador LLM}
+
+Se ha implementado el agente evaluador LLM en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/agents/evaluator.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Este agente interpreta las metricas calculadas por el ejecutor determinista de
+evaluacion y devuelve una `EvaluationDecision` validada por Pydantic. La
+separacion es deliberada: `codigo/app/executors/evaluation.py` calcula
+precision, recall, F1, ROC-AUC, PR-AUC, tasa de falsos positivos y matriz de
+confusion; el agente solo emite el juicio tecnico, la aprobacion y las
+limitaciones del experimento.
+
+La fase de evaluacion queda dividida en calculo y juicio agentico:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+supervisor
+-> evaluator
+-> supervisor
+-> evaluation_agent
+-> supervisor
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Para el MVP CWRU se han fijado umbrales conservadores y explicitos:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+min_recall_required = 0.90
+max_false_positive_rate = 0.10
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El LLM puede redactar el resumen tecnico y las limitaciones, pero no puede
+aprobar una ejecucion que incumpla esos umbrales. Si la respuesta no valida o
+contradice las metricas, se activa un fallback determinista.
+
+Tras esta decision, si `next\_action = continue`, el supervisor ya no finaliza
+directamente la ejecucion: enruta la fase final hacia el agente redactor. Si el
+evaluador rechaza la ejecucion, el supervisor termina en `failed` con el
+resumen de la evaluacion como motivo de parada. El fichero de metricas se
+genera en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/cwru_bearing/evaluation/metrics.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+\section{Agente Redactor LLM}
+
+Se ha implementado el agente redactor LLM en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/agents/report_writer.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Este agente decide la estructura del informe tecnico final a partir del estado
+ligero del pipeline, las metricas, la evaluacion y las referencias a
+artefactos. Su salida principal es una `ReportDecision` validada por Pydantic.
+El agente no escribe el informe directamente ni modifica resultados previos:
+la generacion material del documento se delega en el ejecutor determinista:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/executors/reporting.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La fase final queda dividida en decision y materializacion del informe:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+supervisor
+-> report_writer
+-> supervisor
+-> END
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Para el MVP CWRU, el contrato acota la salida a formato Markdown y a la ruta:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/cwru_bearing/final_report.md
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Tambien se exigen secciones minimas: resumen ejecutivo, contexto y datos,
+configuraciones del pipeline, metricas y evaluacion, artefactos generados y
+limitaciones. Las rutas fuente propuestas por el LLM deben existir previamente
+en el estado como manifiesto, perfil, datos procesados, tensores, metricas o
+artefactos registrados. Si la respuesta no valida, se aplica un fallback
+determinista que genera un informe reproducible.
+
+El resultado del ejecutor es un `ReportExecutorResult` y un artefacto de tipo
+`report`. Con ello el pipeline cierra el ciclo completo del MVP: datos crudos,
+perfilado, limpieza, estructuracion, modelado, evaluacion, juicio agentico e
+informe tecnico trazable.
 
 \section{Dependencias}
 
@@ -261,11 +600,15 @@ rechazo de campos no declarados, restricciones de configuraciones y métricas,
 coherencia del manifiesto, decisiones de agentes, resultados de ejecutores y
 generación del manifiesto, perfilado, limpieza, estructuración temporal y
 modelado base y evaluación CWRU. También validan los adaptadores de entrada para
-formatos `.mat` y `.csv`. En esta fase se han ejecutado 48 tests
+formatos `.mat` y `.csv`, y la orquestacion del grafo minimo con ejecutores
+simulados. Tambien validan el supervisor LLM con cliente fake, el agente
+limpiador LLM, el agente estructurador LLM, el agente modelador LLM, el agente
+evaluador LLM, el agente redactor LLM, el ejecutor de informes, el parser JSON,
+la configuracion de razonamiento de Ollama, el rechazo de transiciones
+invalidas y el fallback determinista. En esta fase se han ejecutado 91 tests
 correctamente.
 
 \section{Siguiente Paso de Implementación}
 
-El siguiente avance técnico será montar el grafo LangGraph mínimo, encadenando
-los ejecutores deterministas y preparando los puntos donde después entrarán los
-agentes especializados.
+El siguiente avance tecnico sera consolidar la persistencia ligera de
+ejecuciones y preparar una API minima cuando el MVP local quede estable.

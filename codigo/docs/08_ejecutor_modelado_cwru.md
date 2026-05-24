@@ -98,9 +98,9 @@ Resumen:
 model_name = isolation_forest
 train windows = 175
 predictions = 7460
-threshold = 0.6334401531945375
-predicted normal = 403
-predicted anomaly = 7057
+threshold = 0.5992184911352878
+predicted normal = 398
+predicted anomaly = 7062
 tamano aproximado = 2.8 MB
 ```
 

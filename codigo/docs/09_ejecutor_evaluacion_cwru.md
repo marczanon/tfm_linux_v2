@@ -71,13 +71,13 @@ report_fragment_path = codigo/reports/cwru_bearing/evaluation/evaluation_summary
 Metricas en `test`:
 
 ```text
-precision = 0.9997164327236637
+precision = 0.9991497803599263
 recall = 1.0
-f1_score = 0.9998581962563812
+f1_score = 0.9995747093847462
 roc_auc = 0.9999963634909033
 pr_auc = 0.9999999396693899
-false_positive_rate = 0.017094017094017096
-confusion_matrix = {'tn': 115, 'fp': 2, 'fn': 0, 'tp': 7051}
+false_positive_rate = 0.05128205128205128
+confusion_matrix = {'tn': 111, 'fp': 6, 'fn': 0, 'tp': 7051}
 ```
 
 Estas metricas son coherentes con un benchmark controlado como CWRU. Deben

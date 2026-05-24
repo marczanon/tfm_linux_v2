@@ -34,6 +34,7 @@ NodeName = Literal[
     "modeling_agent",
     "modeling_executor",
     "evaluator",
+    "evaluation_agent",
     "report_writer",
     "human_review",
 ]

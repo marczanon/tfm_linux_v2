@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, NotRequired, TypedDict
+from typing import Any, TypedDict
 
 from codigo.app.schemas.state import ProjectContext, TFMStateModel
 
@@ -38,9 +38,6 @@ class TFMState(TypedDict):
     errors: list[dict[str, Any]]
     human_approval: dict[str, Any] | None
     artifacts: list[dict[str, Any]]
-
-    # Campo reservado para compatibilidad futura con checkpoints externos.
-    checkpoint_id: NotRequired[str | None]
 
 
 def validate_state(state: dict[str, Any]) -> TFMStateModel:

@@ -1,5 +1,10 @@
 # Hoja de ruta del TFM
 
+> Estado: documento historico de Fase 1. Desde el cierre del MVP local, la hoja
+> de ruta operativa activa es `codigo/docs/20_hoja_ruta_fase_2.md`. Este
+> documento se conserva como referencia del planteamiento inicial y de los
+> principios arquitectonicos generales.
+
 Documento de referencia para iniciar el desarrollo del TFM:
 
 **Diseno y desarrollo de una arquitectura multiagente basada en LangGraph para el procesamiento, modelado y deteccion de anomalias en entornos industriales.**

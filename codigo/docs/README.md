@@ -26,3 +26,25 @@ Documentos iniciales:
   de metricas sobre predicciones.
 - `10_adaptadores_entrada.md`: frontera ligera para leer distintos formatos de
   senal sin acoplar los ejecutores al tipo de fichero.
+- `11_grafo_langgraph_minimo.md`: grafo LangGraph secuencial que encadena los
+  ejecutores deterministas del MVP y prepara la entrada de agentes futuros.
+- `12_supervisor_determinista.md`: primer nodo supervisor con decision
+  `SupervisorDecision` validada por Pydantic, aun sin LLMs.
+- `13_supervisor_llm.md`: capa LLM JSON para el supervisor, con cliente Ollama,
+  validacion estricta y fallback determinista.
+- `14_agente_limpiador_llm.md`: primer agente LLM especializado; genera
+  `CleaningDecision` y delega la transformacion real en `cleaning.py`.
+- `15_agente_estructurador_llm.md`: agente LLM que genera
+  `StructuringDecision` y delega ventanas, features y splits en
+  `structuring.py`.
+- `16_agente_modelador_llm.md`: agente LLM que genera `ModelingDecision` y
+  delega entrenamiento y prediccion en `modeling.py`.
+- `17_agente_evaluador_llm.md`: agente LLM que genera `EvaluationDecision` a
+  partir de metricas ya calculadas por `evaluation.py`.
+- `18_agente_redactor_llm.md`: agente LLM que genera `ReportDecision` y
+  delega la escritura del informe final en `reporting.py`.
+- `19_estado_actual_mvp.md`: recopilacion del estado del MVP, capacidades
+  actuales, artefactos, validaciones y siguiente paso recomendado.
+- `20_hoja_ruta_fase_2.md`: hoja de ruta activa tras cerrar el MVP local;
+  prioriza persistencia, trazabilidad, comparacion experimental y API minima,
+  dejando SLURM para fases posteriores.
