@@ -58,6 +58,11 @@ from codigo.app.schemas.state import (
     StateMessage,
     TFMStateModel,
 )
+from codigo.app.services.run_persistence import (
+    DEFAULT_RUNS_DIR,
+    RunSnapshot,
+    save_run_snapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,14 @@ class PipelineAgents:
     modeler: Callable[[TFMStateModel], ModelingDecision] = decide_modeling_action
     evaluator: Callable[[TFMStateModel], EvaluationDecision] = decide_evaluation_action
     report_writer: Callable[[TFMStateModel], ReportDecision] = decide_report_action
+
+
+@dataclass(frozen=True)
+class PersistedPipelineRun:
+    """Resultado de ejecutar el pipeline y guardar su snapshot local."""
+
+    state: TFMState
+    snapshot: RunSnapshot
 
 
 def build_cwru_pipeline(
@@ -156,6 +169,19 @@ def run_cwru_pipeline(
 
     final_state = build_cwru_pipeline(executors, agents).invoke(initial_state)
     return TFMState(**validate_state(final_state).to_langgraph_state())
+
+
+def run_and_persist_cwru_pipeline(
+    initial_state: TFMState,
+    executors: PipelineExecutors | None = None,
+    agents: PipelineAgents | None = None,
+    runs_dir: Path | str = DEFAULT_RUNS_DIR,
+) -> PersistedPipelineRun:
+    """Ejecuta el pipeline y guarda un snapshot local de la ejecucion."""
+
+    final_state = run_cwru_pipeline(initial_state, executors, agents)
+    snapshot = save_run_snapshot(validate_state(final_state), runs_dir)
+    return PersistedPipelineRun(state=final_state, snapshot=snapshot)
 
 
 def _supervisor_node(state: TFMState, agents: PipelineAgents) -> TFMState:

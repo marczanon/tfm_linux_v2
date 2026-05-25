@@ -48,3 +48,15 @@ Documentos iniciales:
 - `20_hoja_ruta_fase_2.md`: hoja de ruta activa tras cerrar el MVP local;
   prioriza persistencia, trazabilidad, comparacion experimental y API minima,
   dejando SLURM para fases posteriores.
+- `21_persistencia_local_runs.md`: implementacion del primer hito de Fase 2;
+  guarda snapshots locales por `run_id` con estado final, decisiones,
+  artefactos, metricas, evaluacion, resumen e indice.
+- `22_pipeline_persistido.md`: wrapper `run_and_persist_cwru_pipeline(...)`
+  que ejecuta el grafo CWRU y guarda automaticamente un snapshot local.
+- `23_registro_consultable_runs.md`: servicio `run_registry.py` para listar,
+  filtrar, cargar artefactos y comparar metricas entre ejecuciones persistidas.
+- `24_protocolo_experimental_local.md`: servicio `experiment_protocol.py` para
+  definir planes experimentales locales, ejecutar varios runs persistidos y
+  generar una tabla comparativa reproducible.
+- `25_api_minima_fastapi.md`: primera API FastAPI de consulta sobre runs
+  persistidos, artefactos e informes.

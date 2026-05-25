@@ -575,12 +575,206 @@ El resultado del ejecutor es un `ReportExecutorResult` y un artefacto de tipo
 perfilado, limpieza, estructuracion, modelado, evaluacion, juicio agentico e
 informe tecnico trazable.
 
+\section{Persistencia Local de Ejecuciones}
+
+Como primer hito de la segunda fase se ha implementado una persistencia local
+de ejecuciones en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/services/run_persistence.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El objetivo es conservar una evidencia ligera y auditable de cada ejecucion sin
+introducir todavia una base de datos externa. El servicio recibe un
+`TFMStateModel` final y genera una carpeta por `run\_id` con el estado final,
+las decisiones extraidas de los mensajes del grafo, los artefactos, las
+metricas, la evaluacion, un resumen Markdown y una metadata del snapshot.
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/runs/<run_id>/state_final.json
+codigo/reports/runs/<run_id>/decisions.json
+codigo/reports/runs/<run_id>/artifacts.json
+codigo/reports/runs/<run_id>/metrics.json
+codigo/reports/runs/<run_id>/evaluation.json
+codigo/reports/runs/<run_id>/summary.md
+codigo/reports/runs/<run_id>/snapshot.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Ademas, se mantiene un indice local:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/runs/index.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Esta decision mantiene separado el pipeline puro de la persistencia. La funcion
+`run\_cwru\_pipeline` no se modifica; la integracion automatica se realiza
+mediante un wrapper de ejecucion persistida. De este modo se conserva la
+estabilidad del grafo ya validado y se prepara la comparacion de ejecuciones
+para los experimentos de la Fase 2.
+
+\section{Wrapper de Ejecucion Persistida}
+
+El segundo hito de la Fase 2 incorpora el wrapper:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+run_and_persist_cwru_pipeline(...)
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Esta funcion ejecuta primero el grafo CWRU con `run\_cwru\_pipeline`, valida el
+estado final y despues invoca `save\_run\_snapshot`. El resultado se devuelve
+como un objeto `PersistedPipelineRun`, compuesto por el estado final y la
+metadata del snapshot persistido.
+
+La decision de implementarlo como wrapper, y no como nodo adicional del grafo,
+mantiene dos rutas claramente separadas: una ejecucion pura del pipeline y una
+ejecucion con persistencia automatica. Esto evita cambiar el comportamiento ya
+validado del MVP y permite que los tests sigan inyectando ejecutores y agentes
+simulados.
+
+La validacion real con CWRU genera una carpeta en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/runs/<run_id>/
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+con 13 artefactos, 17 decisiones y ningun error para una ejecucion completada.
+Este punto deja preparada la siguiente fase tecnica: construir un registro
+consultable y comparaciones entre ejecuciones persistidas.
+
+\section{Registro Consultable de Ejecuciones}
+
+El tercer hito de la Fase 2 introduce una capa de consulta sobre las ejecuciones
+persistidas:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/services/run_registry.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Este servicio lee el indice local de ejecuciones y los snapshots generados por
+la persistencia. Permite listar runs, filtrar por dataset, estado final o
+aprobacion, cargar la metadata de una ejecucion, recuperar sus artefactos y
+comparar metricas principales entre dos o mas ejecuciones.
+
+La comparacion se devuelve mediante contratos Pydantic propios:
+`RunComparison`, `RunComparisonRow` y `MetricComparison`. Para precision,
+recall y F1-score se considera mejor el valor mas alto, mientras que para la
+tasa de falsos positivos se considera mejor el valor mas bajo. Esta distincion
+permite comparar experimentos con criterio tecnico coherente con el dominio
+industrial.
+
+El registro no recalcula metricas ni vuelve a ejecutar el pipeline; solo
+consulta evidencia ya persistida. Esta separacion prepara la futura API minima,
+que podra exponer consultas sobre ejecuciones sin acoplarse a LangGraph ni a
+los ejecutores.
+
+\section{Protocolo Experimental Local}
+
+El cuarto hito de la Fase 2 incorpora un servicio para ejecutar planes
+experimentales locales:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/services/experiment_protocol.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Este servicio define contratos `ExperimentPlan`, `ExperimentSpec`,
+`ExperimentRunSummary` y `ExperimentPlanResult`. A partir de un plan validado,
+ejecuta varios runs mediante el wrapper persistido, guarda los artefactos de
+modelado, evaluacion e informe en carpetas separadas por experimento y genera
+una comparacion reutilizando `run\_registry.py`.
+
+El primer plan real, `cwru\_iforest\_threshold\_v1`, compara el baseline de
+Isolation Forest con una variante que solo modifica `threshold\_quantile` de
+0.99 a 1.00. Los resultados se guardan en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/experiments/cwru_local/cwru_iforest_threshold_v1/
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La salida incluye `experiment\_plan.json`, `comparison.json` y
+`results\_table.md`. Esta estructura permite llevar resultados comparables a la
+memoria sin recalcular metricas ni mezclar artefactos de diferentes
+ejecuciones.
+
+\section{API Minima de Consulta}
+
+El sexto hito de la Fase 2 incorpora una primera API FastAPI sobre la
+persistencia local:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/api/app.py
+codigo/app/api/routes.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La API se crea mediante `create\_app(runs\_dir=...)`, de modo que en ejecucion
+real consulta `codigo/reports/runs/` y en tests puede trabajar contra un
+directorio temporal. Esta primera version es deliberadamente de lectura:
+permite consultar runs persistidos, recuperar su metadata, listar artefactos y
+servir el informe Markdown asociado. Tambien expone la comparacion de
+ejecuciones ya persistidas, reutilizando el registro consultable sin recalcular
+metricas ni relanzar el pipeline.
+
+Los endpoints iniciales son:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+GET /health
+GET /runs
+GET /runs/compare
+GET /runs/{run_id}
+GET /runs/{run_id}/artifacts
+GET /runs/{run_id}/report
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El endpoint `POST /runs` queda pospuesto hasta definir politicas de ejecucion,
+aprobacion y control de coste. Esta decision mantiene separada la capa de
+consulta de la logica que podria lanzar trabajos de modelado o experimentos
+multiples.
+
 \section{Dependencias}
 
 Se ha creado `requirements.txt` como punto inicial para construir el entorno de
 Miniconda `tfm\_v2`, fijado sobre Python 3.11. Incluye dependencias de contratos
-y grafo, procesamiento de datos, modelos clásicos, visualización técnica y
-verificación.
+y grafo, procesamiento de datos, modelos clásicos, API local con FastAPI,
+visualización técnica y verificación.
 
 \section{Verificación Actual}
 
@@ -604,11 +798,18 @@ formatos `.mat` y `.csv`, y la orquestacion del grafo minimo con ejecutores
 simulados. Tambien validan el supervisor LLM con cliente fake, el agente
 limpiador LLM, el agente estructurador LLM, el agente modelador LLM, el agente
 evaluador LLM, el agente redactor LLM, el ejecutor de informes, el parser JSON,
-la configuracion de razonamiento de Ollama, el rechazo de transiciones
-invalidas y el fallback determinista. En esta fase se han ejecutado 91 tests
+la persistencia local de ejecuciones, el registro consultable, el protocolo
+experimental local, la API minima de consulta, la configuracion de razonamiento
+de Ollama, el rechazo de transiciones invalidas y el fallback determinista. En
+esta fase se han ejecutado 110 tests
 correctamente.
 
 \section{Siguiente Paso de Implementación}
 
-El siguiente avance tecnico sera consolidar la persistencia ligera de
-ejecuciones y preparar una API minima cuando el MVP local quede estable.
+Tras incorporar la consulta y comparacion de runs persistidos por API, el
+siguiente avance tecnico no deberia ser lanzar ejecuciones desde HTTP, sino
+definir primero las politicas de `POST /runs`: validacion de solicitudes,
+control de coste, limites de recursos y relacion con una futura revision
+humana. El punto Human Review queda pospuesto hasta disponer de una aplicacion
+o interfaz donde la aprobacion pueda disenarse con una logica mas ajustada al
+uso real del sistema.

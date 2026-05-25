@@ -41,7 +41,6 @@ La Fase 2 debe producir:
 - persistencia local de ejecuciones;
 - trazabilidad consultable por `run_id`;
 - base para comparar experimentos;
-- punto Human Review basico;
 - API minima solo despues de tener persistencia;
 - documentacion tecnica y memoria actualizadas.
 
@@ -75,6 +74,8 @@ persistente y consultable.
   metodologia o resultados.
 
 ## Hito 1: Persistencia local de ejecuciones
+
+Estado: implementado como servicio local en `codigo/app/services/run_persistence.py`.
 
 Objetivo: guardar una evidencia completa y ligera de cada ejecucion.
 
@@ -121,6 +122,8 @@ Criterio de aceptacion:
 
 ## Hito 2: Integracion de persistencia en el pipeline
 
+Estado: implementado con `run_and_persist_cwru_pipeline(...)`.
+
 Objetivo: que cada ejecucion completa deje una carpeta persistida sin pasos
 manuales.
 
@@ -147,6 +150,8 @@ Criterio de aceptacion:
 - el informe final queda enlazado desde el resumen persistido.
 
 ## Hito 3: Registro consultable y comparacion basica
+
+Estado: implementado con `codigo/app/services/run_registry.py`.
 
 Objetivo: poder responder preguntas simples sobre ejecuciones anteriores.
 
@@ -178,6 +183,8 @@ Criterio de aceptacion:
 
 ## Hito 4: Protocolo experimental local
 
+Estado: implementado con `codigo/app/services/experiment_protocol.py`.
+
 Objetivo: pasar de una unica ejecucion valida a un conjunto pequeno de
 experimentos comparables.
 
@@ -202,11 +209,28 @@ Criterio de aceptacion:
 - al menos dos ejecuciones persistidas y comparables;
 - tabla de resultados para memoria.
 
+Resultado inicial:
+
+- plan `cwru_iforest_threshold_v1`;
+- runs `cwru_iforest_threshold_v1_baseline_threshold_099` y
+  `cwru_iforest_threshold_v1_conservative_threshold_100`;
+- artefactos en `codigo/experiments/cwru_local/cwru_iforest_threshold_v1/`;
+- tabla comparativa en `results_table.md`;
+- documento tecnico `codigo/docs/24_protocolo_experimental_local.md`.
+
 ## Hito 5: Human Review basico
 
-Objetivo: introducir un punto de aprobacion humana sin complicar la interfaz.
+Estado: pospuesto.
 
-Primera version:
+Decision: no implementar todavia. En el estado actual el MVP local no requiere
+un punto de aprobacion humana real y forzar ahora este flujo podria condicionar
+mal la futura aplicacion. Cuando exista una API o una interfaz de usuario, la
+logica de aprobacion podra ser mas rica que una entrada manual simple.
+
+Objetivo futuro: introducir un punto de aprobacion humana sin complicar la
+interfaz.
+
+Primera version posible:
 
 - revision antes de modelado o antes de ejecutar experimentos multiples;
 - entrada manual simple en estado o funcion wrapper;
@@ -218,13 +242,15 @@ No objetivo en esta fase:
 - aprobaciones remotas;
 - colas distribuidas.
 
-Criterio de aceptacion:
+Criterio de aceptacion futuro:
 
 - test de flujo aprobado;
 - test de flujo rechazado;
 - registro persistido de aprobacion, revisor y motivo.
 
 ## Hito 6: API minima con FastAPI
+
+Estado: implementado en primera version de consulta con `codigo/app/api/`.
 
 Objetivo: exponer el MVP solo cuando la persistencia local este funcionando.
 
@@ -233,10 +259,25 @@ Endpoints candidatos:
 ```text
 POST /runs
 GET /runs
+GET /runs/compare
 GET /runs/{run_id}
 GET /runs/{run_id}/artifacts
 GET /runs/{run_id}/report
 ```
+
+Endpoints implementados:
+
+```text
+GET /health
+GET /runs
+GET /runs/compare
+GET /runs/{run_id}
+GET /runs/{run_id}/artifacts
+GET /runs/{run_id}/report
+```
+
+`POST /runs` queda pospuesto hasta definir politicas de ejecucion, aprobacion y
+control de coste. La primera API es deliberadamente de lectura.
 
 Restricciones:
 
@@ -251,6 +292,16 @@ Criterio de aceptacion:
 - endpoints leen desde el registro persistido;
 - tests de endpoints con cliente de prueba;
 - documentacion tecnica de uso.
+
+Resultado inicial:
+
+- aplicacion FastAPI en `codigo/app/api/app.py`;
+- rutas en `codigo/app/api/routes.py`;
+- endpoint de comparacion de runs persistidos reutilizando `compare_runs(...)`;
+- tests en `codigo/tests/test_api_runs.py`;
+- documento tecnico `codigo/docs/25_api_minima_fastapi.md`;
+- dependencias `fastapi`, `starlette`, `uvicorn` y `httpx` fijadas en
+  `requirements.txt`.
 
 ## Hito 7: Actualizacion academica
 
@@ -280,21 +331,23 @@ memoria/capitulos/07_resultados.tex
 2. Hito 2: wrapper de pipeline persistido.
 3. Hito 3: registro consultable y comparacion basica.
 4. Hito 4: protocolo experimental local.
-5. Hito 5: Human Review basico.
-6. Hito 6: API minima.
+5. Hito 6: API minima.
+6. Reevaluar Human Review cuando exista una aplicacion o interfaz.
 7. Hito 7: actualizacion academica continua.
 
-## Primer paso concreto
+## Primer paso concreto siguiente
 
-Implementar `codigo/app/services/run_persistence.py` con funciones para guardar
-y cargar ejecuciones:
+Tras incorporar la API de comparacion, el siguiente paso natural es cerrar la
+actualizacion academica de la Fase 2 y mantener `POST /runs` fuera de alcance
+hasta definir politicas de ejecucion, aprobacion humana y control de coste.
+
+Si se retoma el desarrollo de codigo antes de esa decision, debe ser en modo de
+diseno y no de ejecucion costosa:
 
 ```text
-save_run_snapshot(state: TFMStateModel, output_dir: Path) -> RunSnapshot
-load_run_snapshot(run_id: str, runs_dir: Path) -> RunSnapshot
-update_run_index(snapshot: RunSnapshot, runs_dir: Path) -> None
+POST /runs
 ```
 
-La primera validacion debe usar una ejecucion real del pipeline CWRU y comprobar
-que el estado final, decisiones, metricas, evaluacion y artefactos quedan
-persistidos sin introducir dependencias externas.
+Ese endpoint solo deberia implementarse cuando este claro como se validan
+solicitudes, limites de recursos, aprobaciones y almacenamiento de nuevas
+ejecuciones.

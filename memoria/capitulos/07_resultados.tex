@@ -2,28 +2,41 @@
 
 \section{Resultados cuantitativos}
 
-Esta sección recogerá las métricas de cada experimento.
+La Fase 2 incorpora una comparacion local entre dos ejecuciones persistidas del
+baseline Isolation Forest sobre CWRU. Ambas ejecuciones mantienen constante el
+dataset, la limpieza, la estructuracion temporal, la semilla y
+`n\_estimators=200`; la unica variable modificada es el cuantil usado para
+fijar el umbral de anomalia.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lrrrrrr}
+\begin{tabular}{lrrrrr}
 \toprule
-Modelo & Precision & Recall & F1 & ROC-AUC & PR-AUC & FPR \\
+Experimento & Umbral & Precision & Recall & F1 & FPR \\
 \midrule
-Isolation Forest & 0.9997 & 1.0000 & 0.9999 & 1.0000 & 1.0000 & 0.0171 \\
+Baseline & 0.99 & 0.9991 & 1.0000 & 0.9996 & 0.0513 \\
+Conservador & 1.00 & 0.9996 & 1.0000 & 0.9998 & 0.0256 \\
 \bottomrule
 \end{tabular}
-\caption{Resultados preliminares del baseline en el split de test CWRU.}
+\caption{Comparacion de umbral con Isolation Forest en el split de test CWRU.}
 \label{tab:resultados_modelos}
 \end{table}
 
-La matriz de confusión asociada al split de test es: 115 verdaderos negativos,
-2 falsos positivos, 0 falsos negativos y 7051 verdaderos positivos.
+La variante conservadora reduce los falsos positivos sin penalizar el recall.
+En el baseline, la matriz de confusion del split de test contiene 111
+verdaderos negativos, 6 falsos positivos, 0 falsos negativos y 7051 verdaderos
+positivos. En la variante con umbral 1.00, los falsos positivos bajan a 3, con
+114 verdaderos negativos, 0 falsos negativos y 7051 verdaderos positivos.
 
 \section{Análisis cualitativo}
 
-Esta sección interpretará falsos positivos, falsos negativos, sensibilidad a la
-carga del motor, robustez por tipo de fallo y trazabilidad de artefactos.
+El resultado sugiere que, en este benchmark controlado, un umbral mas
+conservador es preferible para reducir falsas alarmas manteniendo la deteccion
+de fallos. La mejora debe interpretarse con cautela, porque CWRU presenta
+condiciones experimentales limpias y diferencias claras entre estado normal y
+fallo. La comparacion resulta util como validacion del protocolo experimental y
+de la trazabilidad de runs, no como evidencia definitiva de generalizacion
+industrial.
 
 \section{Limitaciones observadas}
 

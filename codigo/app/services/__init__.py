@@ -1,4 +1,3 @@
-"""Servicios auxiliares del pipeline."""
 """Servicios compartidos de la aplicacion."""
 
 from codigo.app.services.llm import (
@@ -9,12 +8,66 @@ from codigo.app.services.llm import (
     get_default_json_llm_client,
     parse_json_object,
 )
+from codigo.app.services.run_persistence import (
+    DEFAULT_RUNS_DIR,
+    RunIndex,
+    RunIndexEntry,
+    RunSnapshot,
+    extract_decisions,
+    load_run_index,
+    load_run_snapshot,
+    save_run_snapshot,
+    update_run_index,
+)
+from codigo.app.services.run_registry import (
+    MetricComparison,
+    RunComparison,
+    RunComparisonRow,
+    compare_runs,
+    get_run,
+    get_run_artifacts,
+    list_runs,
+)
+from codigo.app.services.experiment_protocol import (
+    DEFAULT_EXPERIMENTS_DIR,
+    DEFAULT_PLAN_ID,
+    ExperimentPlan,
+    ExperimentPlanResult,
+    ExperimentRunSummary,
+    ExperimentSpec,
+    default_cwru_experiment_plan,
+    run_cwru_experiment_plan,
+)
 
 __all__ = [
+    "DEFAULT_EXPERIMENTS_DIR",
+    "DEFAULT_PLAN_ID",
+    "DEFAULT_RUNS_DIR",
+    "ExperimentPlan",
+    "ExperimentPlanResult",
+    "ExperimentRunSummary",
+    "ExperimentSpec",
     "JSONLLMClient",
     "LLMCallError",
     "LLMMessage",
+    "MetricComparison",
     "OllamaJSONClient",
+    "RunComparison",
+    "RunComparisonRow",
+    "RunIndex",
+    "RunIndexEntry",
+    "RunSnapshot",
+    "compare_runs",
+    "default_cwru_experiment_plan",
+    "extract_decisions",
+    "get_run",
+    "get_run_artifacts",
     "get_default_json_llm_client",
+    "list_runs",
+    "load_run_index",
+    "load_run_snapshot",
     "parse_json_object",
+    "run_cwru_experiment_plan",
+    "save_run_snapshot",
+    "update_run_index",
 ]

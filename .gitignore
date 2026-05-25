@@ -17,6 +17,9 @@ codigo/data/raw/*
 codigo/data/interim/*
 codigo/data/processed/*
 codigo/data/tensors/*
+codigo/experiments/*
+!codigo/experiments/.gitkeep
+!codigo/experiments/README.md
 codigo/models/*
 codigo/reports/*
 
@@ -32,4 +35,3 @@ memoria/*.toc
 memoria/*.fls
 memoria/*.fdb_latexmk
 memoria/*.synctex.gz
-

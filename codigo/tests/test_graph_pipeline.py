@@ -3,7 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codigo.app.graph.pipeline import PipelineExecutors, run_cwru_pipeline
+from codigo.app.graph.pipeline import (
+    PipelineExecutors,
+    run_and_persist_cwru_pipeline,
+    run_cwru_pipeline,
+)
 from codigo.app.graph.state import create_initial_cwru_state, validate_state
 from codigo.app.schemas.executor_results import (
     CleaningResult,
@@ -15,6 +19,7 @@ from codigo.app.schemas.executor_results import (
     StructuringResult,
 )
 from codigo.app.schemas.state import ArtifactRef, PipelineError
+from codigo.app.services.run_persistence import load_run_index
 
 
 class GraphPipelineTests(unittest.TestCase):
@@ -171,6 +176,51 @@ class GraphPipelineTests(unittest.TestCase):
         final_decision = json.loads(validated.messages[-1].content)
         self.assertEqual(final_decision["next_stage"], "failed")
         self.assertEqual(final_decision["stop_reason"], "manifest failed")
+
+    def test_persisted_wrapper_runs_pipeline_and_writes_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            calls: list[str] = []
+            paths = _paths(base)
+            runs_dir = base / "runs"
+            executors = _successful_executors(paths, calls)
+            state = create_initial_cwru_state(
+                thread_id="cwru-graph-persisted-test",
+                run_id="run-persisted-001",
+                raw_path=str(base / "raw"),
+            )
+
+            result = run_and_persist_cwru_pipeline(
+                state,
+                executors=executors,
+                runs_dir=runs_dir,
+            )
+            validated = validate_state(result.state)
+            index = load_run_index(runs_dir)
+            state_path_exists = Path(result.snapshot.state_path).exists()
+            summary_path_exists = Path(result.snapshot.summary_path).exists()
+
+        self.assertEqual(
+            calls,
+            [
+                "manifest",
+                "profile",
+                "cleaning",
+                "structuring",
+                "modeling",
+                "evaluation",
+                "reporting",
+            ],
+        )
+        self.assertEqual(validated.current_stage, "completed")
+        self.assertEqual(result.snapshot.run_id, "run-persisted-001")
+        self.assertEqual(result.snapshot.n_artifacts, 11)
+        self.assertEqual(result.snapshot.n_decisions, 17)
+        self.assertEqual(result.snapshot.n_errors, 0)
+        self.assertTrue(state_path_exists)
+        self.assertTrue(summary_path_exists)
+        self.assertEqual(index.runs[0].run_id, "run-persisted-001")
+        self.assertEqual(index.runs[0].f1_score, 0.8)
 
 
 def _paths(base: Path) -> dict[str, Path]:

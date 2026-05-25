@@ -2,24 +2,94 @@
 
 \section{Protocolo experimental}
 
-Esta sección documentará los experimentos ejecutados sobre CWRU Bearing Dataset.
-Cada experimento deberá indicar:
+La Fase 2 introduce un protocolo experimental local para pasar de una unica
+ejecucion valida a un conjunto pequeno de ejecuciones comparables. El protocolo
+se implementa en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/services/experiment_protocol.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La unidad principal es un manifiesto `ExperimentPlan`, compuesto por varias
+entradas `ExperimentSpec`. Cada entrada fija un `run\_id`, una descripcion y una
+configuracion de modelado validada mediante `ModelingConfig`. La ejecucion del
+plan reutiliza el wrapper persistido del pipeline y, al finalizar, invoca el
+registro consultable para comparar metricas entre runs.
+
+Cada plan conserva tres artefactos agregados:
 
 \begin{itemize}
-  \item versión del manifiesto;
-  \item configuración de ventanas;
-  \item features o tensores usados;
-  \item modelo e hiperparámetros;
-  \item estrategia de partición;
-  \item métricas obtenidas;
-  \item artefactos generados.
+  \item `experiment\_plan.json`, con el manifiesto experimental;
+  \item `comparison.json`, con la comparacion estructurada;
+  \item `results\_table.md`, con la tabla resumida para documentacion.
 \end{itemize}
 
-\section{Experimento base}
+Ademas, los modelos, predicciones, metricas e informes finales se escriben
+dentro de la carpeta de cada experimento para evitar sobrescrituras entre
+runs comparables.
 
-El primer experimento comparará modelos clásicos de detección de anomalías
-entrenados con ventanas normales y evaluados contra ventanas normales retenidas
-y ventanas con fallo.
+\section{Plan CWRU Isolation Forest Threshold}
+
+El primer plan experimental real se identifica como:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+cwru_iforest_threshold_v1
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El objetivo es estudiar una variacion controlada del umbral de decision del
+modelo base Isolation Forest. No se introduce ningun algoritmo nuevo, ya que la
+regla de la arquitectura exige que todo modelo disponible para un agente tenga
+un ejecutor determinista reproducible.
+
+Los dos runs ejecutados han sido:
+
+\begin{itemize}
+  \item `cwru\_iforest\_threshold\_v1\_baseline\_threshold\_099`;
+  \item `cwru\_iforest\_threshold\_v1\_conservative\_threshold\_100`.
+\end{itemize}
+
+Ambos mantienen constante el dataset, la limpieza, la estructuracion temporal,
+el algoritmo, la semilla y `n\_estimators=200`. La unica variable modificada es
+`threshold\_quantile`: 0.99 para el baseline y 1.00 para la variante
+conservadora.
+
+\begin{table}[h]
+\centering
+\caption{Comparacion local de umbral con Isolation Forest sobre CWRU}
+\label{tab:cwru-iforest-threshold}
+\begin{tabular}{lccccc}
+\toprule
+Experimento & Umbral & Precision & Recall & F1 & FPR \\
+\midrule
+Baseline & 0.99 & 0.9991 & 1.0000 & 0.9996 & 0.0513 \\
+Conservador & 1.00 & 0.9996 & 1.0000 & 0.9998 & 0.0256 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Los dos runs quedan aprobados por el agente evaluador. La variante conservadora
+reduce la tasa de falsos positivos de 0.0513 a 0.0256 y mejora ligeramente la
+precision y el F1-score, manteniendo recall 1.0000. En este benchmark, por
+tanto, el umbral conservador resulta preferible para reducir falsas alarmas sin
+penalizar la deteccion de fallos.
+
+Los artefactos agregados del plan quedan en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/experiments/cwru_local/cwru_iforest_threshold_v1/
+\end{verbatim}
+\end{minipage}
+\end{center}
 
 \section{Experimentos posteriores}
 
