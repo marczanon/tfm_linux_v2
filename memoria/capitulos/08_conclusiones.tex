@@ -11,9 +11,15 @@ anomalías.
 Líneas previstas:
 
 \begin{itemize}
-  \item ampliar la validación con NASA IMS Bearing Dataset;
-  \item incorporar autoencoders para ventanas crudas;
-  \item añadir persistencia de checkpoints;
-  \item exponer el MVP mediante API;
+  \item ampliar la validación con NASA IMS Bearing Dataset u otros datasets
+        industriales mas complejos;
+  \item incorporar modelos adicionales con ejecutores deterministas, como PCA
+        con error de reconstruccion, One-Class SVM, LOF y autoencoders;
+  \item aumentar el poder de decision de los agentes mediante contratos
+        estrictos, alternativas justificadas y planes experimentales acotados;
+  \item definir ejecuciones controladas desde API y Human Review antes de
+        permitir trabajos costosos mediante `POST /runs`;
+  \item añadir persistencia de checkpoints cuando sea necesaria para
+        ejecuciones largas;
   \item preparar ejecución Docker y SLURM cuando el flujo local sea estable.
 \end{itemize}

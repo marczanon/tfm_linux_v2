@@ -2,6 +2,10 @@
 
 Fecha de inicio: 2026-05-24.
 
+Estado: consolidada como base de trabajo tras implementar persistencia local,
+registro consultable, protocolo experimental y API minima de lectura. La guia
+activa para nuevas ampliaciones es `codigo/docs/26_hoja_ruta_fase_3.md`.
+
 ## Punto de partida
 
 La Fase 1 queda cerrada como MVP local funcional. El sistema ya ejecuta el

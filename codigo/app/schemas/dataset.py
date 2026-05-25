@@ -5,15 +5,38 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import Field, NonNegativeInt, PositiveInt, model_validator
+from pydantic import (
+    Field,
+    NonNegativeInt,
+    PositiveInt,
+    field_validator,
+    model_validator,
+)
 
-from codigo.app.schemas.common import StrictBaseModel
+from codigo.app.schemas.common import JsonScalar, StrictBaseModel
 
 DatasetName = Literal["cwru_bearing", "nasa_ims_bearing"]
 DatasetLabel = Literal["normal", "fault"]
 FaultType = Literal["inner_race", "outer_race", "ball"]
 SensorChannelName = Literal["DE_time", "FE_time", "BA_time", "RPM"]
-SourceFormat = Literal["mat", "zip", "csv", "parquet"]
+SourceFormat = Literal[
+    "mat",
+    "zip",
+    "csv",
+    "txt",
+    "tsv",
+    "npz",
+    "parquet",
+    "directory",
+]
+DatasetDomain = Literal["rotating_machinery", "industrial_time_series", "unknown"]
+AssetType = Literal["bearing", "motor", "turbine", "pump", "unknown"]
+LabelAvailability = Literal["file_level", "window_level", "run_level", "none", "partial"]
+TaskType = Literal["binary_anomaly", "multiclass_fault", "run_to_failure", "unknown"]
+CommonDatasetLabel = Literal["normal", "fault", "unknown", "degradation"]
+
+
+DATASET_ID_PATTERN = r"^[a-z0-9][a-z0-9_]*$"
 
 
 class SignalChannel(StrictBaseModel):
@@ -87,3 +110,91 @@ class DatasetManifest(StrictBaseModel):
         for row in self.rows:
             counts[row.label] += 1
         return counts
+
+
+class DatasetDescriptor(StrictBaseModel):
+    """Descriptor comun de un dataset antes de generar el manifiesto."""
+
+    dataset_id: str = Field(min_length=1, pattern=DATASET_ID_PATTERN)
+    dataset_name: str = Field(min_length=1)
+    domain: DatasetDomain
+    asset_type: AssetType
+    raw_path: str = Field(min_length=1)
+    source_format: SourceFormat
+    adapter_id: str = Field(min_length=1, pattern=DATASET_ID_PATTERN)
+    label_availability: LabelAvailability
+    task_type: TaskType
+    sampling_rate_hz: float | None = Field(default=None, gt=0.0)
+    channel_names: list[str] = Field(default_factory=list)
+    has_multiple_conditions: bool
+    has_run_to_failure: bool
+    metadata: dict[str, JsonScalar] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("channel_names")
+    @classmethod
+    def validate_channel_names(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("channel_names cannot contain empty values")
+        if len(value) != len(set(value)):
+            raise ValueError("channel_names must be unique")
+        return value
+
+
+class DatasetAdapterInfo(StrictBaseModel):
+    """Metadata ligera de un adaptador de dataset registrado."""
+
+    adapter_id: str = Field(min_length=1, pattern=DATASET_ID_PATTERN)
+    dataset_id: str = Field(min_length=1, pattern=DATASET_ID_PATTERN)
+    display_name: str = Field(min_length=1)
+    supported_source_formats: list[SourceFormat] = Field(min_length=1)
+    supports_descriptor: bool = True
+    supports_manifest: bool = False
+    is_experimental: bool = True
+    notes: str | None = None
+
+
+class CommonManifestRecord(StrictBaseModel):
+    """Fila comun de manifiesto independiente del dataset concreto."""
+
+    record_id: str = Field(min_length=1)
+    dataset: str = Field(min_length=1, pattern=DATASET_ID_PATTERN)
+    source_path: str = Field(min_length=1)
+    source_format: SourceFormat
+    label: CommonDatasetLabel
+    label_detail: str | None = None
+    condition_id: str | None = None
+    asset_id: str | None = None
+    run_id: str | None = None
+    timestamp_start: datetime | None = None
+    timestamp_end: datetime | None = None
+    sampling_rate_hz: float | None = Field(default=None, gt=0.0)
+    target_sample_rate_hz: float | None = Field(default=None, gt=0.0)
+    channel_names: list[str] = Field(min_length=1)
+    primary_channel: str | None = None
+    n_channels: PositiveInt
+    metadata_json: dict[str, JsonScalar] = Field(default_factory=dict)
+    notes: str | None = None
+
+    @field_validator("channel_names")
+    @classmethod
+    def validate_manifest_channel_names(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("channel_names cannot contain empty values")
+        if len(value) != len(set(value)):
+            raise ValueError("channel_names must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_channel_consistency(self) -> "CommonManifestRecord":
+        if self.n_channels != len(self.channel_names):
+            raise ValueError("n_channels must match channel_names length")
+        if self.primary_channel is not None and self.primary_channel not in self.channel_names:
+            raise ValueError("primary_channel must be present in channel_names")
+        if (
+            self.timestamp_start is not None
+            and self.timestamp_end is not None
+            and self.timestamp_end < self.timestamp_start
+        ):
+            raise ValueError("timestamp_end cannot be earlier than timestamp_start")
+        return self

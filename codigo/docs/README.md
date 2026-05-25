@@ -60,3 +60,12 @@ Documentos iniciales:
   generar una tabla comparativa reproducible.
 - `25_api_minima_fastapi.md`: primera API FastAPI de consulta sobre runs
   persistidos, artefactos e informes.
+- `26_hoja_ruta_fase_3.md`: hoja de ruta activa para ampliar el sistema hacia
+  datasets mas complejos, mas modelos deterministas y agentes con mayor poder
+  de decision bajo contratos estrictos.
+- `27_diseno_soporte_multidataset.md`: diseno tecnico del soporte multi-dataset;
+  define descriptor comun, manifiesto comun, registro de adaptadores,
+  estrategia para CWRU/NASA IMS y pruebas minimas.
+- `28_inspeccion_nasa_ims.md`: inspeccion local/documental del paquete NASA IMS;
+  resume contenedores anidados, estructura por test, discrepancias observadas,
+  requisitos de extraccion y consecuencias para la futura interfaz.

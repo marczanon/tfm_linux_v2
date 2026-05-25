@@ -9,12 +9,13 @@ Este repositorio corresponde a un TFM sobre una aplicacion multiagente para proc
 Documento de referencia principal:
 
 - `Documento TFM_ Arquitectura y Hoja de Ruta.pdf`
+- `codigo/docs/26_hoja_ruta_fase_3.md`
 - `codigo/docs/20_hoja_ruta_fase_2.md`
 - `codigo/docs/19_estado_actual_mvp.md`
 
 `HOJA_RUTA_TFM.md` queda como referencia historica de la Fase 1. A partir del
-cierre del MVP local, la guia operativa para nuevas sesiones es la hoja de ruta
-de Fase 2.
+cierre de la Fase 2, la guia operativa para nuevas sesiones es la hoja de ruta
+de Fase 3.
 
 La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los agentes toman decisiones y generan configuraciones estructuradas. Los ejecutores Python deterministas realizan las transformaciones reales sobre los datos.
 
@@ -25,7 +26,8 @@ La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los 
 - La memoria LaTeX vive en `memoria/`.
 - Los recursos academicos, PDFs, referencias y diagramas viven en `recursos/`.
 - La memoria debe actualizarse en paralelo al desarrollo.
-- Antes de implementar una fase, revisar `codigo/docs/20_hoja_ruta_fase_2.md`.
+- Antes de implementar una fase, revisar `codigo/docs/26_hoja_ruta_fase_3.md`
+  y, como contexto historico, `codigo/docs/20_hoja_ruta_fase_2.md`.
 - Priorizar un MVP local antes de Docker, SLURM o frontend.
 - No permitir que un agente escriba y ejecute codigo arbitrario para transformar datos.
 - Las decisiones de agentes deben pasar por esquemas Pydantic o contratos JSON estrictos.
@@ -79,8 +81,8 @@ recursos/diagramas/
 ## Orden recomendado de desarrollo
 
 Este orden historico corresponde a la Fase 1 y se conserva como contexto del
-MVP ya construido. Para trabajo nuevo, seguir la Fase 2 definida en
-`codigo/docs/20_hoja_ruta_fase_2.md`.
+MVP ya construido. Para trabajo nuevo, seguir la Fase 3 definida en
+`codigo/docs/26_hoja_ruta_fase_3.md`.
 
 1. Crear estructura de directorios.
 2. Crear esqueleto LaTeX de la memoria.
@@ -232,6 +234,7 @@ No abordar dentro de la Fase 2:
 ## Nota operativa
 
 Antes de empezar cualquier cambio de codigo, leer este archivo y
-`codigo/docs/20_hoja_ruta_fase_2.md`. El proyecto debe avanzar paso a paso,
-manteniendo reproducibilidad, trazabilidad y separacion limpia entre aplicacion
-y memoria academica.
+`codigo/docs/26_hoja_ruta_fase_3.md`, usando
+`codigo/docs/20_hoja_ruta_fase_2.md` como referencia de cierre de la fase
+anterior. El proyecto debe avanzar paso a paso, manteniendo reproducibilidad,
+trazabilidad y separacion limpia entre aplicacion y memoria academica.

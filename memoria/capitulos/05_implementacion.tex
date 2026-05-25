@@ -769,6 +769,47 @@ aprobacion y control de coste. Esta decision mantiene separada la capa de
 consulta de la logica que podria lanzar trabajos de modelado o experimentos
 multiples.
 
+\section{Contratos Iniciales Multi-Dataset}
+
+Como primer paso de la Fase 3 se han incorporado contratos comunes para
+desacoplar el pipeline del caso CWRU sin modificar todavia los ejecutores ya
+validados. En `codigo/app/schemas/dataset.py` se han añadido
+`DatasetDescriptor`, `DatasetAdapterInfo` y `CommonManifestRecord`. Estos
+modelos permiten describir datasets heterogeneos, registrar adaptadores y
+representar filas de manifiesto comunes sin almacenar senales completas.
+
+Tambien se ha creado el servicio `codigo/app/services/dataset\_adapters.py`,
+que expone un registro local de adaptadores. La primera version incluye
+adaptadores para CWRU, NASA IMS y senales tabulares genericas. Esta capa solo
+inspecciona rutas y cabeceras ligeras; no modifica datos crudos ni lanza
+transformaciones costosas.
+
+La decision mantiene el flujo CWRU existente como benchmark de regresion. El
+adaptador `cwru\_bearing` se ha integrado como envoltorio del manifiesto actual
+mediante una funcion comun de generacion de manifiestos, delegando internamente
+en el ejecutor CWRU ya verificado. Los tests comprueban que el CSV generado por
+esta ruta comun coincide con el manifiesto producido por la ruta historica.
+
+Para NASA IMS, el adaptador reconoce rutas o ficheros con patron temporal
+compatible, infiere canales desde ficheros sinteticos pequenos y registra
+advertencias cuando detecta recuentos de canales inconsistentes. Tras la
+inspeccion local, se ha implementado `build\_manifest(...)` solo para carpetas
+preextraidas. Esta funcion genera un manifiesto comun con una fila por snapshot,
+`label = unknown`, fallo final conocido a nivel de set, frecuencia de 20 kHz,
+canales serializados como JSON y metadatos escalares sobre puntos por fichero,
+duracion nominal, carga, regimen y variante local.
+
+La inspeccion local ha confirmado que el paquete disponible se organiza como
+`zip -> 7z -> rar`, con tres archivos RAR de experimentos y un README interno.
+El README describe tres ensayos test-to-failure con snapshots ASCII de un
+segundo, 20.480 puntos por fichero y frecuencia de muestreo de 20 kHz. Tambien
+se ha detectado una discrepancia local en el tercer RAR, que lista mas ficheros
+y una ruta interna distinta a la descrita por el README. Por ello, la primera
+implementacion de manifiesto NASA IMS trabaja con carpetas preextraidas y
+sinteticas antes de procesar el paquete completo. La ingestion directa del
+contenedor anidado queda pospuesta hasta decidir dependencias y experiencia de
+interfaz.
+
 \section{Dependencias}
 
 Se ha creado `requirements.txt` como punto inicial para construir el entorno de
@@ -800,16 +841,23 @@ limpiador LLM, el agente estructurador LLM, el agente modelador LLM, el agente
 evaluador LLM, el agente redactor LLM, el ejecutor de informes, el parser JSON,
 la persistencia local de ejecuciones, el registro consultable, el protocolo
 experimental local, la API minima de consulta, la configuracion de razonamiento
-de Ollama, el rechazo de transiciones invalidas y el fallback determinista. En
-esta fase se han ejecutado 110 tests
+de Ollama, los contratos multi-dataset iniciales, el registro de adaptadores de
+dataset, el manifiesto comun NASA IMS sobre una carpeta sintetica preextraida,
+el rechazo de paquetes comprimidos para ese manifiesto, el rechazo de
+transiciones invalidas y el fallback determinista. En esta fase se han
+ejecutado 130 tests
 correctamente.
 
 \section{Siguiente Paso de Implementación}
 
-Tras incorporar la consulta y comparacion de runs persistidos por API, el
-siguiente avance tecnico no deberia ser lanzar ejecuciones desde HTTP, sino
-definir primero las politicas de `POST /runs`: validacion de solicitudes,
-control de coste, limites de recursos y relacion con una futura revision
-humana. El punto Human Review queda pospuesto hasta disponer de una aplicacion
-o interfaz donde la aprobacion pueda disenarse con una logica mas ajustada al
-uso real del sistema.
+Tras incorporar la consulta y comparacion de runs persistidos por API, la
+siguiente fase no se plantea como una simple ampliacion de endpoints, sino como
+una validacion mas exigente del nucleo multiagente. La prioridad sera extender
+el sistema a datasets industriales mas complejos, incorporar nuevos modelos con
+ejecutores deterministas y ampliar el espacio de decision de los agentes bajo
+contratos estrictos.
+
+El endpoint `POST /runs` y el punto Human Review quedan ligados a esa
+evolucion: solo deberian implementarse cuando existan politicas claras de
+validacion de solicitudes, control de coste, limites de recursos y aprobacion
+humana para ejecuciones potencialmente costosas.

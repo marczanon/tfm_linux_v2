@@ -10,6 +10,9 @@ from codigo.app.schemas.agent_decisions import (
     SupervisorDecision,
 )
 from codigo.app.schemas.dataset import (
+    CommonManifestRecord,
+    DatasetAdapterInfo,
+    DatasetDescriptor,
     DatasetManifest,
     DatasetManifestRow,
     FaultMetadata,
@@ -45,6 +48,9 @@ __all__ = [
     "CleaningDecision",
     "CleaningConfig",
     "CleaningResult",
+    "CommonManifestRecord",
+    "DatasetAdapterInfo",
+    "DatasetDescriptor",
     "DatasetManifest",
     "DatasetManifestRow",
     "DatasetProfileSummary",

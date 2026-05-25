@@ -38,11 +38,19 @@ from codigo.app.services.experiment_protocol import (
     default_cwru_experiment_plan,
     run_cwru_experiment_plan,
 )
+from codigo.app.services.dataset_adapters import (
+    DatasetAdapter,
+    describe_dataset,
+    get_dataset_adapter,
+    infer_dataset_adapter,
+    list_dataset_adapters,
+)
 
 __all__ = [
     "DEFAULT_EXPERIMENTS_DIR",
     "DEFAULT_PLAN_ID",
     "DEFAULT_RUNS_DIR",
+    "DatasetAdapter",
     "ExperimentPlan",
     "ExperimentPlanResult",
     "ExperimentRunSummary",
@@ -59,10 +67,14 @@ __all__ = [
     "RunSnapshot",
     "compare_runs",
     "default_cwru_experiment_plan",
+    "describe_dataset",
     "extract_decisions",
+    "get_dataset_adapter",
     "get_run",
     "get_run_artifacts",
     "get_default_json_llm_client",
+    "infer_dataset_adapter",
+    "list_dataset_adapters",
     "list_runs",
     "load_run_index",
     "load_run_snapshot",

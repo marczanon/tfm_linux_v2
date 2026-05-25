@@ -114,6 +114,53 @@ def generate_cwru_manifest(
         )
 
 
+def generate_dataset_manifest(
+    raw_dir: str | Path,
+    output_dir: str | Path,
+    adapter_id: str | None = None,
+) -> ManifestResult:
+    """Genera un manifiesto usando un adaptador de dataset registrado."""
+
+    from codigo.app.services.dataset_adapters import (
+        get_dataset_adapter,
+        infer_dataset_adapter,
+    )
+
+    started_at = datetime.now(UTC)
+    output_path = Path(output_dir) / "manifest.csv"
+    try:
+        adapter = (
+            get_dataset_adapter(adapter_id)
+            if adapter_id is not None
+            else infer_dataset_adapter(raw_dir)
+        )
+        if not adapter.info.supports_manifest:
+            raise ValueError(
+                f"adapter does not support manifest generation: {adapter.info.adapter_id}"
+            )
+        return adapter.build_manifest(Path(raw_dir), Path(output_dir))
+    except Exception as exc:
+        error = PipelineError(
+            stage="dataset_manifest",
+            node="manifest_executor",
+            message=str(exc),
+            recoverable=True,
+        )
+        return ManifestResult(
+            executor_name="dataset_manifest",
+            status="failed",
+            message="Dataset manifest generation failed.",
+            artifacts=[],
+            errors=[error],
+            state_updates={},
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+            manifest_path=str(output_path),
+            n_rows=0,
+            label_counts={"normal": 0, "fault": 0},
+        )
+
+
 def _row_from_file(path: Path) -> DatasetManifestRow:
     file_id = path.stem
     if file_id in NORMAL_IDS:

@@ -132,7 +132,7 @@ conda run -n tfm_v2 python -m unittest discover codigo/tests
 Resultado:
 
 ```text
-Ran 110 tests in 0.350s
+Ran 127 tests in 0.335s
 OK
 ```
 

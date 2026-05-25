@@ -30,6 +30,41 @@ datos .mat crudos
 \end{minipage}
 \end{center}
 
+\section{Generalización multi-dataset}
+
+Tras consolidar el MVP sobre CWRU, la siguiente extensión metodológica consiste
+en separar explícitamente tres niveles: el dataset crudo, el adaptador
+determinista de dataset y el pipeline común. Esta separación evita que los
+ejecutores dependan de nombres de fichero o estructuras particulares de un
+benchmark concreto.
+
+La generalización se plantea mediante un descriptor común de dataset, un
+manifiesto común con una fila por unidad cruda procesable y un registro de
+adaptadores. CWRU se mantendrá como benchmark de regresión, mientras que NASA
+IMS se contempla como primer candidato para validar el sistema con series más
+largas, múltiples canales y condiciones de degradación menos triviales.
+
+La inspección local de NASA IMS muestra que el paquete se distribuye como un
+contenedor anidado (`zip`, `7z` y `rar`) y que la aplicación deberá distinguir
+entre detección de formato, selección de adaptador y generación efectiva de
+manifiesto. En una futura interfaz, el usuario debería ver una previsualización
+del descriptor del dataset, los formatos detectados, las limitaciones de
+extracción y si el manifiesto puede generarse directamente o requiere preparar
+una carpeta preextraída.
+
+Como primer paso ejecutable, el manifiesto NASA IMS se restringe a carpetas ya
+preextraídas. Cada snapshot temporal se representa como una fila común con
+etiqueta inicial desconocida, fallo final conocido a nivel de set y metadatos
+de frecuencia, canales y variante local. Esta decisión permite validar la
+generalización del pipeline sin incorporar todavía dependencias de extracción
+ni una política de etiquetado temporal.
+
+Los agentes no interpretarán directamente carpetas crudas. Recibirán
+descriptores, resúmenes de manifiesto y diagnósticos de calidad generados por
+código determinista. De este modo pueden aumentar su capacidad de decisión
+--por ejemplo, recomendando canal, ventana, familia de features o modelo-- sin
+ejecutar código arbitrario ni saltarse los contratos del sistema.
+
 \section{Manifiesto del dataset}
 
 El primer artefacto metodológico será un manifiesto con una fila por fichero
