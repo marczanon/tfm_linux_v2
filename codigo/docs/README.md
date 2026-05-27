@@ -80,3 +80,6 @@ Documentos iniciales:
 - `31_backlog_fase_4_memoria_agentica.md`: backlog para una futura memoria
   agentica supervisada con RAG, alimentada por post-mortems y revisiones
   humanas sin alterar metricas ni contratos de ejecucion.
+- `32_hoja_ruta_fase_4.md`: hoja de ruta activa de Fase 4; define memoria
+  agentica supervisada con embeddings y base vectorial por agente, modos
+  conmutables de Human-in-the-loop y aprendizaje controlado de experiencias.

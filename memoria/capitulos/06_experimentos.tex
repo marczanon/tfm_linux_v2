@@ -315,6 +315,173 @@ de revision humana para que el razonamiento pueda etiquetarse posteriormente
 como ejemplo positivo, negativo o caso frontera antes de incorporarlo a una
 memoria contextual.
 
+\section{Primer Experimento con Memoria Agentica}
+
+Como primer experimento de Fase 4 se activo la memoria RAG del modelador sobre
+la misma run NASA sintetica rechazada. Previamente se habia incorporado a
+`modeler\_memory` el segundo reintento de Fase 3 como `boundary\_case`
+revisado: la direccion de bajar el umbral era correcta, pero la magnitud habia
+producido FPR 1.0000.
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_nasa_ims_agentic_retry \
+  --model qwen3.5:4b \
+  --source-run-id nasa-ims-synth-agentic-qwen-fase3 \
+  --run-id-prefix nasa-ims-synth-agentic-qwen-fase4-memory \
+  --max-attempts 1 \
+  --use-memory \
+  --memory-dir codigo/reports/reasoning_memory
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El sistema recupero el recuerdo correcto y el agente declaro haberlo usado. La
+decision cito explicitamente el `memory\_record\_id` del caso de
+sobrecorreccion. Sin embargo, Qwen volvio a proponer
+`threshold\_quantile=0.50`, reproduciendo la misma sobrecorreccion que la
+memoria advertia.
+
+\begin{table}[h]
+\centering
+\caption{Reintento con memoria agentica sobre NASA IMS sintetico}
+\label{tab:nasa-ims-agentic-memory}
+\begin{tabular}{lccccc}
+\toprule
+Run & Umbral & Precision & Recall & F1 & FPR \\
+\midrule
+Base & 0.99 & 0.9130 & 0.6000 & 0.7241 & 0.1429 \\
+Memoria & 0.50 & 0.7143 & 1.0000 & 0.8333 & 1.0000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Este resultado es importante porque separa dos capacidades distintas. La
+infraestructura de memoria funciona: recupera el caso relevante, lo inyecta en
+el prompt y exige que el agente cite los recuerdos usados. No obstante, el LLM
+local no siempre convierte esa evidencia en una decision prudente. Para la
+siguiente iteracion sera necesario auditar el uso de memoria: el agente debera
+explicar como evita repetir fallos asociados a recuerdos `boundary\_case` o
+`warning`, no solo declarar que los ha leido.
+
+Tras endurecer el contrato, se ejecuto una segunda variante con auditoria de
+uso de memoria:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_nasa_ims_agentic_retry \
+  --model qwen3.5:4b \
+  --source-run-id nasa-ims-synth-agentic-qwen-fase3 \
+  --run-id-prefix nasa-ims-synth-agentic-qwen-fase4-memory-audit \
+  --max-attempts 1 \
+  --use-memory \
+  --memory-dir codigo/reports/reasoning_memory
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+En esta segunda ejecucion, Qwen no solo cito la memoria, sino que declaro que la
+usaba como `adapted`, explico su influencia y propuso una mitigacion del riesgo
+de sobrecorreccion. Aun asi, volvio a elegir `threshold\_quantile=0.50` y el
+resultado mantuvo FPR 1.0000. La nueva auditoria clasifico el caso como
+repeticion de fallo de frontera, proporcionando evidencia estructurada de que
+el agente habia leido la advertencia pero no la habia transformado en una accion
+suficientemente distinta.
+
+La auditoria se incorporo despues al indice RAG como una nueva memoria de tipo
+`warning`, usando `memory\_usage\_audit` como fuente. Al reconstruir la memoria
+con `qwen3-embedding:0.6b`, el indice del modelador contiene dos recuerdos:
+el caso frontera revisado por humano y la advertencia derivada de la auditoria.
+En una consulta de humo sobre repeticion de fallo por umbral, la advertencia se
+recupera antes que el caso frontera, con uso `negative\_warning`. Esto prepara
+la siguiente ejecucion: evaluar si el agente cambia su decision cuando no solo
+recibe el recuerdo original, sino tambien la evidencia de que ya lo interpreto
+mal una vez.
+
+La ejecucion con memoria ampliada produjo un cambio cualitativo. Qwen recupero
+y cito los dos recuerdos, pero esta vez no repitio `threshold\_quantile=0.50`.
+Propuso un ajuste conservador a `threshold\_quantile=0.95`, explicando que la
+direccion de bajar el umbral seguia siendo razonable pero que la magnitud debia
+limitarse por la advertencia de sobrecorreccion. El resultado mejoro recall
+`0.6000 -> 0.6571` y F1 `0.7241 -> 0.7541`, pero aumento FPR
+`0.1429 -> 0.2143`. Por ello, el evaluador rechazo la ejecucion. La auditoria
+de memoria clasifico el uso como `memory\_aligned`: el agente aplico la leccion
+de no repetir el salto radical, aunque el ajuste resultante siguio siendo
+insuficiente.
+
+Tras conectar los post-mortems con el contrato `DecisionEpisode`, se ejecuto
+una nueva run Qwen con el mismo protocolo. El resultado numerico fue equivalente
+al reintento anterior, pero la ejecucion genero automaticamente
+`decision\_episode.json` y `memory\_candidate.json`. El candidato quedo
+clasificado como `boundary\_case` para el modelador: documenta que la memoria
+evito repetir el cambio radical de umbral, pero que el ajuste moderado solo
+produjo una mejora parcial y aumento FPR. Al reconstruir la memoria canonica
+con embeddings Qwen, este candidato entro en `modeler\_memory` como recuerdo
+de tipo `decision\_episode`.
+
+Una consulta de humo sobre mejora parcial de umbral y comparacion de familias
+de modelo recupero el nuevo episodio como `boundary\_context`, junto con el
+caso humano revisado y las auditorias de uso de memoria. Esto confirma que la
+memoria ya contiene episodios completos de decision, no solo advertencias
+puntuales sobre umbrales.
+
+Con esa memoria por episodios se ejecuto una nueva variante orientada a
+comprobar si el modelador dejaba de razonar exclusivamente sobre el umbral. El
+contrato de prompt incluyo `source\_type` y candidatos comparables. La run
+`nasa-ims-synth-agentic-qwen-fase4-model-family-attempt-01` recupero cinco
+recuerdos, cito tres de ellos y anadio explicitamente
+`pca\_reconstruction\_error\_candidate` como alternativa. La configuracion
+ejecutada siguio siendo Isolation Forest con umbral 0.95, por lo que las
+metricas fueron equivalentes al caso anterior: precision 0.8846, recall 0.6571,
+F1 0.7541 y FPR 0.2143. El avance principal no fue metrico, sino de
+trazabilidad: el agente dejo evidencia de una comparacion entre familias de
+modelo dentro del contrato validado.
+
+La misma ejecucion revelo una limitacion nueva. Aunque Qwen uso memoria y
+planteo PCA como alternativa, su explicacion incluyo una inconsistencia
+numerica: describio `0.95` como mayor que `0.99` y trato el cuantil `0.99` como
+si fuera bajo. Para convertir este fallo en evidencia reutilizable se amplio la
+auditoria de memoria y se ejecuto
+`nasa-ims-synth-agentic-qwen-fase4-coherence-audit-attempt-01`. La auditoria
+clasifico el resultado como `memory\_reasoning\_inconsistent` y guardo el
+motivo concreto en `memory\_usage\_audit.json`. Tras reconstruir el indice con
+`qwen3-embedding:0.6b`, `modeler\_memory` contiene 9 registros: un caso humano
+revisado, cinco auditorias de uso y tres episodios de decision.
+
+El ultimo ajuste de esta serie consistio en convertir la recomendacion de
+cambiar de familia en una guia ejecutable dentro del prompt. Cuando la memoria
+indica que los ajustes de umbral en Isolation Forest ya han producido mejoras
+parciales rechazadas, la guia de reintento marca PCA como configuracion
+preferente o, alternativamente, permite que el agente decida parar. Con esta
+guia, la run final de PCA ejecuto realmente el modelo por error de
+reconstruccion con umbral 0.99.
+
+\begin{table}[h]
+\centering
+\caption{Cambio de familia guiado por memoria sobre NASA IMS sintetico}
+\label{tab:nasa-ims-agentic-pca-memory}
+\begin{tabular}{lccccc}
+\toprule
+Run & Modelo & Precision & Recall & F1 & FPR \\
+\midrule
+Base & IForest 0.99 & 0.9130 & 0.6000 & 0.7241 & 0.1429 \\
+IForest memoria & IForest 0.95 & 0.8846 & 0.6571 & 0.7541 & 0.2143 \\
+PCA memoria & PCA 0.99 & 0.9375 & 0.4286 & 0.5882 & 0.0714 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+El resultado muestra un trade-off claro: PCA redujo la tasa de falsos positivos
+por debajo del umbral operativo, pero perdio demasiadas anomalias, con recall
+0.4286. La ejecucion fue rechazada por el evaluador, pero la memoria logro su
+objetivo metodologico: provocar un cambio real de familia de modelo y generar
+evidencia sobre por que esa alternativa concreta tampoco es suficiente en su
+configuracion conservadora.
+
 \section{Experimentos posteriores}
 
 Experimentos previstos:
@@ -322,8 +489,10 @@ Experimentos previstos:
 \begin{itemize}
   \item comparación entre features temporales y frecuenciales;
   \item validación leave-one-load-out;
-  \item refinamiento de la iteracion agentica para que el modelador compare
-        tambien cambios de modelo, no solo de umbral;
+  \item ejecuciones completas con memoria transversal para estructurador,
+        modelador y evaluador, sin forzar errores artificiales;
+  \item analisis de si los agentes citan recuerdos utiles y los transforman en
+        decisiones prudentes a lo largo de varias runs normales;
   \item validación sobre NASA IMS real cuando exista una politica temporal de
         etiquetado defendible.
 \end{itemize}

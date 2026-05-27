@@ -9,10 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from codigo.app.agents.evaluator import decide_evaluation_action
-from codigo.app.agents.modeler import decide_modeling_retry_action
+from codigo.app.agents.modeler import (
+    decide_modeling_retry_action,
+    retrieve_modeler_retry_memory_context,
+)
 from codigo.app.executors.evaluation import generate_evaluation_report
 from codigo.app.executors.modeling import generate_model_outputs
 from codigo.app.schemas.agent_decisions import ModelingRetryDecision
+from codigo.app.schemas.reasoning import RetrievedMemoryContext
 from codigo.app.schemas.state import (
     ArtifactRef,
     EvaluationResult,
@@ -22,10 +26,20 @@ from codigo.app.schemas.state import (
     StateMessage,
     TFMStateModel,
 )
+from codigo.app.services.reasoning_memory_index import DEFAULT_MEMORY_DIR
 from codigo.app.services.iteration_analysis import (
     generate_prediction_failure_analysis,
 )
 from codigo.app.services.llm import OllamaJSONClient
+from codigo.app.services.memory_usage_audit import (
+    build_modeling_retry_memory_usage_audit,
+    write_memory_usage_audit,
+)
+from codigo.app.services.decision_memory import (
+    build_modeling_retry_decision_episode,
+    build_modeling_retry_memory_candidate,
+    write_decision_memory_artifacts,
+)
 from codigo.app.services.reasoning_audit import (
     build_modeling_retry_postmortem,
     write_reasoning_postmortem,
@@ -36,6 +50,13 @@ from codigo.app.services.run_persistence import (
     save_run_snapshot,
 )
 from codigo.app.services.run_registry import compare_runs
+from codigo.app.services.vector_memory import (
+    DEFAULT_OLLAMA_EMBEDDING_MODEL,
+    LocalHashEmbeddingModel,
+    LocalJsonVectorMemoryStore,
+    OllamaEmbeddingProvider,
+    VectorMemoryStore,
+)
 
 
 MIN_RECALL_REQUIRED = 0.90
@@ -58,6 +79,9 @@ def main() -> None:
         runs_dir=Path(args.runs_dir),
         request_human_review=args.request_human_review,
         reviewer_hint=args.reviewer,
+        memory_store=_memory_store_from_args(args) if args.use_memory else None,
+        memory_top_k=args.memory_top_k,
+        memory_min_similarity=args.memory_min_similarity,
     )
     print(json.dumps(result, indent=2, ensure_ascii=True))
 
@@ -71,6 +95,9 @@ def run_agentic_retry_loop(
     runs_dir: Path,
     request_human_review: bool = False,
     reviewer_hint: str | None = None,
+    memory_store: VectorMemoryStore | None = None,
+    memory_top_k: int = 3,
+    memory_min_similarity: float = 0.0,
 ) -> dict[str, Any]:
     """Runs at most ``max_attempts`` retries chosen by the modeler agent."""
 
@@ -93,12 +120,30 @@ def run_agentic_retry_loop(
             max_attempts=max_attempts,
         )
         reports.append(analysis_artifacts.report_path)
+        memory_context = None
+        memory_context_path = None
+        if memory_store is not None:
+            memory_context = retrieve_modeler_retry_memory_context(
+                previous_state,
+                failure_analysis=analysis_artifacts.analysis,
+                source_run_id=previous_state.run_id,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                memory_store=memory_store,
+                top_k=memory_top_k,
+                min_similarity=memory_min_similarity,
+            )
+            memory_context_path = _write_memory_context(
+                retry_run_id,
+                memory_context,
+            )
         decision = decide_modeling_retry_action(
             previous_state,
             failure_analysis=analysis_artifacts.analysis,
             source_run_id=previous_state.run_id,
             attempt_number=attempt_number,
             max_attempts=max_attempts,
+            memory_context=memory_context,
             llm_client=llm_client,
             use_llm=True,
         )
@@ -109,6 +154,8 @@ def run_agentic_retry_loop(
                 retry_run_id=retry_run_id,
                 decision=decision,
                 analysis_artifacts=analysis_artifacts,
+                memory_context_path=memory_context_path,
+                memory_context=memory_context,
             )
             snapshot = save_run_snapshot(stop_state, runs_dir)
             generated_run_ids.append(snapshot.run_id)
@@ -124,6 +171,8 @@ def run_agentic_retry_loop(
             llm_client=llm_client,
             request_human_review=request_human_review,
             reviewer_hint=reviewer_hint,
+            memory_context_path=memory_context_path,
+            memory_context=memory_context,
         )
         snapshot = save_run_snapshot(retry_state, runs_dir)
         generated_run_ids.append(snapshot.run_id)
@@ -167,7 +216,36 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--runs-dir", default="codigo/reports/runs")
     parser.add_argument("--request-human-review", action="store_true")
     parser.add_argument("--reviewer", default=None)
+    parser.add_argument("--use-memory", action="store_true")
+    parser.add_argument("--memory-dir", default=DEFAULT_MEMORY_DIR.as_posix())
+    parser.add_argument("--memory-top-k", type=int, default=3)
+    parser.add_argument("--memory-min-similarity", type=float, default=0.0)
+    parser.add_argument(
+        "--embedding-provider",
+        choices=["ollama", "local_hash"],
+        default="ollama",
+    )
+    parser.add_argument("--embedding-model", default=DEFAULT_OLLAMA_EMBEDDING_MODEL)
+    parser.add_argument("--ollama-host", default="http://127.0.0.1:11434")
+    parser.add_argument("--embedding-timeout-seconds", type=float, default=60.0)
+    parser.add_argument("--hash-dimension", type=int, default=128)
     return parser.parse_args()
+
+
+def _memory_store_from_args(args: argparse.Namespace) -> LocalJsonVectorMemoryStore:
+    provider = (
+        LocalHashEmbeddingModel(dimension=args.hash_dimension)
+        if args.embedding_provider == "local_hash"
+        else OllamaEmbeddingProvider(
+            model=args.embedding_model,
+            host=args.ollama_host,
+            timeout_seconds=args.embedding_timeout_seconds,
+        )
+    )
+    return LocalJsonVectorMemoryStore(
+        Path(args.memory_dir),
+        embedding_model=provider,
+    )
 
 
 def _load_state(run_id: str, runs_dir: Path) -> TFMStateModel:
@@ -202,6 +280,20 @@ def _failure_analysis_for_state(
     )
 
 
+def _write_memory_context(
+    retry_run_id: str,
+    memory_context: RetrievedMemoryContext,
+) -> str:
+    output_dir = Path("codigo/reports/nasa_ims_bearing") / retry_run_id / "iteration"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "retrieved_memory_context.json"
+    path.write_text(
+        json.dumps(memory_context.model_dump(mode="json"), indent=2),
+        encoding="utf-8",
+    )
+    return path.as_posix()
+
+
 def _execute_retry_attempt(
     previous_state: TFMStateModel,
     *,
@@ -211,6 +303,8 @@ def _execute_retry_attempt(
     llm_client: OllamaJSONClient,
     request_human_review: bool = False,
     reviewer_hint: str | None = None,
+    memory_context_path: str | None = None,
+    memory_context: RetrievedMemoryContext | None = None,
 ) -> TFMStateModel:
     if decision.retry_config is None:
         raise ValueError("retry_config is required to execute retry attempt")
@@ -231,6 +325,7 @@ def _execute_retry_attempt(
             retry_run_id=retry_run_id,
             decision=decision,
             analysis_artifacts=analysis_artifacts,
+            memory_context_path=memory_context_path,
             errors=modeling_result.errors,
             artifacts=modeling_result.artifacts,
         )
@@ -245,6 +340,7 @@ def _execute_retry_attempt(
         retry_run_id=retry_run_id,
         decision=decision,
         analysis_artifacts=analysis_artifacts,
+        memory_context_path=memory_context_path,
         artifacts=[*modeling_result.artifacts, *evaluation_result.artifacts],
         metrics=metrics,
         errors=evaluation_result.errors,
@@ -275,6 +371,38 @@ def _execute_retry_attempt(
         request_human_review=request_human_review,
         reviewer_hint=reviewer_hint,
     )
+    memory_usage_artifacts = None
+    if memory_context is not None or decision.used_memory_context:
+        memory_usage_audit = build_modeling_retry_memory_usage_audit(
+            run_id=retry_run_id,
+            decision=decision,
+            memory_context=memory_context,
+            before_metrics=previous_state.metrics,
+            after_metrics=state_before_eval.metrics,
+        )
+        memory_usage_artifacts = write_memory_usage_audit(
+            memory_usage_audit,
+            iteration_dir,
+        )
+    decision_episode = build_modeling_retry_decision_episode(
+        source_run_id=previous_state.run_id,
+        run_id=retry_run_id,
+        decision=decision,
+        postmortem=postmortem,
+        before_metrics=previous_state.metrics,
+        after_metrics=state_before_eval.metrics,
+        evaluation=effective_evaluation,
+        memory_context=memory_context,
+    )
+    memory_candidate = build_modeling_retry_memory_candidate(
+        decision_episode,
+        reusable_as_context=not request_human_review,
+    )
+    decision_memory_artifacts = write_decision_memory_artifacts(
+        episode=decision_episode,
+        candidate=memory_candidate,
+        output_dir=iteration_dir,
+    )
     report_path = _write_iteration_report(
         previous_state,
         state_before_eval,
@@ -283,6 +411,14 @@ def _execute_retry_attempt(
         evaluation=effective_evaluation,
         reasoning_report_path=reasoning_artifacts.report_path,
         review_report_path=reasoning_artifacts.review_report_path,
+        memory_context_path=memory_context_path,
+        memory_usage_report_path=(
+            None
+            if memory_usage_artifacts is None
+            else memory_usage_artifacts.report_path
+        ),
+        decision_episode_report_path=decision_memory_artifacts.episode_report_path,
+        memory_candidate_report_path=decision_memory_artifacts.candidate_report_path,
     )
 
     payload = state_before_eval.to_langgraph_state()
@@ -342,6 +478,57 @@ def _execute_retry_attempt(
             producer="modeler",
             metadata={"source_run_id": previous_state.run_id},
         ).model_dump(mode="json"),
+        ArtifactRef(
+            name="decision_episode",
+            artifact_type="log",
+            path=decision_memory_artifacts.episode_path,
+            producer="modeler",
+            metadata={"source_run_id": previous_state.run_id},
+        ).model_dump(mode="json"),
+        ArtifactRef(
+            name="decision_episode_report",
+            artifact_type="report",
+            path=decision_memory_artifacts.episode_report_path,
+            producer="modeler",
+            metadata={"source_run_id": previous_state.run_id},
+        ).model_dump(mode="json"),
+        ArtifactRef(
+            name="memory_candidate",
+            artifact_type="log",
+            path=decision_memory_artifacts.candidate_path,
+            producer="modeler",
+            metadata={
+                "source_run_id": previous_state.run_id,
+                "reusable_as_context": memory_candidate.reusable_as_context,
+            },
+        ).model_dump(mode="json"),
+        ArtifactRef(
+            name="memory_candidate_report",
+            artifact_type="report",
+            path=decision_memory_artifacts.candidate_report_path,
+            producer="modeler",
+            metadata={"source_run_id": previous_state.run_id},
+        ).model_dump(mode="json"),
+        *(
+            [
+                ArtifactRef(
+                    name="memory_usage_audit",
+                    artifact_type="log",
+                    path=memory_usage_artifacts.audit_path,
+                    producer="modeler",
+                    metadata={"source_run_id": previous_state.run_id},
+                ).model_dump(mode="json"),
+                ArtifactRef(
+                    name="memory_usage_audit_report",
+                    artifact_type="report",
+                    path=memory_usage_artifacts.report_path,
+                    producer="modeler",
+                    metadata={"source_run_id": previous_state.run_id},
+                ).model_dump(mode="json"),
+            ]
+            if memory_usage_artifacts is not None
+            else []
+        ),
     ]
     payload["messages"] = [
         *payload["messages"],
@@ -400,6 +587,7 @@ def _state_for_failed_attempt(
     retry_run_id: str,
     decision: ModelingRetryDecision,
     analysis_artifacts: Any,
+    memory_context_path: str | None = None,
     errors: list[PipelineError],
     artifacts: list[ArtifactRef],
 ) -> TFMStateModel:
@@ -408,6 +596,7 @@ def _state_for_failed_attempt(
         retry_run_id=retry_run_id,
         decision=decision,
         analysis_artifacts=analysis_artifacts,
+        memory_context_path=memory_context_path,
         artifacts=artifacts,
         metrics=None,
         errors=errors,
@@ -421,13 +610,41 @@ def _state_for_stop_decision(
     retry_run_id: str,
     decision: ModelingRetryDecision,
     analysis_artifacts: Any,
+    memory_context_path: str | None = None,
+    memory_context: RetrievedMemoryContext | None = None,
 ) -> TFMStateModel:
-    report_path = _write_stop_report(previous_state, retry_run_id, decision, analysis_artifacts)
+    output_dir = Path("codigo/reports/nasa_ims_bearing") / retry_run_id / "iteration"
+    memory_usage_artifacts = None
+    if memory_context is not None or decision.used_memory_context:
+        memory_usage_audit = build_modeling_retry_memory_usage_audit(
+            run_id=retry_run_id,
+            decision=decision,
+            memory_context=memory_context,
+            before_metrics=previous_state.metrics,
+            after_metrics=previous_state.metrics,
+        )
+        memory_usage_artifacts = write_memory_usage_audit(
+            memory_usage_audit,
+            output_dir,
+        )
+    report_path = _write_stop_report(
+        previous_state,
+        retry_run_id,
+        decision,
+        analysis_artifacts,
+        memory_context_path=memory_context_path,
+        memory_usage_report_path=(
+            None
+            if memory_usage_artifacts is None
+            else memory_usage_artifacts.report_path
+        ),
+    )
     state = _base_retry_state(
         previous_state,
         retry_run_id=retry_run_id,
         decision=decision,
         analysis_artifacts=analysis_artifacts,
+        memory_context_path=memory_context_path,
         artifacts=[
             ArtifactRef(
                 name="agentic_retry_stop_report",
@@ -435,7 +652,27 @@ def _state_for_stop_decision(
                 path=report_path,
                 producer="modeler",
                 metadata={"source_run_id": previous_state.run_id},
-            )
+            ),
+            *(
+                [
+                    ArtifactRef(
+                        name="memory_usage_audit",
+                        artifact_type="log",
+                        path=memory_usage_artifacts.audit_path,
+                        producer="modeler",
+                        metadata={"source_run_id": previous_state.run_id},
+                    ),
+                    ArtifactRef(
+                        name="memory_usage_audit_report",
+                        artifact_type="report",
+                        path=memory_usage_artifacts.report_path,
+                        producer="modeler",
+                        metadata={"source_run_id": previous_state.run_id},
+                    ),
+                ]
+                if memory_usage_artifacts is not None
+                else []
+            ),
         ],
         metrics=previous_state.metrics,
         errors=[],
@@ -458,6 +695,7 @@ def _base_retry_state(
     retry_run_id: str,
     decision: ModelingRetryDecision,
     analysis_artifacts: Any,
+    memory_context_path: str | None = None,
     artifacts: list[ArtifactRef],
     metrics: MetricsReport | None,
     errors: list[PipelineError],
@@ -499,6 +737,19 @@ def _base_retry_state(
                     producer="modeler",
                     metadata={"source_run_id": previous_state.run_id},
                 ).model_dump(mode="json"),
+                *(
+                    [
+                        ArtifactRef(
+                            name="modeler_retrieved_memory_context",
+                            artifact_type="log",
+                            path=memory_context_path,
+                            producer="modeler",
+                            metadata={"source_run_id": previous_state.run_id},
+                        ).model_dump(mode="json")
+                    ]
+                    if memory_context_path is not None
+                    else []
+                ),
                 *[artifact.model_dump(mode="json") for artifact in artifacts],
             ],
             "messages": [
@@ -541,6 +792,10 @@ def _write_iteration_report(
     evaluation: EvaluationResult | None = None,
     reasoning_report_path: str | None = None,
     review_report_path: str | None = None,
+    memory_context_path: str | None = None,
+    memory_usage_report_path: str | None = None,
+    decision_episode_report_path: str | None = None,
+    memory_candidate_report_path: str | None = None,
 ) -> str:
     output_dir = Path("codigo/reports/nasa_ims_bearing") / retry_state.run_id / "iteration"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -561,7 +816,13 @@ def _write_iteration_report(
         f"- Aprendizaje declarado: {decision.learning_summary}",
         f"- Efecto esperado: {decision.expected_effect}",
         f"- Analisis de fallo: `{analysis_artifacts.report_path}`",
+        f"- Memoria recuperada: `{memory_context_path or 'desactivada'}`",
+        f"- Memoria usada por el agente: `{decision.used_memory_context}`",
+        f"- Recuerdos citados: `{decision.memory_record_ids}`",
+        f"- Auditoria de memoria: `{memory_usage_report_path or 'n/a'}`",
         f"- Post-mortem de razonamiento: `{reasoning_report_path or 'n/a'}`",
+        f"- Episodio de decision: `{decision_episode_report_path or 'n/a'}`",
+        f"- Candidato de memoria: `{memory_candidate_report_path or 'n/a'}`",
         f"- Revision humana solicitada: `{review_report_path or 'no'}`",
         "",
         "## Metricas del reintento",
@@ -604,6 +865,8 @@ def _write_stop_report(
     retry_run_id: str,
     decision: ModelingRetryDecision,
     analysis_artifacts: Any,
+    memory_context_path: str | None = None,
+    memory_usage_report_path: str | None = None,
 ) -> str:
     output_dir = Path("codigo/reports/nasa_ims_bearing") / retry_run_id / "iteration"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -618,6 +881,10 @@ def _write_stop_report(
                 f"- Motivo de parada: {decision.stop_reason}",
                 f"- Aprendizaje declarado: {decision.learning_summary}",
                 f"- Analisis de fallo: `{analysis_artifacts.report_path}`",
+                f"- Memoria recuperada: `{memory_context_path or 'desactivada'}`",
+                f"- Memoria usada por el agente: `{decision.used_memory_context}`",
+                f"- Recuerdos citados: `{decision.memory_record_ids}`",
+                f"- Auditoria de memoria: `{memory_usage_report_path or 'n/a'}`",
                 "",
             ]
         ),

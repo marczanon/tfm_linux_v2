@@ -37,6 +37,14 @@ introduce un caso no perfecto donde el agente aprende de falsos negativos,
 prueba una hipotesis y se detiene cuando la mejora de recall provoca una tasa
 de falsos positivos inaceptable.
 
+La quinta aportacion, iniciada en Fase 4, es una memoria agentica supervisada y
+transversal. La memoria ya no se plantea como una optimizacion puntual del
+modelador, sino como un registro de experiencias reutilizables por agente:
+estructurador, modelador, evaluador y, posteriormente, otros roles. Esta
+orientacion permite que el sistema aprenda gradualmente de ejecuciones reales,
+sin forzar errores artificiales y manteniendo la separacion entre contexto
+recuperado, decision agentica y validacion determinista.
+
 \section{Limitaciones}
 
 Las metricas de CWRU no deben interpretarse como garantia de rendimiento en
@@ -63,11 +71,13 @@ Las lineas principales son:
         persistencia y evaluacion comparable;
   \item ampliar la experimentacion multi-dataset con planes acotados y
         comparacion frente a politicas deterministas;
-  \item definir ejecuciones controladas desde API y Human Review antes de
-        permitir trabajos costosos mediante `POST /runs`;
-  \item construir en una fase posterior una memoria agentica supervisada,
-        basada en post-mortems y revisiones humanas, que pueda alimentar un RAG
-        local sin modificar metricas ni saltarse contratos;
+  \item definir ejecuciones controladas desde API y Human Review conmutable
+        antes de permitir trabajos costosos mediante `POST /runs`, manteniendo
+        las pruebas automatizadas con intervencion humana apagada por defecto;
+  \item consolidar en Fase 4 una memoria agentica supervisada, basada en
+        post-mortems, revisiones humanas, embeddings locales y bases vectoriales
+        por agente, que pueda alimentar un RAG local para estructurador,
+        modelador y evaluador sin modificar metricas ni saltarse contratos;
   \item preparar Docker, SLURM y checkpoints persistentes cuando el flujo local
         y la politica de ejecucion esten suficientemente estabilizados.
 \end{itemize}

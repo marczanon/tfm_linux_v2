@@ -17,13 +17,20 @@ from codigo.app.executors.structuring import (
     build_structuring_decision_summary,
 )
 from codigo.app.schemas.agent_decisions import StructuringDecision
+from codigo.app.schemas.reasoning import AgentMemoryQuery, RetrievedMemoryContext
 from codigo.app.schemas.state import StructuringConfig, TFMStateModel
+from codigo.app.services.agent_memory import (
+    memory_context_for_llm,
+    memory_usage_json_template,
+    validate_retrieved_memory_usage,
+)
 from codigo.app.services.llm import (
     JSONLLMClient,
     LLMCallError,
     LLMMessage,
     get_default_json_llm_client,
 )
+from codigo.app.services.vector_memory import VectorMemoryStore
 
 
 SUPPORTED_FEATURES = {
@@ -43,6 +50,7 @@ SUPPORTED_FEATURES = {
 def decide_structuring_action(
     state: TFMStateModel,
     *,
+    memory_context: RetrievedMemoryContext | None = None,
     llm_client: JSONLLMClient | None = None,
     use_llm: bool | None = None,
 ) -> StructuringDecision:
@@ -52,7 +60,11 @@ def decide_structuring_action(
     if should_use_llm:
         try:
             client = llm_client or get_default_json_llm_client()
-            return decide_structuring_action_with_llm(state, client)
+            return decide_structuring_action_with_llm(
+                state,
+                client,
+                memory_context=memory_context,
+            )
         except (LLMCallError, ValidationError, ValueError) as exc:
             fallback = decide_structuring_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
@@ -65,15 +77,21 @@ def decide_structuring_action(
 def decide_structuring_action_with_llm(
     state: TFMStateModel,
     llm_client: JSONLLMClient,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
 ) -> StructuringDecision:
     """Solicita al LLM una StructuringDecision y valida sus limites."""
 
     payload = llm_client.complete_json(
-        _structurer_messages(state),
+        _structurer_messages(state, memory_context=memory_context),
         json_schema=StructuringDecision.model_json_schema(),
     )
     decision = StructuringDecision.model_validate(payload)
-    _validate_structuring_decision_bounds(state, decision)
+    _validate_structuring_decision_bounds(
+        state,
+        decision,
+        memory_context=memory_context,
+    )
     return decision
 
 
@@ -94,6 +112,72 @@ def decide_structuring_action_deterministic(state: TFMStateModel) -> Structuring
     )
 
 
+def build_structurer_memory_query(
+    state: TFMStateModel,
+    *,
+    top_k: int = 3,
+    min_similarity: float = 0.0,
+) -> AgentMemoryQuery:
+    """Construye una consulta RAG para decisiones de estructuracion."""
+
+    clean_summary = _clean_summary_for_llm(state)
+    query_text = "\n".join(
+        [
+            "Structurer decision for industrial vibration anomaly detection.",
+            f"Dataset: {state.project_context.dataset}",
+            f"Objective: {state.project_context.objective}",
+            f"Main channel: {state.project_context.main_channel}",
+            f"Target sample rate: {state.project_context.target_sample_rate_hz}",
+            f"Clean summary: {json.dumps(clean_summary, ensure_ascii=True)}",
+            (
+                "Need prior lessons about window size, overlap, feature set, "
+                "temporal splits and dataset-specific structuring trade-offs."
+            ),
+        ]
+    )
+    return AgentMemoryQuery(
+        query_id=f"{state.run_id}:structurer:{_structurer_turn(state):03d}:memory_query",
+        target_agent="structurer",
+        query_text=query_text,
+        dataset=state.project_context.dataset,
+        run_id=state.run_id,
+        decision_id=f"{state.run_id}:structurer:{_structurer_turn(state):03d}",
+        decision_context={
+            "current_stage": state.current_stage,
+            "main_channel": state.project_context.main_channel,
+            "target_sample_rate_hz": state.project_context.target_sample_rate_hz,
+            "has_clean_path": bool(state.clean_path),
+        },
+        allowed_memory_roles=[
+            "positive_example",
+            "negative_example",
+            "boundary_case",
+            "warning",
+            "methodology",
+            "evidence",
+        ],
+        top_k=top_k,
+        min_similarity=min_similarity,
+    )
+
+
+def retrieve_structurer_memory_context(
+    state: TFMStateModel,
+    *,
+    memory_store: VectorMemoryStore,
+    top_k: int = 3,
+    min_similarity: float = 0.0,
+) -> RetrievedMemoryContext:
+    """Recupera memoria supervisada para el agente estructurador."""
+
+    query = build_structurer_memory_query(
+        state,
+        top_k=top_k,
+        min_similarity=min_similarity,
+    )
+    return memory_store.query(query)
+
+
 def _should_use_llm(
     llm_client: JSONLLMClient | None,
     use_llm: bool | None,
@@ -105,7 +189,11 @@ def _should_use_llm(
     return os.getenv("TFM_STRUCTURER_MODE", "").strip().lower() == "llm"
 
 
-def _structurer_messages(state: TFMStateModel) -> list[LLMMessage]:
+def _structurer_messages(
+    state: TFMStateModel,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> list[LLMMessage]:
     return [
         LLMMessage(
             role="system",
@@ -127,8 +215,22 @@ def _structurer_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "Resumen de senales limpias:",
                     json.dumps(_clean_summary_for_llm(state), indent=2, ensure_ascii=True),
                     "",
+                    "Memoria recuperada para el estructurador:",
+                    json.dumps(
+                        memory_context_for_llm(memory_context),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
+                    "",
                     "Formato JSON esperado:",
-                    json.dumps(_structurer_json_template(state), indent=2, ensure_ascii=True),
+                    json.dumps(
+                        _structurer_json_template(
+                            state,
+                            memory_context=memory_context,
+                        ),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
                     "",
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
@@ -152,6 +254,28 @@ def _structurer_messages(state: TFMStateModel) -> list[LLMMessage]:
                         "- No inventes alternativas: cada comparison_candidate "
                         "debe respetar las mismas reglas que structuring_config."
                     ),
+                    (
+                        "- La memoria recuperada solo aporta contexto historico; "
+                        "no puede saltarse ventanas, solapes, canales ni features "
+                        "soportadas."
+                    ),
+                    (
+                        "- Si usas una memoria recuperada, pon "
+                        "used_memory_context=true y cita sus memory_record_id."
+                    ),
+                    (
+                        "- Para cada recuerdo citado, rellena memory_record_uses "
+                        "explicando si lo sigues, adaptas, contradices o ignoras."
+                    ),
+                    (
+                        "- Si un recuerdo es boundary_case o warning, explica "
+                        "como evitas reutilizar fuera de contexto una ventana, "
+                        "feature o particion que ya fue problematica."
+                    ),
+                    (
+                        "- Si la memoria no aporta evidencia util para esta "
+                        "estructura concreta, declara used_memory_context=false."
+                    ),
                     f"- decision_id debe ser: {state.run_id}:structurer:{_structurer_turn(state):03d}",
                 ]
             ),
@@ -159,8 +283,12 @@ def _structurer_messages(state: TFMStateModel) -> list[LLMMessage]:
     ]
 
 
-def _structurer_json_template(state: TFMStateModel) -> dict[str, Any]:
-    return {
+def _structurer_json_template(
+    state: TFMStateModel,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> dict[str, Any]:
+    template = {
         "agent_name": "structurer",
         "decision_id": f"{state.run_id}:structurer:{_structurer_turn(state):03d}",
         "rationale": "Motivo tecnico breve de la estructuracion propuesta.",
@@ -205,6 +333,8 @@ def _structurer_json_template(state: TFMStateModel) -> dict[str, Any]:
             },
         ],
     }
+    template.update(memory_usage_json_template(memory_context))
+    return template
 
 
 def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
@@ -255,12 +385,21 @@ def _clean_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
 def _validate_structuring_decision_bounds(
     state: TFMStateModel,
     decision: StructuringDecision,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
 ) -> None:
     _validate_structuring_config_bounds(state, decision.structuring_config)
     if not decision.expected_features_path or not decision.expected_splits_path:
         raise ValueError("expected feature and split paths are required")
     for candidate in decision.comparison_candidates:
         _validate_structuring_config_bounds(state, candidate.structuring_config)
+    validate_retrieved_memory_usage(
+        memory_context=memory_context,
+        memory_context_id=decision.memory_context_id,
+        used_memory_context=decision.used_memory_context,
+        memory_record_ids=decision.memory_record_ids,
+        memory_record_uses=decision.memory_record_uses,
+    )
 
 
 def _validate_structuring_config_bounds(

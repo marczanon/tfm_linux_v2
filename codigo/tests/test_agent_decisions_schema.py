@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from codigo.app.schemas.agent_decisions import (
     CleaningDecision,
+    EvaluationDecision,
     ModelingAlternative,
     ModelingDecision,
     ModelingRetryDecision,
@@ -148,6 +149,41 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         self.assertEqual(payload["comparison_candidates"][0]["alternative_id"], "win_1024_ov_50")
         json.dumps(payload)
 
+    def test_structuring_decision_declares_memory_usage(self):
+        decision = StructuringDecision(
+            decision_id="struct-memory-001",
+            rationale="Use a prior window comparison as contextual evidence.",
+            confidence=0.85,
+            structuring_config=StructuringConfig(
+                window_size=1024,
+                overlap=0.5,
+                main_channel="DE_time",
+                target_sample_rate_hz=12000,
+                label_mode="binary_anomaly",
+                features=["mean", "std", "rms"],
+            ),
+            expected_features_path="codigo/data/tensors/cwru_bearing/windows_features.csv",
+            expected_tensors_path="codigo/data/tensors/cwru_bearing/windows_raw.npz",
+            expected_splits_path="codigo/data/tensors/cwru_bearing/splits.json",
+            memory_context_id="struct-query:retrieved_memory_context",
+            used_memory_context=True,
+            memory_record_ids=["memory-structurer-window-001"],
+            memory_usage_summary="Adapt a prior window-size comparison.",
+            memory_record_uses=[
+                {
+                    "memory_record_id": "memory-structurer-window-001",
+                    "usage": "adapted",
+                    "influence_summary": "Use the memory as evidence for a comparable window.",
+                }
+            ],
+        )
+
+        payload = decision.model_dump(mode="json")
+
+        self.assertTrue(payload["used_memory_context"])
+        self.assertEqual(payload["memory_record_uses"][0]["usage"], "adapted")
+        json.dumps(payload)
+
     def test_modeling_decision_accepts_comparison_candidates(self):
         decision = ModelingDecision(
             decision_id="model-001",
@@ -219,6 +255,108 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         self.assertFalse(payload["should_retry"])
         self.assertEqual(payload["agent_name"], "modeler")
         json.dumps(payload)
+
+    def test_modeling_retry_decision_declares_memory_usage(self):
+        decision = ModelingRetryDecision(
+            decision_id="retry-003",
+            rationale="Retry informed by a boundary memory.",
+            confidence=0.8,
+            source_run_id="run-failed",
+            attempt_number=1,
+            max_attempts=2,
+            should_retry=True,
+            learning_summary="A previous overcorrection warns against recall-only tuning.",
+            retry_config=ModelingConfig(
+                model_name="isolation_forest",
+                random_state=42,
+                hyperparameters={"n_estimators": 200, "threshold_quantile": 0.95},
+            ),
+            expected_effect="Increase recall while watching false positives.",
+            memory_context_id="query-001:retrieved_memory_context",
+            used_memory_context=True,
+            memory_record_ids=["memory-overcorrection-001"],
+            memory_usage_summary="Use the boundary memory as a cautionary example.",
+            memory_record_uses=[
+                {
+                    "memory_record_id": "memory-overcorrection-001",
+                    "usage": "adapted",
+                    "influence_summary": "Lower threshold carefully, not blindly.",
+                    "risk_mitigation": "Avoid a large threshold drop that repeats FPR=1.0.",
+                }
+            ],
+            evidence_used=["failure_analysis", "memory-overcorrection-001"],
+        )
+
+        payload = decision.model_dump(mode="json")
+
+        self.assertTrue(payload["used_memory_context"])
+        self.assertEqual(payload["memory_record_ids"], ["memory-overcorrection-001"])
+        self.assertEqual(payload["memory_record_uses"][0]["usage"], "adapted")
+        json.dumps(payload)
+
+    def test_modeling_retry_memory_ids_require_usage_flag(self):
+        with self.assertRaises(ValidationError):
+            ModelingRetryDecision(
+                decision_id="retry-004",
+                rationale="Cites memory while saying it was not used.",
+                confidence=0.8,
+                source_run_id="run-failed",
+                attempt_number=1,
+                max_attempts=2,
+                should_retry=False,
+                learning_summary="No retry.",
+                stop_reason="No safe improvement.",
+                used_memory_context=False,
+                memory_record_ids=["memory-overcorrection-001"],
+            )
+
+    def test_evaluation_decision_declares_memory_usage(self):
+        decision = EvaluationDecision(
+            decision_id="eval-memory-001",
+            rationale="Reject metrics using previous evaluation cautions as context.",
+            confidence=0.9,
+            evaluation={
+                "approved": False,
+                "summary": "Rejected by local protocol.",
+                "next_action": "retry_with_new_config",
+            },
+            min_recall_required=0.9,
+            max_false_positive_rate=0.1,
+            memory_context_id="eval-query:retrieved_memory_context",
+            used_memory_context=True,
+            memory_record_ids=["memory-evaluator-tradeoff-001"],
+            memory_usage_summary="Use memory as caution, not as approval.",
+            memory_record_uses=[
+                {
+                    "memory_record_id": "memory-evaluator-tradeoff-001",
+                    "usage": "adapted",
+                    "influence_summary": "Keep recall and FPR bound to the protocol.",
+                }
+            ],
+        )
+
+        payload = decision.model_dump(mode="json")
+
+        self.assertTrue(payload["used_memory_context"])
+        self.assertEqual(payload["memory_record_ids"], ["memory-evaluator-tradeoff-001"])
+        json.dumps(payload)
+
+    def test_evaluation_memory_ids_require_usage_flag(self):
+        with self.assertRaises(ValidationError):
+            EvaluationDecision(
+                decision_id="eval-memory-invalid-001",
+                rationale="Cites memory without declaring use.",
+                confidence=0.9,
+                evaluation={
+                    "approved": False,
+                    "summary": "Rejected by local protocol.",
+                    "next_action": "retry_with_new_config",
+                },
+                min_recall_required=0.9,
+                max_false_positive_rate=0.1,
+                used_memory_context=False,
+                memory_record_ids=["memory-evaluator-tradeoff-001"],
+            )
 
     def test_reasoning_postmortem_is_json_serializable(self):
         postmortem = AgentReasoningPostmortem(

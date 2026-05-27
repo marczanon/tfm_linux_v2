@@ -126,6 +126,104 @@ sobrecorreccion y el bucle se detiene por limite de intentos. El resultado es
 valioso porque muestra aprendizaje local de errores, pero tambien control ante
 una mejora aparente que seria inaceptable operativamente.
 
+\subsection{Primer resultado con memoria agentica}
+
+En Fase 4 se realizo una primera prueba con memoria vectorial activa. El
+modelador recupero un recuerdo revisado del segundo reintento de Fase 3,
+etiquetado como `boundary\_case` por sobrecorreccion del umbral. El agente
+declaro que habia usado memoria y cito el identificador del recuerdo
+recuperado. Por tanto, la trazabilidad del RAG funciono correctamente.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Run & Umbral & Precision & Recall & F1 & FPR \\
+\midrule
+Base sin memoria & 0.99 & 0.9130 & 0.6000 & 0.7241 & 0.1429 \\
+Retry con memoria & 0.50 & 0.7143 & 1.0000 & 0.8333 & 1.0000 \\
+\bottomrule
+\end{tabular}
+\caption{Primera comparacion con memoria agentica sobre NASA sintetico.}
+\label{tab:resultados_memoria_fase4}
+\end{table}
+
+La conclusion es mixta. La recuperacion semantica funciona, pero el agente
+interpreto el recuerdo de frontera como apoyo para repetir la accion que habia
+generado la sobrecorreccion. El resultado demuestra una limitacion importante:
+un RAG operativo no garantiza aprendizaje correcto si el contrato no exige
+razonar sobre el tipo de recuerdo recuperado. Esta evidencia orienta el
+siguiente ajuste de Fase 4: auditar si la memoria fue seguida, ignorada o
+contradicha, especialmente en casos `boundary\_case` y `warning`.
+
+Tras incorporar esta auditoria, se repitio la prueba. El agente declaro que
+usaba el recuerdo como `adapted`, explico que la memoria advertia contra bajar
+el umbral sin control y propuso una mitigacion. Sin embargo, la configuracion
+final siguio siendo `threshold\_quantile=0.50` y las metricas repitieron FPR
+1.0000. El nuevo artefacto de auditoria clasifico el resultado como repeticion
+de fallo de frontera. Esto aporta una evidencia cualitativa mas fina: no solo
+se sabe que el agente recupero memoria, sino tambien que su explicacion no fue
+suficiente para evitar repetir el fallo.
+
+El resultado se ha convertido a su vez en memoria reutilizable de tipo
+`warning`. La consulta posterior al indice recupera primero esta advertencia y
+despues el caso frontera original, lo que muestra que el sistema ya no solo
+almacena decisiones post-mortem, sino tambien evidencia sobre como los agentes
+usan o malinterpretan recuerdos previos. Este punto es relevante para la
+defensa del TFM: la memoria agentica se comporta como un mecanismo de
+retroalimentacion trazable, no como una lista estatica de ejemplos.
+
+Al ejecutar de nuevo con esta memoria ampliada, el comportamiento cambio. El
+modelador cito los dos recuerdos y propuso `threshold\_quantile=0.95` en lugar
+de repetir `0.50`. Esta decision mejoro recall y F1 frente a la base, pero
+tambien aumento FPR hasta 0.2143, por lo que la ejecucion siguio rechazada. El
+resultado es positivo desde el punto de vista agentico, porque demuestra que la
+memoria puede modificar la estrategia del LLM local, pero tambien muestra que
+la mejora de razonamiento no implica automaticamente aprobar metricas. La
+aplicacion conserva asi la separacion entre deliberacion generativa y
+validacion experimental.
+
+La ejecucion posterior con generacion automatica de episodios no cambio las
+metricas, pero si cambio la calidad de la evidencia persistida. El sistema
+produjo `decision\_episode.json` y `memory\_candidate.json`, y este ultimo se
+incorporo a la memoria vectorial como `boundary\_case`. Una consulta semantica
+sobre mejora parcial de umbral y necesidad de comparar familias de modelo
+recupero este episodio junto a los recuerdos anteriores. Por tanto, el sistema
+ya no solo aprende que un valor de umbral fue problematico, sino que conserva
+una experiencia completa: contexto, accion, resultado, trade-off, rechazo del
+evaluador y condiciones de reutilizacion.
+
+La siguiente iteracion confirma esta interpretacion. Al recuperar el episodio
+anterior, el modelador ya no recibio solo una advertencia sobre el umbral, sino
+una memoria que sugeria comparar familia de modelo tras una mejora parcial. La
+decision generada por Qwen incluyo `pca\_reconstruction\_error\_candidate` como
+alternativa comparable, aunque la configuracion ejecutada siguio siendo
+Isolation Forest con `threshold\_quantile=0.95`. El resultado numerico no
+mejoro respecto a la run anterior, pero la evidencia cualitativa si: el sistema
+puede registrar que el agente considero PCA y por que no lo selecciono.
+
+Tambien se obtuvo una evidencia negativa valiosa. La auditoria detecto que el
+razonamiento del agente contenia una comparacion numerica incoherente
+(`0.95` mayor que `0.99`). El nuevo resultado
+`memory\_reasoning\_inconsistent` muestra que el proyecto no solo mide metricas
+del modelo, sino tambien la calidad de las explicaciones agenticas. Esta capa
+es importante para un sistema con LLM locales: permite reutilizar fallos de
+razonamiento como advertencias, sin convertirlos en ejemplos positivos.
+
+Finalmente, se incorporo una guia derivada de memoria al prompt de reintento.
+Cuando los recuerdos recuperados indicaban que los ajustes de umbral sobre
+Isolation Forest ya habian producido mejoras parciales rechazadas, la guia
+marcaba PCA por error de reconstruccion como configuracion preferente, sin
+ejecutarla de forma determinista. Con esta condicion, Qwen eligio realmente
+PCA como configuracion de reintento. El resultado fue precision 0.9375,
+recall 0.4286, F1 0.5882 y FPR 0.0714. La ejecucion fue rechazada por bajo
+recall, pero aporta una evidencia relevante: la memoria no solo cambia textos
+o explicaciones del
+agente, sino que puede desplazar la accion ejecutada hacia una nueva familia de
+modelo. Al mismo tiempo, el evaluador conserva el control experimental y evita
+aceptar una alternativa que reduce falsos positivos a costa de perder demasiadas
+anomalias.
+
 \section{Resultados cualitativos}
 
 La prueba smoke con agentes Qwen sobre una carpeta NASA IMS sintetica

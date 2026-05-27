@@ -6,9 +6,11 @@ from codigo.app.agents.cleaner import (
     decide_cleaning_action_with_llm,
 )
 from codigo.app.agents.evaluator import (
+    build_evaluator_memory_query,
     decide_evaluation_action,
     decide_evaluation_action_deterministic,
     decide_evaluation_action_with_llm,
+    retrieve_evaluator_memory_context,
 )
 from codigo.app.agents.modeler import (
     decide_modeling_action,
@@ -21,9 +23,11 @@ from codigo.app.agents.report_writer import (
     decide_report_action_with_llm,
 )
 from codigo.app.agents.structurer import (
+    build_structurer_memory_query,
     decide_structuring_action,
     decide_structuring_action_deterministic,
     decide_structuring_action_with_llm,
+    retrieve_structurer_memory_context,
 )
 from codigo.app.agents.supervisor import (
     decide_supervisor_action,
@@ -32,6 +36,8 @@ from codigo.app.agents.supervisor import (
 )
 
 __all__ = [
+    "build_evaluator_memory_query",
+    "build_structurer_memory_query",
     "decide_cleaning_action",
     "decide_cleaning_action_deterministic",
     "decide_cleaning_action_with_llm",
@@ -50,4 +56,6 @@ __all__ = [
     "decide_supervisor_action",
     "decide_supervisor_action_deterministic",
     "decide_supervisor_action_with_llm",
+    "retrieve_evaluator_memory_context",
+    "retrieve_structurer_memory_context",
 ]

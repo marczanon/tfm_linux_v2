@@ -4,8 +4,10 @@
 
 La Fase 4 podra introducir un RAG de memoria agentica supervisada para que los
 agentes aprendan de ejecuciones anteriores sin hacer fine-tuning pesado ni
-hardcodear reglas. La fuente principal de esta memoria seran los post-mortems
-de razonamiento y las revisiones humanas generadas en Fase 3.
+hardcodear reglas. En este proyecto, RAG implica embeddings y base vectorial
+local, no solo busqueda textual sobre ficheros. La fuente principal de esta
+memoria seran los post-mortems de razonamiento y las revisiones humanas
+generadas en Fase 3.
 
 ## Motivacion
 
@@ -25,7 +27,9 @@ supervisada permitiria recuperar experiencias previas como contexto:
 run persistida
 -> reasoning_postmortem.json
 -> human_reasoning_review.json
--> indice de memoria supervisada
+-> fragmentacion controlada
+-> embeddings locales versionados
+-> base vectorial por agente
 -> retrieval por dataset/modelo/fallo/metrica
 -> contexto compacto para el agente
 -> nueva decision estructurada
@@ -34,6 +38,12 @@ run persistida
 El RAG no ejecutaria nada. Solo aportaria memoria contextual a los agentes, que
 seguirian limitados por esquemas Pydantic, validaciones y ejecutores
 deterministas.
+
+La hoja de ruta activa queda detallada en:
+
+```text
+codigo/docs/32_hoja_ruta_fase_4.md
+```
 
 ## Politica de inclusion
 
@@ -55,6 +65,9 @@ Los campos `reusable_as_context` y `exclude_from_context` de
 
 - La memoria no puede aprobar una run ni modificar metricas.
 - La memoria no puede saltarse contratos, validaciones ni ejecutores.
+- Human-in-the-loop debe poder estar apagado en pruebas automatizadas.
+- La revision humana debe ser conmutable mediante modo `off`, `passive` o
+  `required`.
 - El contexto recuperado debe citar `run_id`, `decision_id`, veredicto humano y
   metricas principales.
 - Los agentes deben distinguir ejemplos positivos, negativos y casos frontera.

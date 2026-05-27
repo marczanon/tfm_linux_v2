@@ -1,7 +1,14 @@
 import unittest
 
+from codigo.app.agents.evaluator import build_evaluator_memory_query
 from codigo.app.agents.evaluator import decide_evaluation_action
 from codigo.app.graph.state import create_initial_cwru_state, validate_state
+from codigo.app.schemas.reasoning import (
+    AgentMemoryQuery,
+    ReasoningMemoryRecord,
+    RetrievedMemoryContext,
+    RetrievedMemoryItem,
+)
 from codigo.app.schemas.state import MetricsReport, ProjectContext
 
 
@@ -118,6 +125,135 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.91)
         self.assertIn("EvaluationDecision", str(client.json_schema))
 
+    def test_evaluator_memory_query_targets_evaluator(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="cwru-evaluator-test",
+            run_id="run-evaluator-memory-query-001",
+        )
+        state_dict["metrics"] = MetricsReport(
+            recall=0.82,
+            f1_score=0.78,
+            false_positive_rate=0.12,
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+
+        query = build_evaluator_memory_query(state, top_k=4, min_similarity=0.2)
+
+        self.assertEqual(query.target_agent, "evaluator")
+        self.assertEqual(query.top_k, 4)
+        self.assertEqual(query.min_similarity, 0.2)
+        self.assertIn("metric trade-offs", query.query_text)
+        self.assertEqual(query.decision_context["recall"], 0.82)
+
+    def test_llm_evaluator_receives_and_declares_memory_context(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="cwru-evaluator-test",
+            run_id="run-evaluator-memory-001",
+        )
+        state_dict["metrics"] = MetricsReport(
+            recall=0.82,
+            f1_score=0.78,
+            false_positive_rate=0.12,
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        memory_context = _evaluator_memory_context(state.run_id)
+        client = FakeLLMClient(
+            {
+                "agent_name": "evaluator",
+                "decision_id": "run-evaluator-memory-001:evaluator:001",
+                "rationale": "Use prior evaluation evidence as caution, but reject by thresholds.",
+                "confidence": 0.9,
+                "evaluation": {
+                    "approved": False,
+                    "summary": "Rejected because recall and FPR do not satisfy the local protocol.",
+                    "next_action": "retry_with_new_config",
+                    "limitations": [
+                        "Prior memory supports caution; current metrics remain insufficient."
+                    ],
+                },
+                "min_recall_required": 0.9,
+                "max_false_positive_rate": 0.1,
+                "memory_context_id": memory_context.context_id,
+                "used_memory_context": True,
+                "memory_record_ids": ["memory-evaluator-tradeoff-001"],
+                "memory_usage_summary": "Use memory as methodological caution.",
+                "memory_record_uses": [
+                    {
+                        "memory_record_id": "memory-evaluator-tradeoff-001",
+                        "usage": "adapted",
+                        "influence_summary": "The memory reinforces checking recall and FPR together.",
+                        "risk_mitigation": "Do not approve because the current metrics fail thresholds.",
+                    }
+                ],
+            }
+        )
+
+        decision = decide_evaluation_action(
+            state,
+            memory_context=memory_context,
+            llm_client=client,
+            use_llm=True,
+        )
+
+        prompt = client.messages[1].content
+        self.assertFalse(decision.evaluation.approved)
+        self.assertTrue(decision.used_memory_context)
+        self.assertEqual(decision.memory_record_ids, ["memory-evaluator-tradeoff-001"])
+        self.assertIn("Memoria recuperada para el evaluador", prompt)
+        self.assertIn("no puede cambiar los umbrales", prompt)
+
+    def test_llm_evaluator_cannot_use_memory_to_override_thresholds(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="cwru-evaluator-test",
+            run_id="run-evaluator-memory-invalid-001",
+        )
+        state_dict["metrics"] = MetricsReport(
+            recall=0.82,
+            f1_score=0.78,
+            false_positive_rate=0.12,
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        memory_context = _evaluator_memory_context(state.run_id)
+        client = FakeLLMClient(
+            {
+                "agent_name": "evaluator",
+                "decision_id": "run-evaluator-memory-invalid-001:evaluator:001",
+                "rationale": "Incorrectly approve because memory looked positive.",
+                "confidence": 0.99,
+                "evaluation": {
+                    "approved": True,
+                    "summary": "Approved using memory.",
+                    "next_action": "continue",
+                    "limitations": [],
+                },
+                "min_recall_required": 0.9,
+                "max_false_positive_rate": 0.1,
+                "memory_context_id": memory_context.context_id,
+                "used_memory_context": True,
+                "memory_record_ids": ["memory-evaluator-tradeoff-001"],
+                "memory_usage_summary": "Invalid approval.",
+                "memory_record_uses": [
+                    {
+                        "memory_record_id": "memory-evaluator-tradeoff-001",
+                        "usage": "followed",
+                        "influence_summary": "Invalidly follows memory.",
+                    }
+                ],
+            }
+        )
+
+        decision = decide_evaluation_action(
+            state,
+            memory_context=memory_context,
+            llm_client=client,
+            use_llm=True,
+        )
+
+        self.assertEqual(client.calls, 1)
+        self.assertFalse(decision.evaluation.approved)
+        self.assertEqual(decision.evaluation.next_action, "retry_with_new_config")
+        self.assertIn("Fallback after LLM failure", decision.rationale)
+
     def test_invalid_llm_evaluation_decision_falls_back(self):
         state_dict = create_initial_cwru_state(
             thread_id="cwru-evaluator-test",
@@ -153,6 +289,52 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertEqual(decision.evaluation.next_action, "retry_with_new_config")
         self.assertLessEqual(decision.confidence, 0.7)
         self.assertIn("Fallback after LLM failure", decision.rationale)
+
+
+def _evaluator_memory_context(run_id: str) -> RetrievedMemoryContext:
+    query = AgentMemoryQuery(
+        query_id=f"{run_id}:evaluator:001:memory_query",
+        target_agent="evaluator",
+        query_text="recall false positive rate approval tradeoff",
+        dataset="cwru_bearing",
+        run_id=run_id,
+        decision_id=f"{run_id}:evaluator:001",
+    )
+    record = ReasoningMemoryRecord(
+        memory_record_id="memory-evaluator-tradeoff-001",
+        collection_name="evaluator_memory",
+        target_agent="evaluator",
+        source_type="decision_episode",
+        run_id="prior-evaluator-run",
+        decision_id="prior-evaluator-decision",
+        dataset="cwru_bearing",
+        source_agent_name="evaluator",
+        outcome="supported",
+        human_verdict="correct",
+        memory_role="evidence",
+        reusable_as_context=True,
+        summary="Evaluator should reject partial improvements that fail protocol.",
+        content=(
+            "The evaluator kept recall and false positive rate as binding "
+            "criteria. A partial improvement was still rejected when thresholds "
+            "were not satisfied."
+        ),
+        tags=["evaluation", "recall", "false_positive_rate", "tradeoff"],
+    )
+    return RetrievedMemoryContext(
+        context_id=f"{query.query_id}:retrieved_memory_context",
+        query=query,
+        items=[
+            RetrievedMemoryItem(
+                record=record,
+                similarity=0.87,
+                retrieval_use="evidence_context",
+                rank=1,
+            )
+        ],
+        retrieval_backend="test",
+        embedding_model="local_hash_embedding",
+    )
 
 
 if __name__ == "__main__":
