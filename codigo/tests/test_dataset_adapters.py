@@ -41,6 +41,15 @@ class DatasetAdaptersTests(unittest.TestCase):
         self.assertIn("DE_time", descriptor.channel_names)
         self.assertEqual(descriptor.label_availability, "file_level")
 
+    def test_nasa_hint_does_not_match_incidental_substrings(self):
+        with tempfile.TemporaryDirectory(prefix="tmpims") as tmp:
+            raw_dir = Path(tmp)
+            (raw_dir / "97.mat").touch()
+
+            adapter = infer_dataset_adapter(raw_dir)
+
+        self.assertEqual(adapter.info.adapter_id, "cwru_bearing")
+
     def test_describe_dataset_uses_explicit_nasa_adapter(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw_dir = Path(tmp) / "nasa_ims_bearing"

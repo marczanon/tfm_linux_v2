@@ -387,6 +387,28 @@ de 2048 muestras, solapamiento del 50\%, canal `DE\_time`, frecuencia de 12 kHz,
 modo `binary\_anomaly` y features temporales trazables como RMS, curtosis,
 crest factor y energia.
 
+En la Fase 3 se ha ampliado `StructuringDecision` con
+`comparison\_candidates`. Este campo permite que el agente no solo proponga una
+configuracion final, sino tambien alternativas comparables con su justificacion
+y efecto esperado. La aplicacion no inventa esas alternativas: si el agente no
+las devuelve, el plan comparativo no se construye.
+
+Esta ampliacion se materializa en el script:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+python -m codigo.scripts.run_cwru_agentic_window_comparison
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El script solicita a Qwen una decision de estructuracion con alternativas y,
+solo despues, convierte esas propuestas en un plan experimental ejecutable con
+el protocolo local. De este modo se conserva la separacion entre decision
+agentica y ejecucion reproducible, pero se evita que una regla interna suplante
+la deliberacion del agente.
+
 Durante la integracion se ha detectado que `checkpoint\_id` es un nombre
 reservado por LangGraph 1.1. Por ello se ha retirado de la vista `TypedDict`
 que circula por el grafo. La persistencia futura debera apoyarse en los
@@ -425,17 +447,25 @@ supervisor
 \end{center}
 
 Aunque el contrato `ModelingConfig` contempla algoritmos futuros como
-One-Class SVM, LOF, PCA o autoencoders, el MVP restringe al agente a
-`isolation\_forest`, que es el unico algoritmo soportado por el ejecutor
-determinista actual. Tambien se acotan la semilla (`random\_state = 42`), el
-split de entrenamiento (`train`), el uso del split de validacion para el umbral
-y los hiperparametros permitidos, evitando que el LLM seleccione opciones que
-la aplicacion aun no puede ejecutar de forma reproducible.
+One-Class SVM, LOF o autoencoders, la implementacion solo permite al agente
+seleccionar modelos con ejecutor reproducible. Inicialmente se incluyo
+`isolation\_forest`; en Fase 3 se ha anadido PCA con error de reconstruccion
+como segundo modelo soportado. Tambien se acotan la semilla
+(`random\_state = 42`), el split de entrenamiento (`train`), el uso del split de
+validacion para el umbral y los hiperparametros permitidos, evitando que el LLM
+seleccione opciones que la aplicacion aun no puede ejecutar de forma
+reproducible.
 
 Con `qwen3.5:4b`, el modelador ha generado una decision valida con
 `model\_name = isolation\_forest`, `random\_state = 42`, entrenamiento sobre el
 split `train`, validacion sobre `validation`, `n\_estimators = 200`,
 `n\_jobs = 1` y `threshold\_quantile = 0.99`.
+
+El contrato de decision del modelador incorpora ahora una lista de alternativas
+comparables. Este campo permite que el agente proponga otros modelos o umbrales,
+que despues se convierten en planes experimentales si estan soportados por el
+ejecutor. Con ello se aumenta la capacidad de decision del agente sin permitir
+modelos no implementados.
 
 Durante esta validacion se ha ajustado el cliente de Ollama para usar
 `think=false` por defecto en llamadas JSON estrictas, ya que este modelo puede
@@ -553,12 +583,14 @@ supervisor
 \end{minipage}
 \end{center}
 
-Para el MVP CWRU, el contrato acota la salida a formato Markdown y a la ruta:
+El contrato acota la salida a formato Markdown y, en Fase 3, calcula la ruta a
+partir del dataset y del identificador de ejecucion para evitar sobrescrituras
+entre runs:
 
 \begin{center}
 \begin{minipage}{0.85\textwidth}
 \begin{verbatim}
-codigo/reports/cwru_bearing/final_report.md
+codigo/reports/<dataset>/<run_id>/final_report.md
 \end{verbatim}
 \end{minipage}
 \end{center}
@@ -810,6 +842,183 @@ sinteticas antes de procesar el paquete completo. La ingestion directa del
 contenedor anidado queda pospuesta hasta decidir dependencias y experiencia de
 interfaz.
 
+El perfilador `data\_profiler.py` se ha generalizado para detectar si el CSV de
+entrada sigue el formato historico CWRU o el contrato comun. Para NASA IMS,
+propaga `record\_id`, `run\_id`, `condition\_id`, `primary\_channel`, canales
+de manifiesto y metadatos JSON. La capa `signal\_adapters.py` tambien reconoce
+ficheros IMS con nombre temporal y sin extension, expone `read\_signal\_frame`
+para leerlos como tablas numericas con `pandas` y asigna canales normalizados
+`channel\_1`, `channel\_2`, etc. Esta adaptacion permite generar perfiles
+estadisticos sobre estructuras NASA preextraidas.
+
+El perfil incluye ademas un bloque `decision\_summary` orientado al agente
+limpiador. Este bloque clasifica si el perfil esta limpio, requiere remuestreo,
+requiere seleccionar canal o presenta calidad insuficiente. Tambien enumera
+acciones requeridas, canales candidatos, opciones de limpieza soportadas y
+advertencias bloqueantes o no bloqueantes. De este modo, el LLM local no
+necesita conocer de memoria el dataset industrial: recibe un expediente experto
+calculado por el sistema y decide dentro de un espacio de accion validado.
+
+El ejecutor `cleaning.py` tambien se ha generalizado para consumir manifiestos
+comunes. El contrato `CleaningConfig` incorpora `selected\_channel`; si se
+declara, el ejecutor carga ese canal mediante la capa de adaptadores de senal y
+lo valida contra `channel\_names` en los manifiestos comunes. Si no se declara,
+mantiene compatibilidad con `sensor\_channel` para CWRU y con
+`primary\_channel` para NASA IMS. La salida `.npz` conserva metadatos ligeros
+como `record\_id`, `dataset`, `run\_id`, `condition\_id` y `label\_detail`,
+manteniendo la estructura comun necesaria para estructuracion posterior.
+
+El ejecutor `structuring.py` incorpora un resumen experto para el agente
+estructurador. A partir de las señales limpias estima configuraciones
+soportadas de ventana y solape, numero aproximado de ventanas, coste relativo,
+conjuntos de features temporales disponibles y advertencias de fuga de
+informacion por fichero, run o secuencia temporal. El agente puede elegir entre
+estas configuraciones, pero la validacion mantiene los valores dentro de rangos
+controlados y las features dentro de las implementadas por el ejecutor.
+
+\section{Prueba Agentica NASA IMS con Qwen}
+
+Para validar el comportamiento de los agentes locales ante un dataset distinto
+de CWRU se ha añadido un script de prueba controlada:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+python -m codigo.scripts.run_nasa_ims_qwen_smoke \
+  --model qwen3.5:4b \
+  --run-id nasa-ims-qwen-smoke-fase3-qwen
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La prueba crea una carpeta NASA IMS sintetica preextraida, ejecuta el grafo
+completo con agentes Qwen/Ollama y persiste el snapshot en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/runs/nasa-ims-qwen-smoke-fase3-qwen/
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El objetivo de esta ejecucion no es entrenar un modelo NASA IMS, sino comprobar
+si los agentes usan los expedientes expertos. El limpiador selecciono
+`channel\_1` como canal principal, el estructurador eligio ventanas de 1024
+muestras con solape del 50\% y features temporales soportadas, y el modelador
+propuso `isolation\_forest`, coherente con el unico ejecutor de modelado
+disponible en ese momento.
+
+La ejecucion genero manifiesto, perfil, señales limpias, features, tensores y
+splits. Sin embargo, el flujo termino en estado `failed` por una barrera
+metodologica deliberada: NASA IMS no dispone todavia de etiquetas por ventana ni
+de una politica de particion temporal defendible. Esta prueba confirma que los
+agentes locales pueden tomar decisiones utiles con contexto experto, pero
+tambien que debe formalizarse una decision de capacidad no soportada antes de
+permitir el paso al modelador en datasets run-to-failure.
+
+\section{Benchmark NASA IMS Sintetico Etiquetado}
+
+Para obtener metricas supervisadas sin atribuir etiquetas por ventana al NASA
+IMS real, se ha añadido un generador sintetico controlado:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/app/services/synthetic_nasa_ims.py
+codigo/scripts/run_nasa_ims_synthetic_temporal_benchmark.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El generador crea una estructura compatible con NASA IMS Set 2: ficheros con
+nombre temporal, cuatro canales tabulares, frecuencia de 20 kHz y un manifiesto
+comun con etiquetas `normal` y `fault` generadas por construccion. Esta
+distincion es importante: el benchmark valida el flujo multi-dataset y las
+decisiones agenticas, pero no representa anotaciones oficiales del dataset NASA
+IMS.
+
+La ejecucion canonica con Qwen se lanza mediante:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_nasa_ims_synthetic_temporal_benchmark \
+  --model qwen3.5:4b \
+  --run-id nasa-ims-synth-agentic-qwen-fase3
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La run deja snapshot persistido en
+`codigo/reports/runs/nasa-ims-synth-agentic-qwen-fase3/`. Qwen selecciono
+`channel\_1`, eligio ventanas de 2048 muestras con 50\% de solape, propuso
+Isolation Forest y, finalmente, el agente evaluador rechazo la ejecucion por
+recall insuficiente y FPR superior al umbral local. Esta salida es
+metodologicamente valiosa porque introduce un caso no perfecto y obliga a una
+iteracion posterior de decisiones, en lugar de cerrar todos los experimentos
+con recall 1.0000.
+
+\section{Bucle de Reintento Agentico}
+
+Para convertir una ejecucion rechazada en aprendizaje trazable se ha añadido
+un servicio de analisis de fallo y un contrato especifico de reintento:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+codigo/app/services/iteration_analysis.py
+codigo/scripts/run_nasa_ims_agentic_retry.py
+ModelingRetryDecision
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El servicio `iteration\_analysis.py` resume la ejecucion fallida sin exponer el
+dataset completo al LLM: calcula matriz de confusion, falsos negativos, falsos
+positivos, estadisticos de puntuacion, umbral efectivo y reintentos restantes.
+El agente modelador recibe ese expediente y debe devolver JSON validable con
+`should\_retry`, `retry\_config`, `learning\_summary`, `expected\_effect` y
+`stop\_reason` cuando decida parar.
+
+La logica de ejecucion sigue siendo determinista. El agente no entrena modelos
+ni modifica predicciones; solo propone una nueva `ModelingConfig` soportada. El
+script ejecuta como maximo dos intentos, persiste cada decision y, si el ultimo
+intento sigue rechazado, fuerza `next\_action = stop` en la evaluacion efectiva
+para impedir bucles infinitos. Esta parada no sustituye al juicio del agente:
+documenta el limite operativo pactado para la ejecucion.
+
+Para auditar si el agente razono de forma consistente, se ha añadido una capa
+de post-mortem:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+codigo/app/services/reasoning_audit.py
+codigo/app/schemas/reasoning.py
+codigo/scripts/create_agentic_reasoning_audit.py
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El post-mortem compara hipotesis, evidencia, accion, efecto esperado y metricas
+antes/despues. Ademas puede generar una solicitud de revision humana y una
+plantilla JSON de veredicto. Esta revision humana no altera la ejecucion; sirve
+para decidir si el razonamiento debe reutilizarse como contexto, descartarse o
+tratarse como caso frontera.
+
+Como pulido adicional de trazabilidad multi-dataset, los artefactos comunes ya
+no usan nombres internos heredados de CWRU cuando se ejecutan sobre NASA IMS.
+Las rutas pueden seguir apuntando a `cwru\_bearing` en el benchmark historico,
+pero los identificadores de artefacto pasan a ser neutrales:
+`windows\_features`, `model\_predictions`, `modeling\_summary`,
+`evaluation\_metrics` y `evaluation\_summary`. Esto reduce el acoplamiento
+visual del sistema a CWRU y hace mas clara la lectura de snapshots
+multi-dataset.
+
 \section{Dependencias}
 
 Se ha creado `requirements.txt` como punto inicial para construir el entorno de
@@ -843,9 +1052,17 @@ la persistencia local de ejecuciones, el registro consultable, el protocolo
 experimental local, la API minima de consulta, la configuracion de razonamiento
 de Ollama, los contratos multi-dataset iniciales, el registro de adaptadores de
 dataset, el manifiesto comun NASA IMS sobre una carpeta sintetica preextraida,
-el rechazo de paquetes comprimidos para ese manifiesto, el rechazo de
-transiciones invalidas y el fallback determinista. En esta fase se han
-ejecutado 130 tests
+el rechazo de paquetes comprimidos para ese manifiesto, el perfilado del
+manifiesto comun NASA IMS, la lectura tabular de snapshots IMS sin extension,
+la limpieza comun con seleccion controlada de canal, el rechazo de canales no
+declarados, el rechazo de transiciones invalidas y el fallback determinista
+contextualizado por dataset. Tambien validan el `decision\_summary` del
+perfilador, su entrega al agente limpiador, el expediente experto del
+estructurador, las alternativas comparables propuestas por el estructurador y
+la generacion de planes de ventana y modelo a partir de dichas alternativas, el
+ejecutor PCA, el diagnostico no supervisado de degradacion, el benchmark NASA
+sintetico, la iteracion agentica acotada, la auditoria del razonamiento y la
+preparacion de revision humana. En esta fase se han ejecutado 168 tests
 correctamente.
 
 \section{Siguiente Paso de Implementación}

@@ -55,7 +55,7 @@ class ReportWriterAgentTests(unittest.TestCase):
         self.assertEqual(decision.output_format, "markdown")
         self.assertEqual(
             decision.output_path,
-            "codigo/reports/cwru_bearing/final_report.md",
+            "codigo/reports/cwru_bearing/run-report-001/final_report.md",
         )
         self.assertIn(
             "Metricas y evaluacion",
@@ -69,7 +69,7 @@ class ReportWriterAgentTests(unittest.TestCase):
                 "decision_id": "run-report-001:report_writer:001",
                 "rationale": "Use a concise technical report structure.",
                 "confidence": 0.91,
-                "output_path": "codigo/reports/cwru_bearing/final_report.md",
+                "output_path": "codigo/reports/cwru_bearing/run-report-001/final_report.md",
                 "output_format": "markdown",
                 "sections": [
                     {"title": "Resumen ejecutivo", "include_metrics": False, "include_artifacts": False, "source_paths": []},
@@ -108,7 +108,7 @@ class ReportWriterAgentTests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         self.assertEqual(
             decision.output_path,
-            "codigo/reports/cwru_bearing/final_report.md",
+            "codigo/reports/cwru_bearing/run-report-001/final_report.md",
         )
         self.assertLessEqual(decision.confidence, 0.7)
         self.assertIn("Fallback after LLM failure", decision.rationale)

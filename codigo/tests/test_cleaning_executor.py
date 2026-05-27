@@ -9,6 +9,8 @@ import pandas as pd
 from scipy.io import savemat
 
 from codigo.app.executors.cleaning import clean_dataset, generate_clean_signals
+from codigo.app.executors.data_profiler import build_data_profile
+from codigo.app.executors.dataset_manifest import generate_dataset_manifest
 from codigo.app.schemas.state import CleaningConfig
 
 
@@ -151,6 +153,78 @@ class CleaningExecutorTests(unittest.TestCase):
 
         self.assertEqual(summary["files"][0]["channel"], "sensor_a")
         self.assertEqual(summary["files"][0]["non_finite_removed"], 1)
+
+    def test_clean_dataset_uses_common_nasa_ims_manifest_selected_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "nasa_ims_bearing"
+            snapshot = raw_dir / "2nd_test" / "2004.02.12.10.32.39"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text(
+                "0.1\t0.2\t0.3\t0.4\n0.5\tNaN\t0.7\t0.8\n0.9\t1.0\t1.1\t1.2\n",
+                encoding="utf-8",
+            )
+            manifest_result = generate_dataset_manifest(
+                raw_dir,
+                base / "interim",
+                adapter_id="nasa_ims_bearing",
+            )
+            profile = build_data_profile(manifest_result.manifest_path)
+            profile_path = base / "profile.json"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            summary = clean_dataset(
+                manifest_result.manifest_path,
+                profile_path,
+                base / "clean",
+                CleaningConfig(
+                    strategy_id="nasa_ims_clean_channel_2",
+                    remove_non_finite=True,
+                    resample_to_hz=20000,
+                    normalization="none",
+                    selected_channel="channel_2",
+                    audit_log_path=(base / "summary.json").as_posix(),
+                ),
+            )
+            data = np.load(base / "clean" / "set_2_2004_02_12_10_32_39.npz")
+
+        self.assertEqual(summary["dataset"], "nasa_ims_bearing")
+        self.assertEqual(summary["manifest_format"], "common")
+        self.assertEqual(summary["files"][0]["channel"], "channel_2")
+        self.assertEqual(summary["files"][0]["source_sample_rate_hz"], 20000)
+        self.assertEqual(summary["files"][0]["non_finite_removed"], 1)
+        self.assertEqual(data["channel"].item(), "channel_2")
+        self.assertEqual(data["run_id"].item(), "set_2")
+        np.testing.assert_array_equal(data["signal"], np.array([0.2, 1.0], dtype=np.float32))
+
+    def test_clean_dataset_rejects_undeclared_common_manifest_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "nasa_ims_bearing"
+            snapshot = raw_dir / "2nd_test" / "2004.02.12.10.32.39"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("0.1\t0.2\t0.3\t0.4\n", encoding="utf-8")
+            manifest_result = generate_dataset_manifest(
+                raw_dir,
+                base / "interim",
+                adapter_id="nasa_ims_bearing",
+            )
+            profile = build_data_profile(manifest_result.manifest_path)
+            profile_path = base / "profile.json"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "selected channel channel_9"):
+                clean_dataset(
+                    manifest_result.manifest_path,
+                    profile_path,
+                    base / "clean",
+                    CleaningConfig(
+                        strategy_id="nasa_ims_bad_channel",
+                        remove_non_finite=True,
+                        resample_to_hz=20000,
+                        selected_channel="channel_9",
+                    ),
+                )
 
     def test_profile_manifest_mismatch_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

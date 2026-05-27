@@ -1,4 +1,4 @@
-"""Evaluacion determinista de predicciones de anomalias CWRU."""
+"""Evaluacion determinista de predicciones de anomalias."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def generate_evaluation_report(
         summary = evaluate_predictions(predictions_path, output, primary_split)
         artifacts = [
             ArtifactRef(
-                name="cwru_evaluation_metrics",
+                name="evaluation_metrics",
                 artifact_type="metrics",
                 path=summary["metrics_path"],
                 producer="evaluator",
@@ -57,7 +57,7 @@ def generate_evaluation_report(
                 },
             ),
             ArtifactRef(
-                name="cwru_evaluation_summary",
+                name="evaluation_summary",
                 artifact_type="report",
                 path=summary["report_fragment_path"],
                 producer="evaluator",
@@ -67,7 +67,7 @@ def generate_evaluation_report(
         return EvaluationExecutorResult(
             executor_name="evaluation",
             status="success",
-            message="CWRU evaluation metrics generated.",
+            message="Evaluation metrics generated.",
             artifacts=artifacts,
             errors=[],
             state_updates={"metrics_path": summary["metrics_path"]},
@@ -86,7 +86,7 @@ def generate_evaluation_report(
         return EvaluationExecutorResult(
             executor_name="evaluation",
             status="failed",
-            message="CWRU evaluation failed.",
+            message="Evaluation failed.",
             artifacts=[],
             errors=[error],
             state_updates={},
@@ -188,7 +188,7 @@ def _report_markdown(summary: dict[str, Any]) -> str:
     matrix = metrics["confusion_matrix"]
     return "\n".join(
         [
-            "# Evaluacion CWRU",
+            "# Evaluacion de deteccion de anomalias",
             "",
             f"- Split principal: `{summary['primary_split']}`",
             f"- Predicciones evaluadas: `{summary['n_predictions']}`",

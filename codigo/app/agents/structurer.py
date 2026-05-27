@@ -9,7 +9,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from codigo.app.executors.structuring import DEFAULT_STRUCTURING_CONFIG
+from codigo.app.executors.structuring import (
+    DEFAULT_STRUCTURING_CONFIG,
+    SUPPORTED_OVERLAPS,
+    SUPPORTED_WINDOW_SIZES,
+    TIME_DOMAIN_FULL_FEATURES,
+    build_structuring_decision_summary,
+)
 from codigo.app.schemas.agent_decisions import StructuringDecision
 from codigo.app.schemas.state import StructuringConfig, TFMStateModel
 from codigo.app.services.llm import (
@@ -19,10 +25,6 @@ from codigo.app.services.llm import (
     get_default_json_llm_client,
 )
 
-
-DEFAULT_FEATURES_PATH = "codigo/data/tensors/cwru_bearing/windows_features.csv"
-DEFAULT_TENSORS_PATH = "codigo/data/tensors/cwru_bearing/windows_raw.npz"
-DEFAULT_SPLITS_PATH = "codigo/data/tensors/cwru_bearing/splits.json"
 
 SUPPORTED_FEATURES = {
     "mean",
@@ -76,19 +78,19 @@ def decide_structuring_action_with_llm(
 
 
 def decide_structuring_action_deterministic(state: TFMStateModel) -> StructuringDecision:
-    """Fallback reproducible para el MVP CWRU."""
+    """Fallback reproducible para estructuracion local controlada."""
 
     return StructuringDecision(
         decision_id=f"{state.run_id}:structurer:{_structurer_turn(state):03d}",
         rationale=(
-            "Fallback CWRU structuring policy: use 2048-sample windows with "
-            "50% overlap, binary anomaly labels and time-domain baseline features."
+            "Fallback structuring policy: use 2048-sample windows with 50% "
+            "overlap and supported time-domain features."
         ),
         confidence=1.0,
-        structuring_config=DEFAULT_STRUCTURING_CONFIG,
-        expected_features_path=DEFAULT_FEATURES_PATH,
-        expected_tensors_path=DEFAULT_TENSORS_PATH,
-        expected_splits_path=DEFAULT_SPLITS_PATH,
+        structuring_config=_default_structuring_config_for_state(state),
+        expected_features_path=_default_features_path(state),
+        expected_tensors_path=_default_tensors_path(state),
+        expected_splits_path=_default_splits_path(state),
     )
 
 
@@ -123,7 +125,7 @@ def _structurer_messages(state: TFMStateModel) -> list[LLMMessage]:
                     json.dumps(_state_summary_for_llm(state), indent=2, ensure_ascii=True),
                     "",
                     "Resumen de senales limpias:",
-                    json.dumps(_clean_summary_for_llm(state.clean_path), indent=2, ensure_ascii=True),
+                    json.dumps(_clean_summary_for_llm(state), indent=2, ensure_ascii=True),
                     "",
                     "Formato JSON esperado:",
                     json.dumps(_structurer_json_template(state), indent=2, ensure_ascii=True),
@@ -131,12 +133,25 @@ def _structurer_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
                     "- structuring_config debe validar contra StructuringConfig.",
-                    "- window_size debe ser 2048 para el MVP CWRU.",
-                    "- overlap debe ser 0.5.",
+                    f"- window_size debe estar en {list(SUPPORTED_WINDOW_SIZES)}.",
+                    f"- overlap debe estar en {list(SUPPORTED_OVERLAPS)}.",
                     f"- main_channel debe ser {state.project_context.main_channel}.",
                     f"- target_sample_rate_hz debe ser {state.project_context.target_sample_rate_hz}.",
-                    "- label_mode debe ser binary_anomaly.",
+                    "- label_mode debe ser binary_anomaly o fault_type.",
                     "- features solo puede contener features temporales soportadas.",
+                    (
+                        "- Usa una candidate_configuration soportada cuando el "
+                        "resumen la incluya."
+                    ),
+                    (
+                        "- Si hay varias candidate_configurations viables, "
+                        "rellena comparison_candidates con 1 a 3 alternativas "
+                        "comparables y justifica el trade-off de cada una."
+                    ),
+                    (
+                        "- No inventes alternativas: cada comparison_candidate "
+                        "debe respetar las mismas reglas que structuring_config."
+                    ),
                     f"- decision_id debe ser: {state.run_id}:structurer:{_structurer_turn(state):03d}",
                 ]
             ),
@@ -156,11 +171,39 @@ def _structurer_json_template(state: TFMStateModel) -> dict[str, Any]:
             "main_channel": state.project_context.main_channel,
             "target_sample_rate_hz": state.project_context.target_sample_rate_hz,
             "label_mode": "binary_anomaly",
-            "features": list(DEFAULT_STRUCTURING_CONFIG.features),
+            "features": list(TIME_DOMAIN_FULL_FEATURES),
         },
-        "expected_features_path": DEFAULT_FEATURES_PATH,
-        "expected_tensors_path": DEFAULT_TENSORS_PATH,
-        "expected_splits_path": DEFAULT_SPLITS_PATH,
+        "expected_features_path": _default_features_path(state),
+        "expected_tensors_path": _default_tensors_path(state),
+        "expected_splits_path": _default_splits_path(state),
+        "comparison_candidates": [
+            {
+                "alternative_id": "win_1024_ov_50",
+                "structuring_config": {
+                    "window_size": 1024,
+                    "overlap": 0.5,
+                    "main_channel": state.project_context.main_channel,
+                    "target_sample_rate_hz": state.project_context.target_sample_rate_hz,
+                    "label_mode": "binary_anomaly",
+                    "features": list(TIME_DOMAIN_FULL_FEATURES),
+                },
+                "rationale": "Alternativa con mayor resolucion temporal.",
+                "expected_effect": "Aumentar ventanas disponibles y sensibilidad temporal.",
+            },
+            {
+                "alternative_id": "win_4096_ov_50",
+                "structuring_config": {
+                    "window_size": 4096,
+                    "overlap": 0.5,
+                    "main_channel": state.project_context.main_channel,
+                    "target_sample_rate_hz": state.project_context.target_sample_rate_hz,
+                    "label_mode": "binary_anomaly",
+                    "features": list(TIME_DOMAIN_FULL_FEATURES),
+                },
+                "rationale": "Alternativa con mas contexto por ventana.",
+                "expected_effect": "Reducir ruido local a costa de menos ventanas.",
+            },
+        ],
     }
 
 
@@ -187,19 +230,25 @@ def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
     }
 
 
-def _clean_summary_for_llm(clean_path: str | None) -> dict[str, Any]:
-    if not clean_path:
+def _clean_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
+    if not state.clean_path:
         return {"available": False}
-    clean_dir = Path(clean_path)
+    clean_dir = Path(state.clean_path)
     if not clean_dir.exists():
-        return {"available": False, "path": clean_path}
+        return {"available": False, "path": state.clean_path}
 
     files = sorted(clean_dir.glob("*.npz"))
     return {
         "available": True,
-        "path": clean_path,
+        "path": state.clean_path,
         "n_clean_files": len(files),
         "sample_files": [path.name for path in files[:5]],
+        "decision_summary": build_structuring_decision_summary(
+            clean_dir,
+            dataset=state.project_context.dataset,
+            target_sample_rate_hz=state.project_context.target_sample_rate_hz,
+            main_channel=state.project_context.main_channel,
+        ),
     }
 
 
@@ -207,20 +256,30 @@ def _validate_structuring_decision_bounds(
     state: TFMStateModel,
     decision: StructuringDecision,
 ) -> None:
-    config = decision.structuring_config
+    _validate_structuring_config_bounds(state, decision.structuring_config)
+    if not decision.expected_features_path or not decision.expected_splits_path:
+        raise ValueError("expected feature and split paths are required")
+    for candidate in decision.comparison_candidates:
+        _validate_structuring_config_bounds(state, candidate.structuring_config)
+
+
+def _validate_structuring_config_bounds(
+    state: TFMStateModel,
+    config: StructuringConfig,
+) -> None:
     expected_rate = state.project_context.target_sample_rate_hz
     if config.target_sample_rate_hz != expected_rate:
         raise ValueError(f"target_sample_rate_hz must be {expected_rate}")
     if config.main_channel != state.project_context.main_channel:
         raise ValueError(f"main_channel must be {state.project_context.main_channel}")
-    if config.label_mode != "binary_anomaly":
-        raise ValueError("label_mode must be binary_anomaly for the MVP")
-    if config.window_size != 2048:
-        raise ValueError("window_size must be 2048 for the MVP")
-    if config.overlap != 0.5:
-        raise ValueError("overlap must be 0.5 for the MVP")
-    if not decision.expected_features_path or not decision.expected_splits_path:
-        raise ValueError("expected feature and split paths are required")
+    if config.window_size not in SUPPORTED_WINDOW_SIZES:
+        raise ValueError(
+            f"window_size must be one of {', '.join(map(str, SUPPORTED_WINDOW_SIZES))}"
+        )
+    if config.overlap not in SUPPORTED_OVERLAPS:
+        raise ValueError(
+            f"overlap must be one of {', '.join(map(str, SUPPORTED_OVERLAPS))}"
+        )
     _validate_supported_features(config)
 
 
@@ -228,6 +287,34 @@ def _validate_supported_features(config: StructuringConfig) -> None:
     unsupported = sorted(set(config.features) - SUPPORTED_FEATURES)
     if unsupported:
         raise ValueError(f"unsupported features: {', '.join(unsupported)}")
+
+
+def _default_structuring_config_for_state(state: TFMStateModel) -> StructuringConfig:
+    label_mode = (
+        state.project_context.label_mode
+        if state.project_context.label_mode in {"binary_anomaly", "fault_type"}
+        else "binary_anomaly"
+    )
+    return StructuringConfig(
+        window_size=DEFAULT_STRUCTURING_CONFIG.window_size,
+        overlap=DEFAULT_STRUCTURING_CONFIG.overlap,
+        main_channel=state.project_context.main_channel,
+        target_sample_rate_hz=state.project_context.target_sample_rate_hz,
+        label_mode=label_mode,
+        features=list(TIME_DOMAIN_FULL_FEATURES),
+    )
+
+
+def _default_features_path(state: TFMStateModel) -> str:
+    return f"codigo/data/tensors/{state.project_context.dataset}/windows_features.csv"
+
+
+def _default_tensors_path(state: TFMStateModel) -> str:
+    return f"codigo/data/tensors/{state.project_context.dataset}/windows_raw.npz"
+
+
+def _default_splits_path(state: TFMStateModel) -> str:
+    return f"codigo/data/tensors/{state.project_context.dataset}/splits.json"
 
 
 def _structurer_turn(state: TFMStateModel) -> int:

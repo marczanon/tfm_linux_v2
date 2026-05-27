@@ -66,6 +66,15 @@ class CleaningDecision(AgentDecisionBase):
     warnings: list[str] = Field(default_factory=list)
 
 
+class StructuringAlternative(StrictBaseModel):
+    """Alternativa comparable propuesta por el agente estructurador."""
+
+    alternative_id: str = Field(min_length=1)
+    structuring_config: StructuringConfig
+    rationale: str = Field(min_length=1)
+    expected_effect: str | None = None
+
+
 class StructuringDecision(AgentDecisionBase):
     """Decision del agente estructurador."""
 
@@ -74,6 +83,7 @@ class StructuringDecision(AgentDecisionBase):
     expected_features_path: str = Field(min_length=1)
     expected_tensors_path: str | None
     expected_splits_path: str = Field(min_length=1)
+    comparison_candidates: list[StructuringAlternative] = Field(default_factory=list)
 
 
 class ModelingDecision(AgentDecisionBase):
@@ -84,6 +94,45 @@ class ModelingDecision(AgentDecisionBase):
     train_split: str = Field(default="train", min_length=1)
     validation_split: str | None = "validation"
     expected_model_path: str = Field(min_length=1)
+    comparison_candidates: list["ModelingAlternative"] = Field(default_factory=list)
+
+
+class ModelingAlternative(StrictBaseModel):
+    """Alternativa comparable propuesta por el agente modelador."""
+
+    alternative_id: str = Field(min_length=1)
+    modeling_config: ModelingConfig
+    rationale: str = Field(min_length=1)
+    expected_effect: str | None = None
+
+
+class ModelingRetryDecision(AgentDecisionBase):
+    """Decision del modelador tras analizar una ejecucion fallida."""
+
+    agent_name: Literal["modeler"] = "modeler"
+    source_run_id: str = Field(min_length=1)
+    attempt_number: int = Field(ge=1)
+    max_attempts: int = Field(ge=1)
+    should_retry: bool
+    learning_summary: str = Field(min_length=1)
+    retry_config: ModelingConfig | None = None
+    expected_effect: str | None = None
+    stop_reason: str | None = None
+    evidence_used: list[str] = Field(default_factory=list)
+    comparison_candidates: list[ModelingAlternative] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_retry_decision(self) -> "ModelingRetryDecision":
+        if self.attempt_number > self.max_attempts:
+            raise ValueError("attempt_number cannot exceed max_attempts")
+        if self.should_retry:
+            if self.retry_config is None:
+                raise ValueError("retry decisions require retry_config")
+            if not self.expected_effect:
+                raise ValueError("retry decisions require expected_effect")
+        elif not self.stop_reason:
+            raise ValueError("stop decisions require stop_reason")
+        return self
 
 
 class EvaluationDecision(AgentDecisionBase):

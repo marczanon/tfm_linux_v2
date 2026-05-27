@@ -2,24 +2,72 @@
 
 \section{Conclusiones principales}
 
-Esta sección resumirá las aportaciones del proyecto, separando los resultados
-del pipeline, la arquitectura multiagente y los modelos de detección de
-anomalías.
+El trabajo desarrollado demuestra que una arquitectura multiagente puede ser
+viable para procesamiento de datos industriales y deteccion de anomalias si se
+separa con claridad la decision generativa de la ejecucion determinista. Los
+agentes proponen configuraciones, comparan alternativas y justifican cambios;
+los ejecutores validan contratos, aplican transformaciones reproducibles y
+persisten artefactos, metricas y limitaciones.
+
+La primera aportacion es una arquitectura local trazable basada en LangGraph,
+contratos Pydantic y persistencia por run. Esta base permite reproducir el
+flujo completo sobre CWRU, consultar ejecuciones anteriores y comparar metricas
+sin mezclar razonamiento del agente con manipulacion arbitraria de datos.
+
+La segunda aportacion es la generalizacion inicial a datasets heterogeneos. NASA
+IMS se ha incorporado mediante contratos comunes, adaptadores de manifiesto,
+perfilado enriquecido, seleccion controlada de canal y estructuracion temporal.
+La evaluacion supervisada sobre NASA IMS real se ha bloqueado de forma
+deliberada hasta definir etiquetas temporales y particiones sin fuga, lo que
+refuerza la validez metodologica del sistema.
+
+La tercera aportacion es el aumento de protagonismo agentico sin eliminar
+guardarrailes. Los agentes Qwen locales han usado expedientes expertos para
+elegir canales, ventanas, modelos y reintentos. Tambien han generado
+alternativas comparables y razonamientos que despues se han auditado frente a
+los resultados reales. El sistema muestra que un LLM local no necesita conocer
+de memoria datasets industriales de nicho si recibe evidencia estructurada,
+opciones soportadas y limites claros.
+
+La cuarta aportacion es experimental. La comparacion agentica de ventanas y
+modelos sobre CWRU muestra mejoras y trade-offs medibles. En particular, PCA
+con error de reconstruccion reduce falsos positivos a costa de recall, mientras
+que Isolation Forest mantiene mayor sensibilidad. El benchmark NASA sintetico
+introduce un caso no perfecto donde el agente aprende de falsos negativos,
+prueba una hipotesis y se detiene cuando la mejora de recall provoca una tasa
+de falsos positivos inaceptable.
+
+\section{Limitaciones}
+
+Las metricas de CWRU no deben interpretarse como garantia de rendimiento en
+planta industrial. CWRU es un benchmark controlado y muy separable. NASA IMS es
+mas representativo de degradacion temporal, pero en esta fase solo se ha usado
+para ingestion, perfilado, diagnostico y pruebas sinteticas etiquetadas. La
+validacion supervisada sobre NASA IMS real queda pendiente de una politica de
+etiquetado temporal defendible.
+
+El sistema tambien depende de la calidad de los expedientes expertos que reciben
+los agentes. Esta decision es intencionada: se evita pedir a un LLM local que
+invente conocimiento de dominio, pero obliga a mantener diagnosticos,
+contratos, registros de modelos y revisiones humanas bien documentados.
 
 \section{Trabajo futuro}
 
-Líneas previstas:
+Las lineas principales son:
 
 \begin{itemize}
-  \item ampliar la validación con NASA IMS Bearing Dataset u otros datasets
-        industriales mas complejos;
-  \item incorporar modelos adicionales con ejecutores deterministas, como PCA
-        con error de reconstruccion, One-Class SVM, LOF y autoencoders;
-  \item aumentar el poder de decision de los agentes mediante contratos
-        estrictos, alternativas justificadas y planes experimentales acotados;
+  \item definir una politica temporal defendible para NASA IMS real y otros
+        datasets run-to-failure;
+  \item incorporar modelos adicionales con ejecutores deterministas, como
+        One-Class SVM, LOF y autoencoders, solo cuando existan tests,
+        persistencia y evaluacion comparable;
+  \item ampliar la experimentacion multi-dataset con planes acotados y
+        comparacion frente a politicas deterministas;
   \item definir ejecuciones controladas desde API y Human Review antes de
         permitir trabajos costosos mediante `POST /runs`;
-  \item añadir persistencia de checkpoints cuando sea necesaria para
-        ejecuciones largas;
-  \item preparar ejecución Docker y SLURM cuando el flujo local sea estable.
+  \item construir en una fase posterior una memoria agentica supervisada,
+        basada en post-mortems y revisiones humanas, que pueda alimentar un RAG
+        local sin modificar metricas ni saltarse contratos;
+  \item preparar Docker, SLURM y checkpoints persistentes cuando el flujo local
+        y la politica de ejecucion esten suficientemente estabilizados.
 \end{itemize}

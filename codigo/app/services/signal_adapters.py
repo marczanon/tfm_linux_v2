@@ -27,11 +27,25 @@ def read_signal_channels(path: str | Path) -> dict[str, SignalChannel]:
     suffix = file_path.suffix.lower()
     if suffix == ".mat":
         return _read_mat(file_path)
-    if suffix in {".csv", ".txt", ".tsv"}:
+    if suffix in {".csv", ".txt", ".tsv"} or _looks_like_nasa_ims_file(
+        file_path
+    ):
         return _read_table(file_path)
     if suffix == ".npz":
         return _read_npz(file_path)
     raise ValueError(f"unsupported signal file format: {suffix}")
+
+
+def read_signal_frame(path: str | Path) -> pd.DataFrame:
+    """Lee ficheros tabulares de senal como `DataFrame` numerico."""
+
+    file_path = Path(path)
+    suffix = file_path.suffix.lower()
+    if suffix in {".csv", ".txt", ".tsv"} or _looks_like_nasa_ims_file(
+        file_path
+    ):
+        return _read_table_frame(file_path)
+    raise ValueError(f"unsupported tabular signal file format: {suffix}")
 
 
 def load_signal_channel(path: str | Path, channel: str) -> np.ndarray:
@@ -40,7 +54,9 @@ def load_signal_channel(path: str | Path, channel: str) -> np.ndarray:
     channels = read_signal_channels(path)
     if channel not in channels:
         available = ", ".join(sorted(channels)) or "none"
-        raise ValueError(f"channel {channel} not found in {path}; available: {available}")
+        raise ValueError(
+            f"channel {channel} not found in {path}; available: {available}"
+        )
     return channels[channel].values
 
 
@@ -54,7 +70,7 @@ def _read_mat(path: Path) -> dict[str, SignalChannel]:
 
 
 def _read_table(path: Path) -> dict[str, SignalChannel]:
-    frame = _read_table_frame(path)
+    frame = read_signal_frame(path)
     numeric = frame.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
     channels = {
         str(column): _channel(str(column), str(column), numeric[column].to_numpy())
@@ -69,9 +85,24 @@ def _read_table_frame(path: Path) -> pd.DataFrame:
         return pd.read_csv(path)
     if suffix == ".tsv":
         return pd.read_csv(path, sep="\t")
-    frame = pd.read_csv(path, sep=None, engine="python")
-    if suffix == ".txt" and frame.shape[1] == 1:
-        return pd.read_csv(path, sep=r"\s+", header=None)
+    first_line = _first_non_empty_line(path)
+    if first_line and _line_has_numeric_values(first_line):
+        return _read_numeric_table_without_header(path, first_line)
+    if first_line and "\t" in first_line:
+        return pd.read_csv(path, sep="\t")
+    if first_line and "," in first_line:
+        return pd.read_csv(path)
+    return pd.read_csv(path, sep=r"\s+")
+
+
+def _read_numeric_table_without_header(path: Path, first_line: str) -> pd.DataFrame:
+    if "\t" in first_line:
+        frame = pd.read_csv(path, sep="\t", header=None)
+    elif "," in first_line:
+        frame = pd.read_csv(path, header=None)
+    else:
+        frame = pd.read_csv(path, sep=r"\s+", header=None)
+    frame.columns = [f"channel_{index}" for index in range(1, frame.shape[1] + 1)]
     return frame
 
 
@@ -105,7 +136,55 @@ def _mat_channel_name(key: str) -> str | None:
     return None
 
 
-def _require_channels(path: Path, channels: dict[str, SignalChannel]) -> dict[str, SignalChannel]:
+def _require_channels(
+    path: Path,
+    channels: dict[str, SignalChannel],
+) -> dict[str, SignalChannel]:
     if not channels:
         raise ValueError(f"no numeric signal channels found in {path}")
     return channels
+
+
+def _first_non_empty_line(path: Path) -> str | None:
+    try:
+        with path.open(encoding="utf-8") as file:
+            for line in file:
+                stripped = line.strip()
+                if stripped:
+                    return stripped
+    except OSError:
+        return None
+    return None
+
+
+def _line_has_numeric_values(line: str) -> bool:
+    parts = _split_table_line(line)
+    return bool(parts) and all(_is_number(part) for part in parts)
+
+
+def _split_table_line(line: str) -> list[str]:
+    if "\t" in line:
+        parts = line.split("\t")
+    elif "," in line:
+        parts = line.split(",")
+    else:
+        parts = line.split()
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _looks_like_nasa_ims_file(path: Path) -> bool:
+    name = (
+        path.stem
+        if path.suffix.lower() in {".txt", ".csv", ".tsv"}
+        else path.name
+    )
+    parts = name.split(".")
+    return len(parts) == 6 and all(part.isdigit() for part in parts)
+
+
+def _is_number(value: str) -> bool:
+    try:
+        float(value)
+    except ValueError:
+        return False
+    return True

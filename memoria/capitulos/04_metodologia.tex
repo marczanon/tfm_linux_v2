@@ -59,11 +59,63 @@ de frecuencia, canales y variante local. Esta decisión permite validar la
 generalización del pipeline sin incorporar todavía dependencias de extracción
 ni una política de etiquetado temporal.
 
+El perfilado se adapta para leer tanto el manifiesto histórico de CWRU como el
+manifiesto común de NASA IMS. En este segundo caso, los snapshots ASCII sin
+extensión se tratan como tablas numéricas y se convierten en canales
+normalizados (`channel\_1`, `channel\_2`, etc.), lo que permite obtener
+estadísticos ligeros sin cargar señales completas en el estado del grafo.
+
+La limpieza se generaliza de forma acotada mediante una selección explícita de
+canal. El contrato `CleaningConfig` permite indicar `selected\_channel` y el
+ejecutor valida esa elección contra los canales declarados en el manifiesto
+común. Así, NASA IMS puede limpiarse sobre un canal concreto sin habilitar
+transformaciones libres ni pasar todavía a estructuración o modelado.
+
 Los agentes no interpretarán directamente carpetas crudas. Recibirán
 descriptores, resúmenes de manifiesto y diagnósticos de calidad generados por
 código determinista. De este modo pueden aumentar su capacidad de decisión
 --por ejemplo, recomendando canal, ventana, familia de features o modelo-- sin
 ejecutar código arbitrario ni saltarse los contratos del sistema.
+
+Esta elección responde a una limitación metodológica importante: los LLM locales
+empleados no deben considerarse fuentes autosuficientes de conocimiento sobre
+datasets industriales específicos. Su viabilidad se apoya en externalizar el
+conocimiento de dominio en expedientes verificables: métricas, candidatos,
+opciones ejecutables, advertencias y capacidades no soportadas. Así, el agente
+actúa como experto deliberativo sobre evidencia proporcionada por el sistema,
+no como una caja negra que recuerda parámetros de memoria.
+
+El mismo criterio se aplica a la estructuración temporal. En lugar de pedir al
+LLM que invente un tamaño de ventana, el sistema calcula alternativas
+soportadas, estima coste, número de ventanas y riesgos de fuga de información.
+El estructurador puede elegir entre configuraciones válidas y justificar el
+compromiso entre resolución temporal, coste y robustez experimental.
+
+Para disponer de metricas supervisadas multi-dataset sin forzar etiquetas sobre
+NASA IMS real, se introduce ademas un benchmark sintetico NASA IMS-like. Este
+benchmark conserva formato temporal, canales y frecuencia de muestreo
+compatibles con NASA IMS Set 2, pero genera etiquetas `normal` y `fault` por
+construccion. Su papel metodologico es probar decisiones agenticas,
+persistencia y evaluacion sobre un escenario no trivial; no se interpreta como
+resultado oficial del dataset NASA IMS.
+
+Sobre este benchmark se incorpora ademas una iteracion agentica acotada. Cuando
+una ejecucion no supera los umbrales, el sistema genera un expediente de fallo
+con matriz de confusion, falsos negativos, falsos positivos, umbral efectivo y
+convencion de puntuacion. El agente modelador recibe ese expediente y decide,
+mediante un contrato estructurado, si propone un unico reintento o si detiene
+el proceso. El numero maximo de intentos queda fijado antes de la ejecucion, de
+modo que el agente puede aprender de sus errores sin abrir una busqueda
+ilimitada de hiperparametros.
+
+La revision humana se plantea en esta fase como human-on-the-loop, no como una
+aprobacion manual de resultados. Al finalizar una ejecucion, el sistema puede
+presentar al revisor la hipotesis del agente, la evidencia usada, el cambio
+aplicado y el resultado observado. El humano etiqueta la calidad del
+razonamiento, por ejemplo como correcto, parcialmente correcto, incorrecto,
+inseguro o insuficiente. Esta etiqueta no modifica las metricas; se conserva
+como memoria supervisada para futuros prompts, RAG local o filtrado de
+comportamientos erroneos repetidos.
 
 \section{Manifiesto del dataset}
 

@@ -8,7 +8,11 @@ import numpy as np
 import pandas as pd
 from scipy.io import savemat
 
-from codigo.app.executors.data_profiler import build_data_profile, generate_data_profile
+from codigo.app.executors.data_profiler import (
+    build_data_profile,
+    generate_data_profile,
+)
+from codigo.app.executors.dataset_manifest import generate_dataset_manifest
 
 
 FIELDS = [
@@ -80,6 +84,12 @@ class DataProfilerTests(unittest.TestCase):
         self.assertEqual(de_stats["non_finite_count"], 1)
         self.assertAlmostEqual(de_stats["rms"], np.sqrt((1 + 4 + 9) / 3))
         self.assertNotIn("values", de_stats)
+        decision = profile["decision_summary"]
+        self.assertEqual(decision["quality_status"], "needs_resampling")
+        self.assertIn("resample", decision["required_actions"])
+        self.assertIn("select_channel", decision["required_actions"])
+        self.assertIn("DE_time", decision["recommended_channels"])
+        self.assertTrue(decision["supported_cleaning_options"])
 
     def test_generate_profile_writes_json_and_result(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,7 +132,9 @@ class DataProfilerTests(unittest.TestCase):
             base = Path(tmp)
             csv_path = base / "signals.csv"
             manifest_path = base / "manifest.csv"
-            pd.DataFrame({"sensor_a": [1.0, 2.0, np.nan], "tag": ["x", "y", "z"]}).to_csv(csv_path, index=False)
+            pd.DataFrame(
+                {"sensor_a": [1.0, 2.0, np.nan], "tag": ["x", "y", "z"]}
+            ).to_csv(csv_path, index=False)
             write_manifest(
                 manifest_path,
                 [
@@ -150,6 +162,101 @@ class DataProfilerTests(unittest.TestCase):
         self.assertEqual(profile["channels_detected"], ["sensor_a"])
         self.assertEqual(stats["n_samples"], 3)
         self.assertEqual(stats["non_finite_count"], 1)
+        decision = profile["decision_summary"]
+        self.assertEqual(decision["quality_status"], "clean")
+        self.assertEqual(decision["required_actions"], ["remove_non_finite"])
+        self.assertEqual(decision["recommended_channels"], ["sensor_a"])
+
+    def test_build_profile_uses_common_nasa_ims_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "nasa_ims_bearing"
+            snapshot = raw_dir / "2nd_test" / "2004.02.12.10.32.39"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text(
+                "0.1\t0.2\t0.3\t0.4\n0.5\t0.6\t0.7\t0.8\n",
+                encoding="utf-8",
+            )
+            manifest_result = generate_dataset_manifest(
+                raw_dir,
+                base / "interim",
+                adapter_id="nasa_ims_bearing",
+            )
+
+            profile = build_data_profile(manifest_result.manifest_path)
+
+        channel_1 = profile["files"][0]["channels"]["channel_1"]
+        self.assertEqual(manifest_result.status, "success")
+        self.assertEqual(profile["dataset"], "nasa_ims_bearing")
+        self.assertEqual(profile["manifest_format"], "common")
+        self.assertEqual(profile["n_files"], 1)
+        self.assertEqual(profile["label_counts"], {"unknown": 1})
+        self.assertEqual(profile["sample_rate_counts"], {"20000": 1})
+        self.assertEqual(profile["run_counts"], {"set_2": 1})
+        self.assertEqual(
+            profile["channels_detected"],
+            ["channel_1", "channel_2", "channel_3", "channel_4"],
+        )
+        self.assertEqual(profile["files"][0]["primary_channel"], "channel_1")
+        self.assertEqual(profile["files"][0]["n_channels_manifest"], 4)
+        self.assertEqual(profile["files"][0]["metadata"]["points_per_file"], 20480)
+        self.assertEqual(channel_1["n_samples"], 2)
+        self.assertAlmostEqual(channel_1["mean"], 0.3)
+        decision = profile["decision_summary"]
+        self.assertEqual(decision["quality_status"], "needs_channel_selection")
+        self.assertEqual(
+            decision["recommended_channels"],
+            ["channel_1", "channel_2", "channel_3", "channel_4"],
+        )
+        self.assertIn("select_channel", decision["required_actions"])
+        self.assertIn(
+            "sample_count_differs_from_manifest_expectation",
+            decision["non_blocking_warnings"],
+        )
+        self.assertEqual(
+            decision["supported_cleaning_options"][0]["selected_channel"],
+            "channel_1",
+        )
+
+    def test_build_profile_marks_constant_channel_as_insufficient_quality(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            csv_path = base / "constant.csv"
+            manifest_path = base / "manifest.csv"
+            pd.DataFrame({"sensor_a": [5.0, 5.0, 5.0, 5.0]}).to_csv(
+                csv_path,
+                index=False,
+            )
+            write_manifest(
+                manifest_path,
+                [
+                    {
+                        "file_id": "constant-001",
+                        "dataset": "cwru_bearing",
+                        "source_path": csv_path.as_posix(),
+                        "label": "normal",
+                        "fault_type": "",
+                        "fault_diameter_inch": "",
+                        "load_hp": "0",
+                        "rpm": "0",
+                        "sensor_channel": "sensor_a",
+                        "source_sample_rate_hz": "100",
+                        "target_sample_rate_hz": "100",
+                        "source_format": "csv",
+                        "notes": "",
+                    }
+                ],
+            )
+
+            profile = build_data_profile(manifest_path)
+
+        channel = profile["files"][0]["channels"]["sensor_a"]
+        decision = profile["decision_summary"]
+        self.assertIn("constant_signal", channel["quality_flags"])
+        self.assertEqual(decision["quality_status"], "insufficient_quality")
+        self.assertEqual(decision["recommended_channels"], [])
+        self.assertEqual(decision["blocking_warnings"], ["no_viable_signal_channel"])
+        self.assertTrue(decision["candidate_channels"][0]["blocking"])
 
     def test_missing_file_returns_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -76,6 +76,10 @@ class EvaluationExecutorTests(unittest.TestCase):
         self.assertEqual(result.metrics_path, (output_dir / "metrics.json").as_posix())
         self.assertEqual(result.report_fragment_path, (output_dir / "evaluation_summary.md").as_posix())
         self.assertEqual([artifact.artifact_type for artifact in result.artifacts], ["metrics", "report"])
+        self.assertEqual(
+            [artifact.name for artifact in result.artifacts],
+            ["evaluation_metrics", "evaluation_summary"],
+        )
 
     def test_missing_required_columns_returns_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:

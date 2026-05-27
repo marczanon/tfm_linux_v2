@@ -3,9 +3,12 @@
 from codigo.app.schemas.agent_decisions import (
     CleaningDecision,
     EvaluationDecision,
+    ModelingAlternative,
     ModelingDecision,
+    ModelingRetryDecision,
     ReportDecision,
     ReportSection,
+    StructuringAlternative,
     StructuringDecision,
     SupervisorDecision,
 )
@@ -28,6 +31,12 @@ from codigo.app.schemas.executor_results import (
     ReportExecutorResult,
     StructuringResult,
 )
+from codigo.app.schemas.reasoning import (
+    AgentReasoningPostmortem,
+    HumanReasoningReview,
+    HumanReasoningReviewRequest,
+    ReasoningMetricDelta,
+)
 from codigo.app.schemas.state import (
     ArtifactRef,
     CleaningConfig,
@@ -45,6 +54,7 @@ from codigo.app.schemas.state import (
 
 __all__ = [
     "ArtifactRef",
+    "AgentReasoningPostmortem",
     "CleaningDecision",
     "CleaningConfig",
     "CleaningResult",
@@ -60,9 +70,13 @@ __all__ = [
     "ExecutorResult",
     "FaultMetadata",
     "HumanApproval",
+    "HumanReasoningReview",
+    "HumanReasoningReviewRequest",
     "ManifestResult",
     "MetricsReport",
+    "ModelingAlternative",
     "ModelingDecision",
+    "ModelingRetryDecision",
     "ModelingConfig",
     "ModelingResult",
     "PipelineError",
@@ -71,8 +85,10 @@ __all__ = [
     "ReportDecision",
     "ReportExecutorResult",
     "ReportSection",
+    "ReasoningMetricDelta",
     "SignalChannel",
     "StateMessage",
+    "StructuringAlternative",
     "StructuringDecision",
     "StructuringConfig",
     "StructuringResult",

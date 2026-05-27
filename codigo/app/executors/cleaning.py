@@ -1,4 +1,4 @@
-"""Limpieza determinista de senales CWRU."""
+"""Limpieza determinista de manifiestos de senal."""
 
 from __future__ import annotations
 
@@ -39,15 +39,16 @@ def generate_clean_signals(
     cfg = config or DEFAULT_CLEANING_CONFIG
     try:
         summary = clean_dataset(manifest_path, profile_path, output, cfg)
+        dataset = summary["dataset"]
         artifact = ArtifactRef(
-            name="cwru_clean_signals",
+            name=f"{dataset}_clean_signals",
             artifact_type="clean_signals",
             path=str(output),
             producer="cleaning_executor",
             metadata={"n_files_cleaned": len(summary["files"])},
         )
         log_artifact = ArtifactRef(
-            name="cwru_cleaning_summary",
+            name=f"{dataset}_cleaning_summary",
             artifact_type="log",
             path=summary["summary_path"],
             producer="cleaning_executor",
@@ -56,7 +57,7 @@ def generate_clean_signals(
         return CleaningResult(
             executor_name="cleaning",
             status="success",
-            message="CWRU clean signals generated.",
+            message="Clean signals generated.",
             artifacts=[artifact, log_artifact],
             errors=[],
             state_updates={"clean_path": str(output)},
@@ -75,7 +76,7 @@ def generate_clean_signals(
         return CleaningResult(
             executor_name="cleaning",
             status="failed",
-            message="CWRU cleaning failed.",
+            message="Signal cleaning failed.",
             artifacts=[],
             errors=[error],
             state_updates={},
@@ -95,6 +96,8 @@ def clean_dataset(
     """Limpia el canal principal de cada fila del manifiesto."""
 
     manifest = _read_manifest(manifest_path)
+    if not manifest:
+        raise ValueError(f"empty manifest: {manifest_path}")
     profile = json.loads(Path(profile_path).read_text(encoding="utf-8"))
     if profile.get("n_files") != len(manifest):
         raise ValueError("profile and manifest file counts do not match")
@@ -102,7 +105,10 @@ def clean_dataset(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     records = [_clean_row(row, output, config) for row in manifest]
+    dataset = manifest[0].get("dataset") or "unknown"
     summary = {
+        "dataset": dataset,
+        "manifest_format": _manifest_format(manifest[0]),
         "strategy_id": config.strategy_id,
         "manifest_path": str(manifest_path),
         "profile_path": str(profile_path),
@@ -128,27 +134,43 @@ def _clean_row(
     output_dir: Path,
     config: CleaningConfig,
 ) -> dict[str, Any]:
-    raw = load_signal_channel(row["source_path"], row["sensor_channel"])
-    cleaned, removed = _clean_signal(raw, int(row["source_sample_rate_hz"]), config)
-    sample_rate = config.resample_to_hz or int(row["source_sample_rate_hz"])
-    output_path = output_dir / f"{row['file_id']}.npz"
+    record_id = _record_id(row)
+    channel = _selected_channel(row, config)
+    source_rate = _source_sample_rate(row)
+    raw = load_signal_channel(row["source_path"], channel)
+    cleaned, removed = _clean_signal(raw, source_rate, config)
+    sample_rate = config.resample_to_hz or source_rate
+    output_path = output_dir / f"{_safe_output_stem(record_id)}.npz"
+    metadata = _json_object(row.get("metadata_json"))
     np.savez_compressed(
         output_path,
         signal=cleaned.astype(np.float32),
-        file_id=row["file_id"],
+        file_id=record_id,
+        record_id=record_id,
+        dataset=row.get("dataset") or "unknown",
         label=row["label"],
-        fault_type=row["fault_type"],
-        channel=row["sensor_channel"],
+        fault_type=_optional_text(row.get("fault_type")) or "",
+        label_detail=_optional_text(row.get("label_detail")) or "",
+        condition_id=_optional_text(row.get("condition_id")) or "",
+        run_id=_optional_text(row.get("run_id")) or "",
+        source_path=row["source_path"],
+        channel=channel,
         sample_rate_hz=sample_rate,
+        metadata_json=json.dumps(metadata, sort_keys=True),
     )
     return {
-        "file_id": row["file_id"],
+        "file_id": record_id,
+        "record_id": record_id,
+        "dataset": row.get("dataset") or "unknown",
         "source_path": row["source_path"],
         "output_path": output_path.as_posix(),
         "label": row["label"],
-        "fault_type": row["fault_type"] or None,
-        "channel": row["sensor_channel"],
-        "source_sample_rate_hz": int(row["source_sample_rate_hz"]),
+        "fault_type": _optional_text(row.get("fault_type")),
+        "label_detail": _optional_text(row.get("label_detail")),
+        "condition_id": _optional_text(row.get("condition_id")),
+        "run_id": _optional_text(row.get("run_id")),
+        "channel": channel,
+        "source_sample_rate_hz": source_rate,
         "sample_rate_hz": sample_rate,
         "n_samples_in": int(raw.size),
         "n_samples_out": int(cleaned.size),
@@ -185,3 +207,82 @@ def _normalize(signal: np.ndarray, mode: str) -> np.ndarray:
         iqr = q75 - q25
         return signal - np.median(signal) if iqr == 0 else (signal - np.median(signal)) / iqr
     raise ValueError(f"unsupported normalization: {mode}")
+
+
+def _record_id(row: dict[str, str]) -> str:
+    return (
+        _optional_text(row.get("file_id"))
+        or _optional_text(row.get("record_id"))
+        or Path(row["source_path"]).stem
+    )
+
+
+def _selected_channel(row: dict[str, str], config: CleaningConfig) -> str:
+    channel = config.selected_channel or _optional_text(
+        row.get("sensor_channel")
+    ) or _optional_text(row.get("primary_channel"))
+    declared_channels = _json_list(row.get("channel_names"))
+    if channel is None and declared_channels:
+        channel = declared_channels[0]
+    if channel is None:
+        raise ValueError(f"no selectable channel declared for {_record_id(row)}")
+    if declared_channels and channel not in declared_channels:
+        raise ValueError(
+            f"selected channel {channel} not declared for {_record_id(row)}; "
+            f"available: {', '.join(declared_channels)}"
+        )
+    return channel
+
+
+def _source_sample_rate(row: dict[str, str]) -> int:
+    value = _row_number(row, "source_sample_rate_hz", "sampling_rate_hz")
+    if value is None:
+        raise ValueError(f"missing sample rate for {_record_id(row)}")
+    if not float(value).is_integer():
+        raise ValueError(f"sample rate must be an integer for {_record_id(row)}")
+    return int(value)
+
+
+def _manifest_format(row: dict[str, str]) -> str:
+    if "record_id" in row and "channel_names" in row and "sampling_rate_hz" in row:
+        return "common"
+    return "cwru_legacy"
+
+
+def _row_number(row: dict[str, str], *keys: str) -> float | None:
+    for key in keys:
+        text = _optional_text(row.get(key))
+        if text is not None:
+            return float(text)
+    return None
+
+
+def _optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    return stripped or None
+
+
+def _json_list(value: str | None) -> list[str]:
+    text = _optional_text(value)
+    if text is None:
+        return []
+    parsed = json.loads(text)
+    if not isinstance(parsed, list):
+        raise ValueError("manifest channel_names must be a JSON list")
+    return [str(item) for item in parsed]
+
+
+def _json_object(value: str | None) -> dict[str, Any]:
+    text = _optional_text(value)
+    if text is None:
+        return {}
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("manifest metadata_json must be a JSON object")
+    return parsed
+
+
+def _safe_output_stem(record_id: str) -> str:
+    return record_id.replace("/", "_").replace("\\", "_")

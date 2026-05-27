@@ -76,7 +76,11 @@ def decide_evaluation_action_deterministic(state: TFMStateModel) -> EvaluationDe
             approved=approved,
             summary=_evaluation_summary(metrics, approved),
             next_action="continue" if approved else "retry_with_new_config",
-            limitations=_evaluation_limitations(metrics, approved),
+            limitations=_evaluation_limitations(
+                metrics,
+                approved,
+                dataset=state.project_context.dataset,
+            ),
         ),
         min_recall_required=MIN_RECALL_REQUIRED,
         max_false_positive_rate=MAX_FALSE_POSITIVE_RATE,
@@ -146,7 +150,11 @@ def _evaluator_json_template(state: TFMStateModel) -> dict[str, Any]:
             "approved": approved,
             "summary": _evaluation_summary(state.metrics, approved),
             "next_action": "continue" if approved else "retry_with_new_config",
-            "limitations": _evaluation_limitations(state.metrics, approved),
+            "limitations": _evaluation_limitations(
+                state.metrics,
+                approved,
+                dataset=state.project_context.dataset,
+            ),
         },
         "min_recall_required": MIN_RECALL_REQUIRED,
         "max_false_positive_rate": MAX_FALSE_POSITIVE_RATE,
@@ -236,9 +244,12 @@ def _evaluation_summary(metrics: MetricsReport | None, approved: bool) -> str:
 def _evaluation_limitations(
     metrics: MetricsReport | None,
     approved: bool,
+    *,
+    dataset: str | None = None,
 ) -> list[str]:
+    dataset_name = dataset or "el dataset configurado"
     limitations = [
-        "La validacion se realiza sobre CWRU, un benchmark controlado.",
+        f"La validacion se realiza sobre {dataset_name} con el protocolo local.",
         "La generalizacion industrial requiere validar otros datasets y condiciones de carga.",
     ]
     if metrics is None:

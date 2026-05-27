@@ -38,7 +38,8 @@ Documentos iniciales:
   `StructuringDecision` y delega ventanas, features y splits en
   `structuring.py`.
 - `16_agente_modelador_llm.md`: agente LLM que genera `ModelingDecision` y
-  delega entrenamiento y prediccion en `modeling.py`.
+  delega entrenamiento y prediccion en `modeling.py`, incluyendo comparacion
+  agentica de modelos soportados.
 - `17_agente_evaluador_llm.md`: agente LLM que genera `EvaluationDecision` a
   partir de metricas ya calculadas por `evaluation.py`.
 - `18_agente_redactor_llm.md`: agente LLM que genera `ReportDecision` y
@@ -69,3 +70,13 @@ Documentos iniciales:
 - `28_inspeccion_nasa_ims.md`: inspeccion local/documental del paquete NASA IMS;
   resume contenedores anidados, estructura por test, discrepancias observadas,
   requisitos de extraccion y consecuencias para la futura interfaz.
+- `29_agentes_expertos_llm_locales.md`: criterio para hacer viables agentes
+  expertos con LLM locales mediante expedientes de evidencia, opciones
+  ejecutables, contratos estrictos, alternativas comparables propuestas por
+  agentes y una extension futura de agente investigador controlado.
+- `30_gestion_runs_fase_3.md`: politica ligera para conservar snapshots de
+  runs, identificar evidencias canonicas y podar artefactos grandes
+  regenerables sin perder trazabilidad experimental.
+- `31_backlog_fase_4_memoria_agentica.md`: backlog para una futura memoria
+  agentica supervisada con RAG, alimentada por post-mortems y revisiones
+  humanas sin alterar metricas ni contratos de ejecucion.

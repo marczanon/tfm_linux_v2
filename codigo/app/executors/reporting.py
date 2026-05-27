@@ -25,7 +25,7 @@ def generate_technical_report(
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(_render_report(state, decision), encoding="utf-8")
         artifact = ArtifactRef(
-            name="cwru_final_report",
+            name="final_report",
             artifact_type="report",
             path=str(report_path),
             producer="report_writer",

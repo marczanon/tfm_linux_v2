@@ -2,13 +2,20 @@
 
 \section{Resultados cuantitativos}
 
+La validacion cuantitativa se ha organizado en dos niveles. Primero se conserva
+el benchmark CWRU como referencia de regresion del MVP. Despues se incorporan
+experimentos de Fase 3 donde los agentes locales proponen alternativas de
+ventana, modelo y reintento sobre evidencia persistida.
+
+\subsection{Baseline CWRU de Fase 2}
+
 La Fase 2 incorpora una comparacion local entre dos ejecuciones persistidas del
 baseline Isolation Forest sobre CWRU. Ambas ejecuciones mantienen constante el
 dataset, la limpieza, la estructuracion temporal, la semilla y
 `n\_estimators=200`; la unica variable modificada es el cuantil usado para
 fijar el umbral de anomalia.
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering
 \begin{tabular}{lrrrrr}
 \toprule
@@ -19,7 +26,7 @@ Conservador & 1.00 & 0.9996 & 1.0000 & 0.9998 & 0.0256 \\
 \bottomrule
 \end{tabular}
 \caption{Comparacion de umbral con Isolation Forest en el split de test CWRU.}
-\label{tab:resultados_modelos}
+\label{tab:resultados_modelos_fase2}
 \end{table}
 
 La variante conservadora reduce los falsos positivos sin penalizar el recall.
@@ -28,23 +35,134 @@ verdaderos negativos, 6 falsos positivos, 0 falsos negativos y 7051 verdaderos
 positivos. En la variante con umbral 1.00, los falsos positivos bajan a 3, con
 114 verdaderos negativos, 0 falsos negativos y 7051 verdaderos positivos.
 
-\section{Análisis cualitativo}
+\subsection{Comparacion agentica de ventanas}
 
-El resultado sugiere que, en este benchmark controlado, un umbral mas
-conservador es preferible para reducir falsas alarmas manteniendo la deteccion
-de fallos. La mejora debe interpretarse con cautela, porque CWRU presenta
-condiciones experimentales limpias y diferencias claras entre estado normal y
-fallo. La comparacion resulta util como validacion del protocolo experimental y
-de la trazabilidad de runs, no como evidencia definitiva de generalizacion
-industrial.
+En Fase 3 el agente estructurador Qwen no recibe una unica configuracion fija,
+sino que puede proponer alternativas comparables. Sobre CWRU propuso tres
+ventanas: 2048 muestras como opcion principal, 1024 muestras para mayor
+resolucion temporal y 4096 muestras para mayor contexto por ventana. El
+protocolo experimental materializo solo las alternativas propuestas por el
+agente y persistio cada run.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{rrrrr}
+\toprule
+Ventana & Precision & Recall & F1 & FPR \\
+\midrule
+1024 & 0.9996 & 0.9999 & 0.9998 & 0.0212 \\
+2048 & 0.9991 & 1.0000 & 0.9996 & 0.0513 \\
+4096 & 0.9991 & 1.0000 & 0.9996 & 0.0517 \\
+\bottomrule
+\end{tabular}
+\caption{Comparacion agentica de tamanos de ventana en CWRU con 50\% de solape.}
+\label{tab:resultados_ventanas_fase3}
+\end{table}
+
+La alternativa de 1024 muestras obtuvo el mejor F1 y la menor tasa de falsos
+positivos. Este resultado es relevante porque la mejora no procede de una
+busqueda exhaustiva codificada, sino de una hipotesis propuesta por el agente y
+despues evaluada por ejecutores deterministas.
+
+\subsection{Comparacion agentica de modelos}
+
+La Fase 3 tambien amplio el espacio de decision del modelador con PCA basado en
+error de reconstruccion. Qwen propuso comparar Isolation Forest, PCA y una
+variante conservadora de Isolation Forest usando la ventana de 1024 muestras
+seleccionada en el experimento anterior.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Modelo & Umbral & Precision & Recall & F1 & FPR \\
+\midrule
+Isolation Forest & 0.99 & 0.9996 & 0.9999 & 0.9998 & 0.0212 \\
+PCA reconstruction & 0.99 & 1.0000 & 0.9623 & 0.9808 & 0.0000 \\
+Isolation Forest conservador & 1.00 & 0.9999 & 0.9994 & 0.9996 & 0.0085 \\
+\bottomrule
+\end{tabular}
+\caption{Comparacion agentica de modelos sobre CWRU con ventana de 1024 muestras.}
+\label{tab:resultados_modelos_fase3}
+\end{table}
+
+PCA ofrece un intercambio distinto: elimina falsos positivos en este protocolo,
+pero reduce el recall. Este resultado evita que toda la evidencia de la fase
+dependa de metricas perfectas y muestra que el agente puede comparar
+alternativas con ventajas y limitaciones tecnicas diferentes.
+
+\subsection{Benchmark NASA sintetico y reintentos}
+
+NASA IMS real se mantiene bloqueado para metricas supervisadas hasta definir una
+politica temporal y de etiquetado defendible. Para obtener un caso no trivial
+sin atribuir etiquetas artificiales al dataset real, se genero un benchmark
+sintetico con forma de entrada NASA IMS y etiquetas conocidas por construccion.
+
+La primera ejecucion agentica obtuvo precision 0.9130, recall 0.6000, F1
+0.7241, ROC-AUC 0.8041, PR-AUC 0.8842 y FPR 0.1429. El evaluador rechazo la run
+al detectar que las metricas no cumplian los umbrales locales. Despues se activo
+un bucle de reintento acotado donde el modelador recibia analisis de error y
+decidia si modificar la configuracion o detenerse.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Run & Umbral & Precision & Recall & F1 & FPR \\
+\midrule
+Base & 0.99 & 0.9130 & 0.6000 & 0.7241 & 0.1429 \\
+Reintento 1 & 0.95 & 0.8846 & 0.6571 & 0.7541 & 0.2143 \\
+Reintento 2 & 0.50 & 0.7143 & 1.0000 & 0.8333 & 1.0000 \\
+\bottomrule
+\end{tabular}
+\caption{Reintentos agenticos sobre benchmark NASA sintetico etiquetado.}
+\label{tab:resultados_nasa_sintetico_retry}
+\end{table}
+
+El primer reintento mejora recall y F1, aunque aumenta la tasa de falsos
+positivos. El segundo reintento recupera todas las anomalias, pero clasifica
+tambien todos los normales de test como anomalos. El evaluador rechaza esta
+sobrecorreccion y el bucle se detiene por limite de intentos. El resultado es
+valioso porque muestra aprendizaje local de errores, pero tambien control ante
+una mejora aparente que seria inaceptable operativamente.
+
+\section{Resultados cualitativos}
+
+La prueba smoke con agentes Qwen sobre una carpeta NASA IMS sintetica
+preextraida confirma que el patron de expediente experto y decision
+estructurada es viable con LLM locales. El limpiador selecciono un canal a
+partir del perfil, el estructurador eligio una configuracion temporal soportada
+y el modelador propuso un modelo ejecutable. Sin embargo, la run termino en
+estado `failed` por guardarrail metodologico: NASA IMS no debe evaluarse como
+problema supervisado hasta definir etiquetas por ventana y particion temporal
+sin fuga.
+
+La Fase 3 tambien introduce auditoria del razonamiento. Cada reintento puede
+generar un post-mortem que compara la hipotesis declarada por el agente con el
+resultado real. En el benchmark NASA sintetico, el primer reintento queda como
+`partially\_supported` y el segundo como `overcorrected`. Con el trigger de
+revision humana se genera ademas una plantilla para que una persona etiquete si
+el razonamiento debe reutilizarse, descartarse o conservarse como caso frontera.
+
+Este punto refuerza la aportacion central del TFM: el sistema no solo registra
+metricas finales, sino tambien por que un agente cambio una configuracion, que
+efecto esperaba y si la evidencia posterior respalda ese razonamiento.
 
 \section{Limitaciones observadas}
 
-Cada resultado deberá acompañarse de limitaciones, supuestos y riesgos de
-generalización industrial.
+Los resultados sobre CWRU deben interpretarse como validacion del pipeline y del
+protocolo experimental, no como garantia de generalizacion industrial. CWRU es
+un benchmark controlado, con condiciones experimentales limpias y diferencias
+claras entre normalidad y fallo.
 
-Los resultados iniciales se han obtenido sobre CWRU Bearing Dataset, un entorno
-controlado y con diferencias claras entre condiciones normales y de fallo. Por
-ello, las métricas deben interpretarse como una validación del pipeline y del
-baseline, no como una garantía de rendimiento en escenarios industriales no
-vistos.
+NASA IMS real aporta mayor interes industrial, pero no se ha usado para metricas
+supervisadas porque carece de etiquetas por ventana y requiere una politica
+temporal defendible. La version sintetica permite estudiar el comportamiento
+multiagente ante metricas no perfectas, pero no debe presentarse como resultado
+oficial sobre NASA IMS real.
+
+Otra limitacion es que los agentes locales siguen dependiendo de la calidad del
+expediente experto que reciben. El sistema evita delegar conocimiento de nicho
+en la memoria parametrica del LLM, pero debe seguir ampliando diagnosticos,
+modelos soportados y revisiones humanas para que la autonomia agentica sea
+defendible en escenarios mas variados.

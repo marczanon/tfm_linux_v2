@@ -579,8 +579,21 @@ def _is_candidate_signal_file(path: Path) -> bool:
 
 
 def _has_nasa_ims_hint(path: Path) -> bool:
-    lowered_parts = [part.lower() for part in path.parts]
-    return any("nasa" in part or "ims" in part for part in lowered_parts)
+    tokens: set[str] = set()
+    for part in path.parts:
+        normalized = (
+            part.lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+            .replace("+", "_")
+            .replace(".", "_")
+        )
+        tokens.update(token for token in normalized.split("_") if token)
+        if part.lower() in {"ims", "ims.7z"}:
+            return True
+    return ("nasa" in tokens and "ims" in tokens) or (
+        "ims" in tokens and "bearing" in tokens
+    )
 
 
 def _looks_like_nasa_ims_file(path: Path) -> bool:

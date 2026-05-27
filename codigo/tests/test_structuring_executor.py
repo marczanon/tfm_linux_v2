@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from codigo.app.executors.structuring import (
+    build_structuring_decision_summary,
     build_temporal_dataset,
     generate_temporal_structure,
 )
@@ -86,6 +87,79 @@ class StructuringExecutorTests(unittest.TestCase):
         self.assertEqual(result.state_updates["tensor_path"], (output_dir / "windows_raw.npz").as_posix())
         self.assertEqual(result.state_updates["splits_path"], (output_dir / "splits.json").as_posix())
         self.assertEqual(len(result.artifacts), 3)
+        self.assertEqual(
+            [artifact.name for artifact in result.artifacts],
+            ["windows_features", "windows_raw", "windows_splits"],
+        )
+
+    def test_build_structuring_decision_summary_proposes_supported_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            clean_dir = base / "clean"
+            clean_dir.mkdir()
+            write_clean_file(
+                clean_dir / "97.npz",
+                list(range(8192)),
+                file_id="97",
+                label="normal",
+            )
+            write_clean_file(
+                clean_dir / "105.npz",
+                list(range(8192)),
+                file_id="105",
+                label="fault",
+                fault_type="inner_race",
+            )
+
+            summary = build_structuring_decision_summary(
+                clean_dir,
+                dataset="cwru_bearing",
+                target_sample_rate_hz=12000,
+                main_channel="DE_time",
+            )
+
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["quality_status"], "ready")
+        self.assertEqual(summary["summary"]["n_clean_files"], 2)
+        self.assertEqual(summary["blocking_warnings"], [])
+        self.assertTrue(summary["candidate_configurations"])
+        self.assertEqual(
+            summary["candidate_configurations"][0]["configuration_id"],
+            summary["recommended_configuration_id"],
+        )
+        self.assertIn(
+            "split_by_file_before_windowing",
+            summary["candidate_configurations"][0]["leakage_warnings"],
+        )
+        self.assertEqual(
+            summary["supported_feature_sets"][0]["feature_set_id"],
+            "time_domain_baseline",
+        )
+
+    def test_build_structuring_decision_summary_blocks_mismatched_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            clean_dir = base / "clean"
+            clean_dir.mkdir()
+            write_clean_file(
+                clean_dir / "97.npz",
+                list(range(4096)),
+                file_id="97",
+                label="normal",
+            )
+
+            summary = build_structuring_decision_summary(
+                clean_dir,
+                dataset="cwru_bearing",
+                target_sample_rate_hz=12000,
+                main_channel="FE_time",
+            )
+
+        self.assertEqual(summary["quality_status"], "blocked")
+        self.assertIn(
+            "clean_channel_does_not_match_main_channel",
+            summary["blocking_warnings"],
+        )
 
     def test_sample_rate_mismatch_returns_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:

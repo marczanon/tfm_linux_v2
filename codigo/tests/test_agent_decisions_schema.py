@@ -5,11 +5,21 @@ from pydantic import ValidationError
 
 from codigo.app.schemas.agent_decisions import (
     CleaningDecision,
+    ModelingAlternative,
+    ModelingDecision,
+    ModelingRetryDecision,
     ReportDecision,
     ReportSection,
+    StructuringAlternative,
+    StructuringDecision,
     SupervisorDecision,
 )
-from codigo.app.schemas.state import CleaningConfig
+from codigo.app.schemas.reasoning import (
+    AgentReasoningPostmortem,
+    HumanReasoningReview,
+    ReasoningMetricDelta,
+)
+from codigo.app.schemas.state import CleaningConfig, ModelingConfig, StructuringConfig
 
 
 class AgentDecisionSchemaTests(unittest.TestCase):
@@ -99,6 +109,167 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.sections[0].title, "Metricas")
+
+    def test_structuring_decision_accepts_comparison_candidates(self):
+        decision = StructuringDecision(
+            decision_id="struct-001",
+            rationale="Use baseline windows but compare temporal resolution.",
+            confidence=0.85,
+            structuring_config=StructuringConfig(
+                window_size=2048,
+                overlap=0.5,
+                main_channel="DE_time",
+                target_sample_rate_hz=12000,
+                label_mode="binary_anomaly",
+                features=["mean", "std", "rms"],
+            ),
+            expected_features_path="codigo/data/tensors/cwru_bearing/windows_features.csv",
+            expected_tensors_path="codigo/data/tensors/cwru_bearing/windows_raw.npz",
+            expected_splits_path="codigo/data/tensors/cwru_bearing/splits.json",
+            comparison_candidates=[
+                StructuringAlternative(
+                    alternative_id="win_1024_ov_50",
+                    rationale="More temporal resolution.",
+                    expected_effect="More windows and shorter context.",
+                    structuring_config=StructuringConfig(
+                        window_size=1024,
+                        overlap=0.5,
+                        main_channel="DE_time",
+                        target_sample_rate_hz=12000,
+                        label_mode="binary_anomaly",
+                        features=["mean", "std", "rms"],
+                    ),
+                )
+            ],
+        )
+
+        payload = decision.model_dump(mode="json")
+
+        self.assertEqual(payload["comparison_candidates"][0]["alternative_id"], "win_1024_ov_50")
+        json.dumps(payload)
+
+    def test_modeling_decision_accepts_comparison_candidates(self):
+        decision = ModelingDecision(
+            decision_id="model-001",
+            rationale="Compare supported anomaly detectors.",
+            confidence=0.82,
+            modeling_config=ModelingConfig(
+                model_name="isolation_forest",
+                random_state=42,
+                hyperparameters={"n_estimators": 100, "threshold_quantile": 0.99},
+            ),
+            train_split="train",
+            validation_split="validation",
+            expected_model_path="codigo/models/cwru_bearing/isolation_forest.joblib",
+            comparison_candidates=[
+                ModelingAlternative(
+                    alternative_id="pca_reconstruction_error",
+                    rationale="Linear reconstruction baseline.",
+                    expected_effect="Different false positive profile.",
+                    modeling_config=ModelingConfig(
+                        model_name="pca_reconstruction_error",
+                        random_state=42,
+                        hyperparameters={
+                            "n_components": 0.95,
+                            "threshold_quantile": 0.99,
+                        },
+                    ),
+                )
+            ],
+        )
+
+        payload = decision.model_dump(mode="json")
+
+        self.assertEqual(
+            payload["comparison_candidates"][0]["modeling_config"]["model_name"],
+            "pca_reconstruction_error",
+        )
+        json.dumps(payload)
+
+    def test_modeling_retry_decision_requires_config_when_retrying(self):
+        with self.assertRaises(ValidationError):
+            ModelingRetryDecision(
+                decision_id="retry-001",
+                rationale="Try again without a concrete config.",
+                confidence=0.8,
+                source_run_id="run-failed",
+                attempt_number=1,
+                max_attempts=2,
+                should_retry=True,
+                learning_summary="Recall is too low.",
+                expected_effect="Increase recall.",
+            )
+
+    def test_modeling_retry_decision_accepts_stop_reason(self):
+        decision = ModelingRetryDecision(
+            decision_id="retry-002",
+            rationale="No more useful retries.",
+            confidence=0.8,
+            source_run_id="run-failed",
+            attempt_number=2,
+            max_attempts=2,
+            should_retry=False,
+            learning_summary="Previous attempts exhausted the allowed options.",
+            stop_reason="Maximum attempts reached without adequate improvement.",
+            evidence_used=["metrics", "confusion_matrix"],
+        )
+
+        payload = decision.model_dump(mode="json")
+
+        self.assertFalse(payload["should_retry"])
+        self.assertEqual(payload["agent_name"], "modeler")
+        json.dumps(payload)
+
+    def test_reasoning_postmortem_is_json_serializable(self):
+        postmortem = AgentReasoningPostmortem(
+            postmortem_id="run-001:reasoning_postmortem:001",
+            run_id="run-001",
+            source_run_id="run-source",
+            agent_name="modeler",
+            decision_id="run-source:modeler_retry:001",
+            attempt_number=1,
+            max_attempts=2,
+            hypothesis="Lower threshold should catch missed anomalies.",
+            action_taken="Isolation Forest with threshold_quantile=0.95.",
+            expected_effect="Increase recall with moderate FPR cost.",
+            before_metrics={"recall": 0.6},
+            after_metrics={"recall": 0.7},
+            metric_deltas=[
+                ReasoningMetricDelta(
+                    metric="recall",
+                    before=0.6,
+                    after=0.7,
+                    delta=0.1,
+                    higher_is_better=True,
+                    improved=True,
+                )
+            ],
+            outcome="partially_supported",
+            automatic_critique="Recall improved but FPR must still be checked.",
+        )
+
+        payload = postmortem.model_dump(mode="json")
+
+        self.assertEqual(payload["outcome"], "partially_supported")
+        json.dumps(payload)
+
+    def test_human_reasoning_review_accepts_verdict(self):
+        review = HumanReasoningReview(
+            review_id="review-001",
+            postmortem_id="postmortem-001",
+            run_id="run-001",
+            decision_id="decision-001",
+            reviewer="advisor",
+            verdict="partially_correct",
+            rationale="Correct direction, unsafe magnitude.",
+            reusable_as_context=True,
+            tags=["threshold", "overcorrection"],
+        )
+
+        payload = review.model_dump(mode="json")
+
+        self.assertEqual(payload["verdict"], "partially_correct")
+        json.dumps(payload)
 
 
 if __name__ == "__main__":

@@ -122,6 +122,43 @@ class ModelingExecutorTests(unittest.TestCase):
         self.assertEqual(result.model_path, (output_dir / "isolation_forest.joblib").as_posix())
         self.assertEqual(result.predictions_path, (output_dir / "predictions.csv").as_posix())
         self.assertEqual([artifact.artifact_type for artifact in result.artifacts], ["model", "predictions", "log"])
+        self.assertEqual(
+            [artifact.name for artifact in result.artifacts],
+            ["isolation_forest_model", "model_predictions", "modeling_summary"],
+        )
+
+    def test_train_pca_reconstruction_model_writes_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            features_path = base / "features.csv"
+            output_dir = base / "models"
+            write_features(features_path, feature_rows())
+
+            summary = train_anomaly_model(
+                features_path,
+                output_dir,
+                ModelingConfig(
+                    model_name="pca_reconstruction_error",
+                    random_state=42,
+                    hyperparameters={
+                        "n_components": 0.95,
+                        "svd_solver": "full",
+                        "threshold_quantile": 0.95,
+                    },
+                ),
+            )
+            model_bundle = joblib.load(summary["model_path"])
+            with open(summary["predictions_path"], encoding="utf-8") as file:
+                predictions = list(csv.DictReader(file))
+
+        self.assertEqual(summary["model_name"], "pca_reconstruction_error")
+        self.assertEqual(
+            summary["model_path"],
+            (output_dir / "pca_reconstruction_error.joblib").as_posix(),
+        )
+        self.assertIn("scaler", model_bundle)
+        self.assertEqual(len(predictions), 8)
+        self.assertIn("anomaly_score", predictions[0])
 
     def test_unsupported_model_returns_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:

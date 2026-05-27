@@ -2,7 +2,7 @@ import unittest
 
 from codigo.app.agents.evaluator import decide_evaluation_action
 from codigo.app.graph.state import create_initial_cwru_state, validate_state
-from codigo.app.schemas.state import MetricsReport
+from codigo.app.schemas.state import MetricsReport, ProjectContext
 
 
 class FakeLLMClient:
@@ -55,6 +55,33 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertFalse(decision.evaluation.approved)
         self.assertEqual(decision.evaluation.next_action, "retry_with_new_config")
         self.assertIn("umbrales", " ".join(decision.evaluation.limitations))
+
+    def test_deterministic_evaluator_uses_dataset_specific_limitation(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-evaluator-test",
+            run_id="run-evaluator-nasa-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="binary_anomaly_detection",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="binary_anomaly",
+        ).model_dump(mode="json")
+        state_dict["metrics"] = MetricsReport(
+            recall=0.68,
+            f1_score=0.76,
+            false_positive_rate=0.28,
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+
+        decision = decide_evaluation_action(state)
+
+        limitations = " ".join(decision.evaluation.limitations)
+        self.assertIn("nasa_ims_bearing", limitations)
+        self.assertNotIn("CWRU", limitations)
 
     def test_llm_evaluation_decision_is_used_when_valid(self):
         state_dict = create_initial_cwru_state(

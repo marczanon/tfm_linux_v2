@@ -69,9 +69,15 @@ No se abordara todavia:
 - agentes que escriban y ejecuten codigo arbitrario;
 - busquedas de hiperparametros sin limites de coste;
 - descarga automatica de datasets desde URLs no auditadas.
+- RAG de memoria agentica supervisada alimentado por revisiones humanas.
 
 Docker, SLURM y frontend quedan para fases posteriores. La Fase 3 debe seguir
 siendo local, verificable y defendible academicamente.
+La memoria agentica supervisada queda apuntada para Fase 4 en:
+
+```text
+codigo/docs/31_backlog_fase_4_memoria_agentica.md
+```
 
 ## Principios de trabajo
 
@@ -176,6 +182,7 @@ Diseno tecnico:
 
 ```text
 codigo/docs/27_diseno_soporte_multidataset.md
+codigo/docs/29_agentes_expertos_llm_locales.md
 ```
 
 Criterio de aceptacion:
@@ -402,8 +409,403 @@ con los sets observados en `codigo/docs/28_inspeccion_nasa_ims.md`.
 
 ## Siguiente paso concreto
 
-Adaptar el perfilado para aceptar el manifiesto comun NASA IMS y producir un
-resumen comparable con CWRU: numero de ficheros, canales, frecuencia,
-duracion, valores no finitos, estadisticos ligeros y advertencias de calidad.
-Esta validacion debe hacerse primero con carpetas sinteticas o subconjuntos
-preextraidos, sin limpieza, estructuracion ni modelado todavia.
+Se ha adaptado el perfilado para aceptar el manifiesto comun NASA IMS y producir
+un resumen comparable con CWRU: numero de ficheros, canales, frecuencia,
+duracion, valores no finitos y estadisticos ligeros. La lectura de snapshots
+IMS sin extension se resuelve como tabla numerica, con canales normalizados
+`channel_1`, `channel_2`, etc. La capa de adaptadores expone ademas
+`read_signal_frame(...)` para interactuar directamente con esos snapshots como
+`DataFrame`.
+
+## Avance concreto tras el perfilado
+
+Se ha adaptado la limpieza para consumir manifiestos comunes y seleccionar
+canales de forma controlada en NASA IMS. `CleaningConfig` incorpora
+`selected_channel`; el ejecutor valida el canal contra `channel_names` cuando
+existen, usa `primary_channel` como valor por defecto en el manifiesto comun y
+mantiene compatibilidad con el campo historico `sensor_channel` de CWRU.
+
+Esta validacion se ha hecho primero con carpetas sinteticas preextraidas:
+manifiesto NASA IMS, perfilado comun, limpieza de `channel_2` y rechazo de un
+canal no declarado. No se ha avanzado todavia a estructuracion ni modelado
+NASA IMS.
+
+## Avance concreto de diagnostico agentico
+
+Se ha incorporado al perfilado un `decision_summary` orientado al agente. Este
+bloque convierte estadisticos de senal en un expediente experto ligero:
+
+- `quality_status`;
+- `required_actions`;
+- `recommended_channels`;
+- `candidate_channels`;
+- `supported_cleaning_options`;
+- `blocking_warnings`;
+- `non_blocking_warnings`.
+
+El agente limpiador recibe este bloque dentro del resumen de perfil y puede
+elegir entre opciones soportadas sin depender de conocimiento interno del LLM
+sobre datasets de nicho. El criterio de diseno queda documentado en:
+
+```text
+codigo/docs/29_agentes_expertos_llm_locales.md
+```
+
+## Siguiente paso concreto tras el diagnostico agentico
+
+Se ha extendido el mismo patron al estructurador. A partir de senales limpias,
+el sistema genera un resumen de decision con:
+
+- configuraciones candidatas de `window_size` y `overlap`;
+- estimacion de ventanas y coste;
+- conjuntos de features temporales soportados;
+- advertencias de fuga por fichero, run o secuencia temporal;
+- capacidades no soportadas, como features frecuenciales o split temporal
+  run-to-failure para NASA IMS.
+
+El agente estructurador ya no queda limitado a una constante fija de 2048
+muestras y 50% de solape: puede elegir entre ventanas y solapes soportados,
+siempre dentro del contrato validado y de los limites del ejecutor.
+
+Tambien queda como idea posterior un agente investigador controlado, orientado a
+resolver dudas de otros agentes mediante `ResearchRequest` y `EvidenceReport`,
+primero sobre RAG local y despues, si se habilita, con fuentes externas
+autorizadas. El diseno queda recogido en:
+
+```text
+codigo/docs/29_agentes_expertos_llm_locales.md
+```
+
+## Ejecucion agentica controlada con Qwen sobre NASA IMS
+
+Se ha ejecutado una prueba smoke completa del grafo con agentes Qwen/Ollama
+sobre una carpeta NASA IMS sintetica preextraida, usando:
+
+```text
+python -m codigo.scripts.run_nasa_ims_qwen_smoke \
+  --model qwen3.5:4b \
+  --run-id nasa-ims-qwen-smoke-fase3-qwen
+```
+
+El objetivo no era entrenar un modelo NASA IMS, sino comprobar si los agentes
+locales usan los expedientes expertos y respetan los bloqueos metodologicos. El
+snapshot persistido queda en:
+
+```text
+codigo/reports/runs/nasa-ims-qwen-smoke-fase3-qwen/
+```
+
+Resultado observado:
+
+- el limpiador Qwen selecciono `channel_1` a partir del perfil y del manifiesto;
+- el estructurador Qwen eligio `window_size = 1024`, `overlap = 0.5` y features
+  temporales soportadas;
+- el modelador Qwen propuso `isolation_forest`, que es el unico modelo
+  ejecutable actual, pero todavia con una expectativa de ruta heredada de CWRU;
+- el supervisor genero varias decisiones validas, aunque algunas transiciones
+  invalidas activaron el fallback determinista;
+- el flujo genero manifiesto, perfil, senales limpias, features, tensores y
+  splits;
+- el modelado se bloqueo de forma deliberada con estado final `failed`, porque
+  NASA IMS no tiene etiquetas por ventana ni una politica temporal validada.
+
+Esta prueba confirma que el patron "expediente experto + decision estructurada"
+es viable con un LLM local, pero tambien muestra que las dudas metodologicas no
+deben resolverse con otra regla rigida que reste protagonismo al agente. La
+linea de trabajo pasa a reforzar la deliberacion agentica: alternativas,
+autocrítica, solicitud de evidencia y comparacion de resultados.
+
+## Siguiente paso concreto tras la prueba Qwen/NASA IMS
+
+En lugar de anadir una compuerta determinista previa al modelador, se ha dado
+mas protagonismo al estructurador: `StructuringDecision` puede incluir ahora
+`comparison_candidates`, es decir, alternativas comparables propuestas por el
+propio agente con su justificacion y efecto esperado. El protocolo experimental
+no inventa configuraciones si el agente no las propone; solo materializa y mide
+las alternativas validas.
+
+Se ha ejecutado una comparacion agentica de ventanas en CWRU:
+
+```text
+python -m codigo.scripts.run_cwru_agentic_window_comparison \
+  --model qwen3.5:4b \
+  --plan-id cwru-agentic-window-qwen-fase3
+```
+
+Qwen propuso tres configuraciones: 2048/50% como seleccion principal, 1024/50%
+para mayor resolucion temporal y 4096/50% para mayor contexto por ventana. Los
+resultados quedan persistidos en:
+
+```text
+codigo/experiments/cwru_local/cwru-agentic-window-qwen-fase3/
+codigo/reports/runs/cwru-agentic-window-qwen-fase3_*/
+```
+
+Resultado resumido:
+
+| Ventana | Solape | Precision | Recall | F1 | FPR |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2048 | 0.50 | 0.9991 | 1.0000 | 0.9996 | 0.0513 |
+| 1024 | 0.50 | 0.9996 | 0.9999 | 0.9998 | 0.0212 |
+| 4096 | 0.50 | 0.9991 | 1.0000 | 0.9996 | 0.0517 |
+
+La alternativa de 1024 muestras fue la mejor por precision, F1 y tasa de falsos
+positivos, mientras que la configuracion principal de 2048 mantuvo recall
+perfecto. Este resultado refuerza una direccion mas alineada con el TFM: el
+agente propone hipotesis tecnicas y la aplicacion las transforma en evidencia
+experimental trazable.
+
+## Avance concreto de comparacion agentica de modelos
+
+Se ha implementado un segundo modelo ejecutable: PCA con error de
+reconstruccion. `ModelingDecision` puede incluir ahora
+`comparison_candidates`, de forma analoga al estructurador. El modelador puede
+proponer alternativas soportadas y el protocolo las ejecuta sin inventarlas.
+
+Ejecucion real:
+
+```text
+python -m codigo.scripts.run_cwru_agentic_model_comparison \
+  --model qwen3.5:4b \
+  --plan-id cwru-agentic-model-qwen-fase3
+```
+
+Qwen propuso Isolation Forest, PCA reconstruction error y una variante
+conservadora de Isolation Forest. La comparacion se ejecuto con la ventana
+1024/50%, seleccionada en el experimento anterior.
+
+| Modelo | Umbral | Precision | Recall | F1 | FPR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Isolation Forest | 0.99 | 0.9996 | 0.9999 | 0.9998 | 0.0212 |
+| PCA reconstruction | 0.99 | 1.0000 | 0.9623 | 0.9808 | 0.0000 |
+| Isolation Forest conservador | 1.00 | 0.9999 | 0.9994 | 0.9996 | 0.0085 |
+
+Este resultado responde a una limitacion importante: ya no toda la evidencia
+experimental presenta recall 1.0000. PCA muestra un trade-off mas realista:
+elimina falsos positivos en este protocolo, pero pierde recall.
+
+## Primer diagnostico NASA sin etiquetas supervisadas
+
+Para empezar a analizar NASA IMS sin inventar etiquetas por ventana, se ha
+anadido un diagnostico no supervisado de degradacion:
+
+```text
+python -m codigo.scripts.run_nasa_ims_degradation_diagnostics
+```
+
+El diagnostico usa features temporales ya generadas y calcula tendencia
+temporal, ratio final/inicial y severidad relativa. No calcula recall, F1 ni
+precision porque NASA IMS sigue sin una politica de etiquetado defendible.
+
+Resultado sobre la prueba smoke sintetica NASA IMS:
+
+```text
+trend_status = increasing_degradation_signal
+late_early_ratio = 2.2296
+trend_slope_per_file = 0.1893
+n_files = 3
+n_windows = 21
+```
+
+El siguiente paso sera preparar un benchmark adicional no trivial, sintetico o
+NASA preextraido con politica temporal explicita, para que los agentes comparen
+modelos y configuraciones sobre datos que no produzcan metricas artificialmente
+perfectas.
+
+## Benchmark NASA sintetico etiquetado para metricas no triviales
+
+Se ha creado un benchmark sintetico temporal inspirado en NASA IMS Set 2 para
+obtener metricas supervisadas sin atribuir etiquetas por ventana al dataset real.
+La generacion queda encapsulada en:
+
+```text
+codigo/app/services/synthetic_nasa_ims.py
+codigo/scripts/run_nasa_ims_synthetic_temporal_benchmark.py
+codigo/tests/test_synthetic_nasa_ims.py
+```
+
+El benchmark mantiene la forma de entrada de NASA IMS, pero las etiquetas
+`normal` / `fault` son generadas por construccion. Por tanto, solo valida el
+comportamiento multi-dataset del pipeline y de los agentes; no debe presentarse
+como resultado oficial sobre NASA IMS.
+
+Ejecucion canonica:
+
+```text
+python -m codigo.scripts.run_nasa_ims_synthetic_temporal_benchmark \
+  --model qwen3.5:4b \
+  --run-id nasa-ims-synth-agentic-qwen-fase3
+```
+
+Resultado:
+
+| Metrica | Valor |
+| --- | ---: |
+| Precision | 0.9130 |
+| Recall | 0.6000 |
+| F1-score | 0.7241 |
+| ROC-AUC | 0.8041 |
+| PR-AUC | 0.8842 |
+| FPR | 0.1429 |
+
+Qwen tomo decisiones validas en limpiador, estructurador, modelador y evaluador:
+selecciono `channel_1`, eligio ventanas 2048/50%, propuso Isolation Forest y
+rechazo la ejecucion al detectar que las metricas no cumplian los umbrales
+locales. Este caso es valioso porque introduce un resultado no perfecto y
+obliga al sistema a iterar sobre decisiones agenticas, en lugar de cerrar todos
+los experimentos con recall 1.0000.
+
+## Iteracion agentica acotada con aprendizaje de errores
+
+Se ha anadido un bucle de reintento para el modelador que no ejecuta busquedas
+automaticas ni reglas deterministas de optimizacion. El sistema genera un
+analisis de fallo con matriz de confusion, falsos negativos, falsos positivos,
+umbral efectivo y convencion de puntuacion; el agente modelador decide si
+reintentar o parar mediante `ModelingRetryDecision`.
+
+Ejecucion:
+
+```text
+python -m codigo.scripts.run_nasa_ims_agentic_retry \
+  --model qwen3.5:4b \
+  --source-run-id nasa-ims-synth-agentic-qwen-fase3 \
+  --run-id-prefix nasa-ims-synth-agentic-qwen-fase3-retry \
+  --max-attempts 2
+```
+
+Resultado:
+
+| Run | Umbral cuant. | Precision | Recall | F1 | FPR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base | 0.99 | 0.9130 | 0.6000 | 0.7241 | 0.1429 |
+| Reintento 1 | 0.95 | 0.8846 | 0.6571 | 0.7541 | 0.2143 |
+| Reintento 2 | 0.50 | 0.7143 | 1.0000 | 0.8333 | 1.0000 |
+
+El agente aprendio de los falsos negativos que bajar el umbral aumentaba la
+sensibilidad. El primer reintento mejoro recall y F1 de forma moderada. En el
+segundo reintento, Qwen priorizo demasiado la sensibilidad: alcanzo recall
+1.0000, pero clasifico tambien todos los normales de test como anomalias
+(`FPR=1.0000`). El evaluador rechazo la ejecucion y el bucle se cerro con
+`next_action = stop` porque se habia agotado el presupuesto de dos reintentos.
+
+Artefactos principales:
+
+```text
+codigo/reports/runs/nasa-ims-synth-agentic-qwen-fase3-retry-attempt-01/
+codigo/reports/runs/nasa-ims-synth-agentic-qwen-fase3-retry-attempt-02/
+codigo/reports/nasa_ims_bearing/nasa-ims-synth-agentic-qwen-fase3-retry-attempt-02/iteration/retry_comparison.json
+codigo/reports/nasa_ims_bearing/nasa-ims-synth-agentic-qwen-fase3-retry-attempt-02/iteration/reasoning_postmortem.md
+codigo/reports/nasa_ims_bearing/nasa-ims-synth-agentic-qwen-fase3-retry-attempt-02/iteration/human_reasoning_review_request.md
+```
+
+Este resultado es metodologicamente util: los agentes no alcanzan metricas
+magicamente perfectas, pero si razonan sobre el fallo, prueban una hipotesis
+tecnica trazable y se detienen cuando el intercambio recall/FPR deja de ser
+aceptable.
+
+### Auditoria del razonamiento y human-on-the-loop
+
+Se ha anadido una capa de post-mortem para saber si un cambio agentico fue
+razonado o simplemente afortunado. El post-mortem compara la hipotesis
+declarada por el agente con el resultado real y clasifica el caso:
+
+```text
+partially_supported
+overcorrected
+contradicted
+validated
+```
+
+En la run NASA sintetica:
+
+- retry 1 queda como `partially_supported`: mejora recall y F1, pero aun con
+  FPR excesiva;
+- retry 2 queda como `overcorrected`: la direccion era correcta, pero la
+  magnitud fue insegura porque FPR subio a 1.0000.
+
+Con el trigger `--request-human-review`, el sistema crea una solicitud de
+revision humana y una plantilla JSON para que una persona etiquete la calidad
+del razonamiento. Esta revision no altera la evaluacion tecnica; sirve como
+memoria supervisada para futuros prompts, RAG local o filtrado de patrones de
+decision erroneos.
+
+### Pulido de trazabilidad multi-dataset
+
+Se han eliminado nombres heredados de CWRU en artefactos comunes generados por
+estructuracion, modelado, evaluacion y reporting. Los ejecutores siguen
+aceptando rutas CWRU por defecto para mantener el MVP historico, pero los
+artefactos nuevos usan nombres neutrales:
+
+```text
+windows_features
+windows_raw
+windows_splits
+isolation_forest_model
+model_predictions
+modeling_summary
+evaluation_metrics
+evaluation_summary
+final_report
+```
+
+Los snapshots NASA persistidos se han normalizado para que no aparezcan
+artefactos `cwru_*` dentro de runs `nasa_ims_bearing`. Se conserva compatibilidad
+de lectura para runs antiguos que aun tengan `cwru_modeling_summary`.
+
+Tambien se ha documentado una politica ligera de conservacion de runs en:
+
+```text
+codigo/docs/30_gestion_runs_fase_3.md
+```
+
+El inventario muestra que `codigo/reports/runs/` sigue siendo pequeno; lo que
+puede crecer son tensores, modelos y artefactos regenerables de experimentos.
+Por ello se conservaran snapshots canonicos y tablas de resultados, podando
+artefactos grandes solo cuando ya exista evidencia persistida.
+
+## Cierre operativo de Fase 3
+
+Fecha de cierre operativo: 2026-05-27.
+
+La Fase 3 queda cerrada como una fase de validacion multiagente local. No se
+considera cerrada porque se hayan agotado todas las ampliaciones posibles, sino
+porque ya existe una cadena defendible de evidencias:
+
+- CWRU se mantiene como benchmark de regresion;
+- NASA IMS entra mediante contratos comunes, adaptadores y diagnosticos, sin
+  forzar metricas supervisadas no defendibles;
+- los agentes Qwen locales toman decisiones sobre expedientes expertos y no
+  sobre conocimiento interno no verificable;
+- el estructurador propone alternativas de ventana que se ejecutan y comparan;
+- el modelador compara Isolation Forest y PCA reconstruction error;
+- el benchmark NASA sintetico introduce metricas no perfectas;
+- el bucle de reintento agentico aprende de falsos negativos, mejora recall y
+  se detiene ante sobrecorreccion;
+- el razonamiento de los agentes queda auditado y puede solicitar revision
+  humana;
+- los artefactos comunes usan nombres neutrales multi-dataset.
+
+Quedan deliberadamente fuera del cierre de Fase 3:
+
+- `POST /runs` con ejecucion desde API;
+- Human Review interactivo dentro de una interfaz;
+- RAG de memoria agentica supervisada;
+- SLURM, Docker Compose completo y frontend;
+- evaluacion supervisada sobre NASA IMS real sin politica temporal validada;
+- nuevos modelos como One-Class SVM o LOF, salvo que se abran como primer hito
+  de una fase posterior.
+
+## Regla operativa para fases posteriores
+
+La redaccion academica debe avanzar en paralelo a las ejecuciones de codigo. En
+Fase 3 se ha comprobado que, si la memoria se actualiza solo al final, los
+resultados, limitaciones y decisiones metodologicas quedan dispersos en runs y
+documentos tecnicos. Para Fase 4 y siguientes, cada ejecucion canonica debe
+cerrarse con:
+
+- snapshot de run y artefactos ligeros;
+- tabla o resumen tecnico en `codigo/docs/`;
+- reflejo academico en el capitulo correspondiente de `memoria/`;
+- verificacion reproducible documentada;
+- decision explicita sobre si el resultado es evidencia principal, caso
+  frontera, fallo util o artefacto descartable.

@@ -14,9 +14,10 @@ from codigo.app.schemas.agent_decisions import (
     ModelingDecision,
     ReportDecision,
     ReportSection,
+    StructuringDecision,
 )
 from codigo.app.schemas.common import StrictBaseModel
-from codigo.app.schemas.state import ModelingConfig, TFMStateModel
+from codigo.app.schemas.state import ModelingConfig, StructuringConfig, TFMStateModel
 from codigo.app.services.run_persistence import DEFAULT_RUNS_DIR, RunSnapshot
 from codigo.app.services.run_registry import RunComparison, compare_runs
 
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
 
 DEFAULT_EXPERIMENTS_DIR = Path("codigo/experiments/cwru_local")
 DEFAULT_PLAN_ID = "cwru_iforest_threshold_v1"
+DEFAULT_WINDOW_PLAN_ID = "cwru_agentic_window_sensitivity_v1"
+DEFAULT_MODEL_PLAN_ID = "cwru_agentic_model_comparison_v1"
 
 
 class ExperimentSpec(StrictBaseModel):
@@ -35,6 +38,7 @@ class ExperimentSpec(StrictBaseModel):
     run_id: str = Field(min_length=1)
     description: str = Field(min_length=1)
     modeling_config: ModelingConfig
+    structuring_config: StructuringConfig | None = None
     expected_effect: str | None = None
 
 
@@ -110,6 +114,133 @@ def default_cwru_experiment_plan(
                 ),
             ),
         ],
+    )
+
+
+def cwru_window_experiment_plan_from_decision(
+    decision: StructuringDecision,
+    *,
+    plan_id: str = DEFAULT_WINDOW_PLAN_ID,
+) -> ExperimentPlan:
+    """Crea un plan de ventanas a partir de alternativas propuestas por el agente."""
+
+    candidates = [
+        (
+            "selected",
+            decision.structuring_config,
+            decision.rationale,
+            "Configuracion principal elegida por el agente estructurador.",
+        )
+    ]
+    candidates.extend(
+        (
+            candidate.alternative_id,
+            candidate.structuring_config,
+            candidate.rationale,
+            candidate.expected_effect,
+        )
+        for candidate in decision.comparison_candidates
+    )
+
+    unique: list[tuple[str, StructuringConfig, str, str | None]] = []
+    seen: set[tuple[int, float, tuple[str, ...]]] = set()
+    for label, config, rationale, expected_effect in candidates:
+        key = (config.window_size, config.overlap, tuple(config.features))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((label, config, rationale, expected_effect))
+
+    if len(unique) < 2:
+        raise ValueError(
+            "agent decision must include at least two unique structuring configurations"
+        )
+
+    default_modeling = _modeling_config_with_hyperparameters({})
+    experiments = [
+        ExperimentSpec(
+            experiment_id=_window_experiment_id(label, config),
+            run_id=f"{plan_id}_{_window_experiment_id(label, config)}",
+            description=rationale,
+            modeling_config=default_modeling,
+            structuring_config=config,
+            expected_effect=expected_effect,
+        )
+        for label, config, rationale, expected_effect in unique
+    ]
+    return ExperimentPlan(
+        plan_id=plan_id,
+        description=(
+            "Comparacion agentica de configuraciones de ventana sobre CWRU. "
+            "Las alternativas proceden de la decision del agente estructurador; "
+            "el protocolo solo materializa y compara ejecuciones reproducibles."
+        ),
+        experiments=experiments,
+    )
+
+
+def cwru_model_experiment_plan_from_decision(
+    decision: ModelingDecision,
+    *,
+    plan_id: str = DEFAULT_MODEL_PLAN_ID,
+    structuring_config: StructuringConfig | None = None,
+) -> ExperimentPlan:
+    """Crea un plan de modelos a partir de alternativas propuestas por el agente."""
+
+    candidates = [
+        (
+            "selected",
+            decision.modeling_config,
+            decision.rationale,
+            "Configuracion principal elegida por el agente modelador.",
+        )
+    ]
+    candidates.extend(
+        (
+            candidate.alternative_id,
+            candidate.modeling_config,
+            candidate.rationale,
+            candidate.expected_effect,
+        )
+        for candidate in decision.comparison_candidates
+    )
+
+    unique: list[tuple[str, ModelingConfig, str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for label, config, rationale, expected_effect in candidates:
+        key = (
+            config.model_name,
+            json.dumps(config.hyperparameters, sort_keys=True),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((label, config, rationale, expected_effect))
+
+    if len(unique) < 2:
+        raise ValueError(
+            "agent decision must include at least two unique modeling configurations"
+        )
+
+    experiments = [
+        ExperimentSpec(
+            experiment_id=_model_experiment_id(label, config),
+            run_id=f"{plan_id}_{_model_experiment_id(label, config)}",
+            description=rationale,
+            modeling_config=config,
+            structuring_config=structuring_config,
+            expected_effect=expected_effect,
+        )
+        for label, config, rationale, expected_effect in unique
+    ]
+    return ExperimentPlan(
+        plan_id=plan_id,
+        description=(
+            "Comparacion agentica de modelos sobre CWRU. Las alternativas "
+            "proceden de la decision del agente modelador; el protocolo solo "
+            "materializa y compara configuraciones soportadas."
+        ),
+        experiments=experiments,
     )
 
 
@@ -190,10 +321,19 @@ def _experiment_executors(experiment_dir: Path) -> "PipelineExecutors":
     from codigo.app.executors.evaluation import generate_evaluation_report
     from codigo.app.executors.modeling import generate_model_outputs
     from codigo.app.executors.reporting import generate_technical_report
+    from codigo.app.executors.structuring import generate_temporal_structure
     from codigo.app.graph.pipeline import PipelineExecutors
 
+    tensor_dir = experiment_dir / "tensors"
     model_dir = experiment_dir / "models"
     evaluation_dir = experiment_dir / "evaluation"
+
+    def structuring(clean_dir: str, config: StructuringConfig):
+        return generate_temporal_structure(
+            clean_dir=clean_dir,
+            output_dir=tensor_dir,
+            config=config,
+        )
 
     def modeling(features_path: str, config: ModelingConfig):
         return generate_model_outputs(
@@ -209,6 +349,7 @@ def _experiment_executors(experiment_dir: Path) -> "PipelineExecutors":
         )
 
     return PipelineExecutors(
+        structuring=structuring,
         modeling=modeling,
         evaluation=evaluation,
         reporting=generate_technical_report,
@@ -225,8 +366,28 @@ def _experiment_agents(
     from codigo.app.agents.supervisor import decide_supervisor_action_deterministic
     from codigo.app.graph.pipeline import PipelineAgents
 
-    model_path = experiment_dir / "models" / "isolation_forest.joblib"
+    model_path = experiment_dir / "models" / f"{spec.modeling_config.model_name}.joblib"
+    tensor_dir = experiment_dir / "tensors"
     report_path = experiment_dir / "final_report.md"
+
+    def structurer(state: TFMStateModel) -> StructuringDecision:
+        if spec.structuring_config is None:
+            return decide_structuring_action_deterministic(state)
+        return StructuringDecision(
+            decision_id=(
+                f"{state.run_id}:structurer:"
+                f"{_agent_turn(state, 'structurer'):03d}"
+            ),
+            rationale=(
+                "Agentic experiment protocol is materializing a "
+                "StructuringConfig proposed by the structurer decision."
+            ),
+            confidence=1.0,
+            structuring_config=spec.structuring_config,
+            expected_features_path=str(tensor_dir / "windows_features.csv"),
+            expected_tensors_path=str(tensor_dir / "windows_raw.npz"),
+            expected_splits_path=str(tensor_dir / "splits.json"),
+        )
 
     def modeler(state: TFMStateModel) -> ModelingDecision:
         return ModelingDecision(
@@ -282,7 +443,7 @@ def _experiment_agents(
     return PipelineAgents(
         supervisor=decide_supervisor_action_deterministic,
         cleaner=decide_cleaning_action_deterministic,
-        structurer=decide_structuring_action_deterministic,
+        structurer=structurer,
         modeler=modeler,
         evaluator=decide_evaluation_action_deterministic,
         report_writer=report_writer,
@@ -314,17 +475,21 @@ def _results_table_markdown(
         "",
         plan.description,
         "",
-        "| Experimento | Run ID | threshold_quantile | n_estimators | Aprobado | Precision | Recall | F1 | FPR |",
-        "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
+        "| Experimento | Run ID | window_size | overlap | model_name | threshold_quantile | n_estimators | Aprobado | Precision | Recall | F1 | FPR |",
+        "| --- | --- | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
     ]
     for row in comparison.rows:
         spec = specs_by_run_id[row.run_id]
         hyperparameters = spec.modeling_config.hyperparameters
+        structuring = spec.structuring_config
         lines.append(
             " | ".join(
                 [
                     f"| {spec.experiment_id}",
                     f"`{row.run_id}`",
+                    _metric_text(None if structuring is None else structuring.window_size),
+                    _metric_text(None if structuring is None else structuring.overlap),
+                    spec.modeling_config.model_name,
                     _metric_text(hyperparameters.get("threshold_quantile")),
                     _metric_text(hyperparameters.get("n_estimators")),
                     _approval_text(row.approved),
@@ -365,6 +530,33 @@ def _ensure_plain_name(field_name: str, value: str) -> None:
     path = Path(value)
     if path.name != value or path.is_absolute():
         raise ValueError(f"{field_name} must be a plain directory name")
+
+
+def _window_experiment_id(label: str, config: StructuringConfig) -> str:
+    return (
+        f"win_{config.window_size}_ov_{int(config.overlap * 100):02d}_"
+        f"{_plain_token(label)}"
+    )
+
+
+def _model_experiment_id(label: str, config: ModelingConfig) -> str:
+    suffix = _plain_token(label)
+    if config.model_name == "isolation_forest":
+        threshold = config.hyperparameters.get("threshold_quantile", "auto")
+        return f"iforest_thr_{_plain_token(str(threshold))}_{suffix}"
+    if config.model_name == "pca_reconstruction_error":
+        components = config.hyperparameters.get("n_components", "auto")
+        return f"pca_nc_{_plain_token(str(components))}_{suffix}"
+    return f"{_plain_token(config.model_name)}_{suffix}"
+
+
+def _plain_token(value: str) -> str:
+    cleaned = "".join(
+        character.lower() if character.isalnum() else "_"
+        for character in value
+    )
+    collapsed = "_".join(part for part in cleaned.split("_") if part)
+    return collapsed or "candidate"
 
 
 def _agent_turn(state: TFMStateModel, agent_name: str) -> int:

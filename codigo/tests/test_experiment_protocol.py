@@ -4,9 +4,17 @@ import unittest
 from pathlib import Path
 
 from codigo.app.graph.pipeline import PipelineExecutors
+from codigo.app.schemas.agent_decisions import (
+    ModelingAlternative,
+    ModelingDecision,
+    StructuringAlternative,
+    StructuringDecision,
+)
 from codigo.app.services.experiment_protocol import (
     ExperimentPlan,
     ExperimentSpec,
+    cwru_model_experiment_plan_from_decision,
+    cwru_window_experiment_plan_from_decision,
     default_cwru_experiment_plan,
     run_cwru_experiment_plan,
 )
@@ -19,7 +27,7 @@ from codigo.app.schemas.executor_results import (
     ReportExecutorResult,
     StructuringResult,
 )
-from codigo.app.schemas.state import ArtifactRef, ModelingConfig
+from codigo.app.schemas.state import ArtifactRef, ModelingConfig, StructuringConfig
 
 
 class ExperimentProtocolTests(unittest.TestCase):
@@ -46,6 +54,53 @@ class ExperimentProtocolTests(unittest.TestCase):
         self.assertTrue(
             all(spec.modeling_config.hyperparameters["n_jobs"] == 1 for spec in plan.experiments)
         )
+        self.assertTrue(all(spec.structuring_config is None for spec in plan.experiments))
+
+    def test_window_plan_is_built_from_agent_structuring_decision(self):
+        decision = StructuringDecision(
+            decision_id="run:structurer:001",
+            rationale="Selected middle-size windows.",
+            confidence=0.9,
+            structuring_config=_structuring_config(2048, 0.5),
+            expected_features_path="codigo/data/tensors/cwru_bearing/windows_features.csv",
+            expected_tensors_path="codigo/data/tensors/cwru_bearing/windows_raw.npz",
+            expected_splits_path="codigo/data/tensors/cwru_bearing/splits.json",
+            comparison_candidates=[
+                StructuringAlternative(
+                    alternative_id="short_window",
+                    rationale="Compare higher temporal resolution.",
+                    expected_effect="More windows.",
+                    structuring_config=_structuring_config(1024, 0.5),
+                )
+            ],
+        )
+
+        plan = cwru_window_experiment_plan_from_decision(decision, plan_id="window_plan")
+
+        self.assertEqual(plan.plan_id, "window_plan")
+        self.assertEqual(len(plan.experiments), 2)
+        self.assertEqual(
+            [spec.structuring_config.window_size for spec in plan.experiments],
+            [2048, 1024],
+        )
+        self.assertEqual(
+            [spec.experiment_id for spec in plan.experiments],
+            ["win_2048_ov_50_selected", "win_1024_ov_50_short_window"],
+        )
+
+    def test_window_plan_requires_agent_to_propose_two_unique_configs(self):
+        decision = StructuringDecision(
+            decision_id="run:structurer:001",
+            rationale="Only one config.",
+            confidence=0.9,
+            structuring_config=_structuring_config(2048, 0.5),
+            expected_features_path="codigo/data/tensors/cwru_bearing/windows_features.csv",
+            expected_tensors_path="codigo/data/tensors/cwru_bearing/windows_raw.npz",
+            expected_splits_path="codigo/data/tensors/cwru_bearing/splits.json",
+        )
+
+        with self.assertRaisesRegex(ValueError, "at least two unique"):
+            cwru_window_experiment_plan_from_decision(decision)
 
     def test_experiment_plan_rejects_path_like_identifiers(self):
         plan = ExperimentPlan(
@@ -107,11 +162,109 @@ class ExperimentProtocolTests(unittest.TestCase):
             "f1_score",
         )
         self.assertEqual(result.comparison.metrics[2].best_run_id, "run-candidate")
-        self.assertIn("| baseline | `run-baseline` | 0.9900", table)
-        self.assertIn("| candidate | `run-candidate` | 1.0000", table)
+        self.assertIn(
+            "| baseline | `run-baseline` | n/a | n/a | isolation_forest | 0.9900",
+            table,
+        )
+        self.assertIn(
+            "| candidate | `run-candidate` | n/a | n/a | isolation_forest | 1.0000",
+            table,
+        )
+
+    def test_run_window_plan_applies_structuring_config_in_fake_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            seen_thresholds: dict[str, float] = {}
+            seen_windows: dict[str, int] = {}
+            plan = ExperimentPlan(
+                plan_id="window_plan",
+                description="window plan",
+                experiments=[
+                    _spec(
+                        "short",
+                        "run-short",
+                        0.99,
+                        structuring_config=_structuring_config(1024, 0.5),
+                    ),
+                    _spec(
+                        "long",
+                        "run-long",
+                        0.99,
+                        structuring_config=_structuring_config(4096, 0.5),
+                    ),
+                ],
+            )
+
+            result = run_cwru_experiment_plan(
+                plan,
+                experiments_dir=base / "experiments",
+                runs_dir=base / "runs",
+                raw_path=str(base / "raw"),
+                executor_factory=lambda spec, experiment_dir: _fake_executors(
+                    experiment_dir,
+                    seen_thresholds,
+                    seen_windows=seen_windows,
+                ),
+            )
+            table = Path(result.results_table_path).read_text(encoding="utf-8")
+
+        self.assertEqual(seen_windows, {"short": 1024, "long": 4096})
+        self.assertIn("| short | `run-short` | 1024 | 0.5000", table)
+        self.assertIn("| long | `run-long` | 4096 | 0.5000", table)
+
+    def test_model_plan_is_built_from_agent_modeling_decision(self):
+        decision = ModelingDecision(
+            decision_id="run:modeler:001",
+            rationale="Selected Isolation Forest.",
+            confidence=0.9,
+            modeling_config=_modeling_config("isolation_forest", {"threshold_quantile": 0.99}),
+            train_split="train",
+            validation_split="validation",
+            expected_model_path="codigo/models/cwru_bearing/isolation_forest.joblib",
+            comparison_candidates=[
+                ModelingAlternative(
+                    alternative_id="pca",
+                    rationale="Compare linear reconstruction error.",
+                    expected_effect="Different precision/recall trade-off.",
+                    modeling_config=_modeling_config(
+                        "pca_reconstruction_error",
+                        {"n_components": 0.95, "threshold_quantile": 0.99},
+                    ),
+                )
+            ],
+        )
+
+        plan = cwru_model_experiment_plan_from_decision(decision, plan_id="model_plan")
+
+        self.assertEqual(plan.plan_id, "model_plan")
+        self.assertEqual(len(plan.experiments), 2)
+        self.assertEqual(
+            [spec.modeling_config.model_name for spec in plan.experiments],
+            ["isolation_forest", "pca_reconstruction_error"],
+        )
+
+    def test_model_plan_requires_agent_to_propose_two_unique_configs(self):
+        decision = ModelingDecision(
+            decision_id="run:modeler:001",
+            rationale="Only one model.",
+            confidence=0.9,
+            modeling_config=_modeling_config("isolation_forest", {"threshold_quantile": 0.99}),
+            train_split="train",
+            validation_split="validation",
+            expected_model_path="codigo/models/cwru_bearing/isolation_forest.joblib",
+        )
+
+        with self.assertRaisesRegex(ValueError, "at least two unique"):
+            cwru_model_experiment_plan_from_decision(decision)
 
 
-def _spec(experiment_id: str, run_id: str, threshold: float) -> ExperimentSpec:
+def _spec(
+    experiment_id: str,
+    run_id: str,
+    threshold: float,
+    *,
+    structuring_config: StructuringConfig | None = None,
+) -> ExperimentSpec:
     return ExperimentSpec(
         experiment_id=experiment_id,
         run_id=run_id,
@@ -129,6 +282,45 @@ def _spec(experiment_id: str, run_id: str, threshold: float) -> ExperimentSpec:
                 "threshold_quantile": threshold,
             },
         ),
+        structuring_config=structuring_config,
+    )
+
+
+def _structuring_config(window_size: int, overlap: float) -> StructuringConfig:
+    return StructuringConfig(
+        window_size=window_size,
+        overlap=overlap,
+        main_channel="DE_time",
+        target_sample_rate_hz=12000,
+        label_mode="binary_anomaly",
+        features=["mean", "std", "rms"],
+    )
+
+
+def _modeling_config(
+    model_name: str,
+    updates: dict[str, object],
+) -> ModelingConfig:
+    if model_name == "isolation_forest":
+        hyperparameters = {
+            "n_estimators": 200,
+            "max_samples": "auto",
+            "contamination": "auto",
+            "max_features": 1.0,
+            "bootstrap": False,
+            "n_jobs": 1,
+            **updates,
+        }
+    else:
+        hyperparameters = {
+            "svd_solver": "full",
+            "whiten": False,
+            **updates,
+        }
+    return ModelingConfig(
+        model_name=model_name,
+        random_state=42,
+        hyperparameters=hyperparameters,
     )
 
 
@@ -138,6 +330,7 @@ def _fake_executors(
     *,
     f1_score: float = 0.82,
     false_positive_rate: float = 0.06,
+    seen_windows: dict[str, int] | None = None,
 ) -> PipelineExecutors:
     paths = {
         "manifest": experiment_dir / "interim" / "manifest.csv",
@@ -230,6 +423,8 @@ def _fake_executors(
         )
 
     def structuring(clean_dir: str, config):
+        if seen_windows is not None:
+            seen_windows[experiment_dir.name] = config.window_size
         paths["features"].parent.mkdir(parents=True, exist_ok=True)
         paths["features"].write_text(
             "window_id,file_id,split,label,target,mean\n"

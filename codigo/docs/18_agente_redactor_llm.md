@@ -21,10 +21,12 @@ El agente redactor propone:
 - si una seccion debe incluir metricas o artefactos;
 - rutas fuente que justifican cada seccion.
 
-Para el MVP CWRU, las validaciones restringen la decision a:
+Para el MVP CWRU original, las validaciones restringian la decision a una ruta
+fija. En Fase 3 la ruta queda ligada a dataset y run para evitar sobrescrituras
+entre ejecuciones:
 
 ```text
-output_path = codigo/reports/cwru_bearing/final_report.md
+output_path = codigo/reports/<dataset>/<run_id>/final_report.md
 output_format = markdown
 ```
 
@@ -105,7 +107,7 @@ La respuesta del LLM queda limitada por varias capas:
 - debe devolver JSON parseable;
 - debe validar contra `ReportDecision`;
 - `output_format` debe ser `markdown`;
-- `output_path` debe ser la ruta final del MVP;
+- `output_path` debe ser la ruta calculada para `dataset/run_id`;
 - deben aparecer todas las secciones obligatorias;
 - las rutas fuente deben existir en el estado;
 - cualquier fallo activa el fallback determinista.

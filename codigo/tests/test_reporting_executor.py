@@ -23,6 +23,7 @@ class ReportingExecutorTests(unittest.TestCase):
         self.assertEqual(result.report_path, str(report_path))
         self.assertEqual(result.state_updates["report_path"], str(report_path))
         self.assertEqual([artifact.artifact_type for artifact in result.artifacts], ["report"])
+        self.assertEqual(result.artifacts[0].name, "final_report")
         self.assertIn("# Informe tecnico de deteccion de anomalias", content)
         self.assertIn("## Metricas y evaluacion", content)
         self.assertIn("Recall: `0.9500`", content)

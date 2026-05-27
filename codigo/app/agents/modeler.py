@@ -13,9 +13,12 @@ from pydantic import ValidationError
 
 from codigo.app.executors.modeling import (
     DEFAULT_MODELING_CONFIG,
+    DEFAULT_PCA_MODELING_CONFIG,
     METADATA_COLUMNS,
     SKLEARN_IFOREST_PARAMS,
+    SKLEARN_PCA_PARAMS,
 )
+from codigo.app.schemas.agent_decisions import ModelingRetryDecision
 from codigo.app.schemas.agent_decisions import ModelingDecision
 from codigo.app.schemas.state import ModelingConfig, TFMStateModel
 from codigo.app.services.llm import (
@@ -26,9 +29,11 @@ from codigo.app.services.llm import (
 )
 
 
-DEFAULT_MODEL_PATH = "codigo/models/cwru_bearing/isolation_forest.joblib"
-SUPPORTED_MODEL_NAME = "isolation_forest"
-SUPPORTED_HYPERPARAMETERS = SKLEARN_IFOREST_PARAMS | {"threshold_quantile"}
+SUPPORTED_MODEL_NAMES = {"isolation_forest", "pca_reconstruction_error"}
+SUPPORTED_HYPERPARAMETERS_BY_MODEL = {
+    "isolation_forest": SKLEARN_IFOREST_PARAMS | {"threshold_quantile"},
+    "pca_reconstruction_error": SKLEARN_PCA_PARAMS | {"threshold_quantile"},
+}
 
 
 def decide_modeling_action(
@@ -64,7 +69,7 @@ def decide_modeling_action_with_llm(
         json_schema=ModelingDecision.model_json_schema(),
     )
     decision = ModelingDecision.model_validate(payload)
-    _validate_modeling_decision_bounds(decision)
+    _validate_modeling_decision_bounds(state, decision)
     return decision
 
 
@@ -82,7 +87,105 @@ def decide_modeling_action_deterministic(state: TFMStateModel) -> ModelingDecisi
         modeling_config=DEFAULT_MODELING_CONFIG,
         train_split="train",
         validation_split="validation",
-        expected_model_path=DEFAULT_MODEL_PATH,
+        expected_model_path=_expected_model_path(state, DEFAULT_MODELING_CONFIG),
+    )
+
+
+def decide_modeling_retry_action(
+    state: TFMStateModel,
+    *,
+    failure_analysis: dict[str, Any],
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+    llm_client: JSONLLMClient | None = None,
+    use_llm: bool | None = None,
+) -> ModelingRetryDecision:
+    """Decide si conviene reintentar una ejecucion fallida de modelado."""
+
+    should_use_llm = _should_use_llm(llm_client, use_llm)
+    if should_use_llm:
+        try:
+            client = llm_client or get_default_json_llm_client()
+            return decide_modeling_retry_action_with_llm(
+                state,
+                failure_analysis=failure_analysis,
+                source_run_id=source_run_id,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                llm_client=client,
+            )
+        except (LLMCallError, ValidationError, ValueError) as exc:
+            fallback = decide_modeling_retry_action_deterministic(
+                state,
+                failure_analysis=failure_analysis,
+                source_run_id=source_run_id,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+            )
+            fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
+            fallback.confidence = min(fallback.confidence, 0.7)
+            return fallback
+
+    return decide_modeling_retry_action_deterministic(
+        state,
+        failure_analysis=failure_analysis,
+        source_run_id=source_run_id,
+        attempt_number=attempt_number,
+        max_attempts=max_attempts,
+    )
+
+
+def decide_modeling_retry_action_with_llm(
+    state: TFMStateModel,
+    *,
+    failure_analysis: dict[str, Any],
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+    llm_client: JSONLLMClient,
+) -> ModelingRetryDecision:
+    """Solicita al LLM una decision de reintento y valida sus limites."""
+
+    payload = llm_client.complete_json(
+        _modeler_retry_messages(
+            state,
+            failure_analysis=failure_analysis,
+            source_run_id=source_run_id,
+            attempt_number=attempt_number,
+            max_attempts=max_attempts,
+        ),
+        json_schema=ModelingRetryDecision.model_json_schema(),
+    )
+    decision = ModelingRetryDecision.model_validate(payload)
+    _validate_modeling_retry_decision_bounds(state, decision)
+    return decision
+
+
+def decide_modeling_retry_action_deterministic(
+    state: TFMStateModel,
+    *,
+    failure_analysis: dict[str, Any],
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+) -> ModelingRetryDecision:
+    """Fallback conservador: no inventa una mejora si no hay LLM disponible."""
+
+    return ModelingRetryDecision(
+        decision_id=f"{state.run_id}:modeler_retry:{attempt_number:03d}",
+        rationale=(
+            "Fallback retry policy: stop instead of inventing a new modeling "
+            "configuration without an agent decision."
+        ),
+        confidence=1.0,
+        source_run_id=source_run_id,
+        attempt_number=attempt_number,
+        max_attempts=max_attempts,
+        should_retry=False,
+        learning_summary=_fallback_learning_summary(failure_analysis),
+        stop_reason="No LLM retry decision available; avoiding blind retry loop.",
+        evidence_used=["failure_analysis"],
     )
 
 
@@ -127,15 +230,104 @@ def _modeler_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
                     "- modeling_config debe validar contra ModelingConfig.",
-                    "- model_name debe ser isolation_forest para el MVP.",
+                    (
+                        "- model_name debe estar soportado: isolation_forest "
+                        "o pca_reconstruction_error."
+                    ),
                     "- random_state debe ser 42.",
                     "- train_split debe ser train.",
                     "- validation_split debe ser validation o null.",
                     "- Solo puedes usar hiperparametros soportados por el ejecutor.",
                     "- n_jobs debe ser 1 si se incluye.",
                     "- threshold_quantile debe estar en (0, 1].",
-                    f"- expected_model_path debe ser: {DEFAULT_MODEL_PATH}",
+                    (
+                        "- Incluye comparison_candidates con 1 a 3 alternativas "
+                        "comparables cuando haya mas de un modelo soportado."
+                    ),
+                    (
+                        "- No inventes modelos: cada comparison_candidate debe "
+                        "usar un model_name soportado."
+                    ),
+                    (
+                        "- expected_model_path debe ser la ruta esperada para "
+                        "el model_name elegido."
+                    ),
                     f"- decision_id debe ser: {state.run_id}:modeler:{_modeler_turn(state):03d}",
+                ]
+            ),
+        ),
+    ]
+
+
+def _modeler_retry_messages(
+    state: TFMStateModel,
+    *,
+    failure_analysis: dict[str, Any],
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+) -> list[LLMMessage]:
+    return [
+        LLMMessage(
+            role="system",
+            content=(
+                "Eres el agente modelador de un pipeline industrial. Debes "
+                "aprender de una ejecucion fallida y decidir si merece la pena "
+                "un reintento acotado. No entrenas modelos ni ejecutas codigo. "
+                "Debes devolver exclusivamente un JSON compatible con "
+                "ModelingRetryDecision."
+            ),
+        ),
+        LLMMessage(
+            role="user",
+            content="\n".join(
+                [
+                    "Contexto de la run fallida:",
+                    json.dumps(_state_summary_for_llm(state), indent=2, ensure_ascii=True),
+                    "",
+                    "Analisis de fallo calculado por el sistema:",
+                    json.dumps(failure_analysis, indent=2, ensure_ascii=True),
+                    "",
+                    "Configuracion de modelado previa:",
+                    json.dumps(_current_modeling_config_json(state), indent=2, ensure_ascii=True),
+                    "",
+                    "Formato JSON esperado:",
+                    json.dumps(
+                        _modeler_retry_json_template(
+                            state,
+                            source_run_id=source_run_id,
+                            attempt_number=attempt_number,
+                            max_attempts=max_attempts,
+                        ),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
+                    "",
+                    "Reglas:",
+                    "- No incluyas texto fuera del JSON.",
+                    "- should_retry debe ser false si no queda margen real de mejora.",
+                    "- attempt_number y max_attempts deben coincidir con el formato esperado.",
+                    (
+                        "- Si attempt_number == max_attempts, este es el ultimo "
+                        "reintento permitido; si falla, el sistema debe detenerse."
+                    ),
+                    "- Si should_retry=false, retry_config debe ser null y stop_reason no puede ser null.",
+                    "- Si should_retry=true, retry_config debe validar contra ModelingConfig.",
+                    "- retry_config debe cambiar algo respecto a la configuracion previa.",
+                    "- Solo puedes usar modelos soportados: isolation_forest o pca_reconstruction_error.",
+                    "- random_state debe ser 42.",
+                    "- n_jobs debe ser 1 si se incluye.",
+                    "- threshold_quantile debe estar en (0, 1].",
+                    (
+                        "- Recuerda la convencion: predicted_anomaly=1 si "
+                        "anomaly_score > threshold. Bajar el umbral suele "
+                        "capturar mas anomalias y subirlo suele ser mas conservador."
+                    ),
+                    (
+                        "- Explica en learning_summary que aprendiste de falsos "
+                        "negativos, falsos positivos y comportamiento del umbral."
+                    ),
+                    f"- decision_id debe ser: {state.run_id}:modeler_retry:{attempt_number:03d}",
                 ]
             ),
         ),
@@ -151,7 +343,61 @@ def _modeler_json_template(state: TFMStateModel) -> dict[str, Any]:
         "modeling_config": DEFAULT_MODELING_CONFIG.model_dump(mode="json"),
         "train_split": "train",
         "validation_split": "validation",
-        "expected_model_path": DEFAULT_MODEL_PATH,
+        "expected_model_path": _expected_model_path(state, DEFAULT_MODELING_CONFIG),
+        "comparison_candidates": [
+            {
+                "alternative_id": "pca_reconstruction_error",
+                "modeling_config": DEFAULT_PCA_MODELING_CONFIG.model_dump(mode="json"),
+                "rationale": "Baseline lineal por error de reconstruccion.",
+                "expected_effect": (
+                    "Comparar un detector interpretable y sensible a cambios "
+                    "globales frente a Isolation Forest."
+                ),
+            },
+            {
+                "alternative_id": "iforest_conservative_threshold",
+                "modeling_config": _modeling_config_with_updates(
+                    DEFAULT_MODELING_CONFIG,
+                    {"threshold_quantile": 1.0},
+                ).model_dump(mode="json"),
+                "rationale": "Variante mas conservadora del modelo base.",
+                "expected_effect": "Reducir falsos positivos si se mantiene recall.",
+            },
+        ],
+    }
+
+
+def _modeler_retry_json_template(
+    state: TFMStateModel,
+    *,
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+) -> dict[str, Any]:
+    return {
+        "agent_name": "modeler",
+        "decision_id": f"{state.run_id}:modeler_retry:{attempt_number:03d}",
+        "rationale": "Motivo tecnico para reintentar o parar.",
+        "confidence": 0.85,
+        "source_run_id": source_run_id,
+        "attempt_number": attempt_number,
+        "max_attempts": max_attempts,
+        "should_retry": True,
+        "learning_summary": (
+            "Resumen de lo aprendido: tipo de fallo, causa probable y cambio "
+            "propuesto."
+        ),
+        "retry_config": _retry_template_config(state),
+        "expected_effect": "Efecto esperado sobre recall, FPR y F1.",
+        "stop_reason": None,
+        "evidence_used": [
+            "primary_metrics",
+            "confusion_matrix",
+            "false_negative_summary",
+            "false_positive_summary",
+            "threshold_convention",
+        ],
+        "comparison_candidates": [],
     }
 
 
@@ -237,23 +483,65 @@ def _features_summary_for_llm(features_path: str | None) -> dict[str, Any]:
     }
 
 
-def _validate_modeling_decision_bounds(decision: ModelingDecision) -> None:
+def _validate_modeling_decision_bounds(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> None:
+    _validate_single_modeling_decision(state, decision)
+    for candidate in decision.comparison_candidates:
+        _validate_supported_modeling_config(candidate.modeling_config)
+
+
+def _validate_single_modeling_decision(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> None:
     config = decision.modeling_config
-    if config.model_name != SUPPORTED_MODEL_NAME:
-        raise ValueError(f"model_name must be {SUPPORTED_MODEL_NAME} for the MVP")
+    if config.model_name not in SUPPORTED_MODEL_NAMES:
+        raise ValueError(
+            "model_name must be one of "
+            f"{', '.join(sorted(SUPPORTED_MODEL_NAMES))}"
+        )
     if config.random_state != 42:
         raise ValueError("random_state must be 42 for reproducible MVP runs")
     if decision.train_split != "train":
         raise ValueError("train_split must be train")
     if decision.validation_split not in {None, "validation"}:
         raise ValueError("validation_split must be validation or null")
-    if decision.expected_model_path != DEFAULT_MODEL_PATH:
-        raise ValueError(f"expected_model_path must be {DEFAULT_MODEL_PATH}")
+    expected_model_path = _expected_model_path(state, config)
+    if decision.expected_model_path != expected_model_path:
+        raise ValueError(f"expected_model_path must be {expected_model_path}")
     _validate_supported_modeling_config(config)
 
 
+def _validate_modeling_retry_decision_bounds(
+    state: TFMStateModel,
+    decision: ModelingRetryDecision,
+) -> None:
+    if decision.agent_name != "modeler":
+        raise ValueError("retry decision must come from modeler")
+    if decision.should_retry:
+        if decision.retry_config is None:
+            raise ValueError("retry_config is required when should_retry=true")
+        _validate_supported_modeling_config(decision.retry_config)
+        if decision.retry_config.random_state != 42:
+            raise ValueError("random_state must be 42 for retry runs")
+        if _modeling_config_key(decision.retry_config) == _modeling_config_key(
+            state.modeling_config
+        ):
+            raise ValueError("retry_config must differ from the failed config")
+    for candidate in decision.comparison_candidates:
+        _validate_supported_modeling_config(candidate.modeling_config)
+
+
 def _validate_supported_modeling_config(config: ModelingConfig) -> None:
-    unsupported = sorted(set(config.hyperparameters) - SUPPORTED_HYPERPARAMETERS)
+    if config.model_name not in SUPPORTED_MODEL_NAMES:
+        raise ValueError(
+            "unsupported model_name: "
+            f"{config.model_name}; supported: {', '.join(sorted(SUPPORTED_MODEL_NAMES))}"
+        )
+    supported_hyperparameters = SUPPORTED_HYPERPARAMETERS_BY_MODEL[config.model_name]
+    unsupported = sorted(set(config.hyperparameters) - supported_hyperparameters)
     if unsupported:
         raise ValueError(f"unsupported hyperparameters: {', '.join(unsupported)}")
 
@@ -273,6 +561,65 @@ def _validate_supported_modeling_config(config: ModelingConfig) -> None:
             raise ValueError("n_estimators must be an integer")
         if not 10 <= n_estimators <= 500:
             raise ValueError("n_estimators must be between 10 and 500")
+
+    if config.model_name == "pca_reconstruction_error":
+        n_components = config.hyperparameters.get("n_components")
+        if n_components is not None:
+            if isinstance(n_components, bool):
+                raise ValueError("n_components must be numeric")
+            if isinstance(n_components, int):
+                if n_components < 1:
+                    raise ValueError("n_components integer must be >= 1")
+            elif isinstance(n_components, float):
+                if not 0.0 < n_components <= 1.0:
+                    raise ValueError("n_components float must be in (0, 1]")
+            else:
+                raise ValueError("n_components must be numeric")
+
+
+def _expected_model_path(state: TFMStateModel, config: ModelingConfig) -> str:
+    return f"codigo/models/{state.project_context.dataset}/{config.model_name}.joblib"
+
+
+def _retry_template_config(state: TFMStateModel) -> dict[str, Any] | None:
+    if state.modeling_config is None:
+        return DEFAULT_MODELING_CONFIG.model_dump(mode="json")
+    return state.modeling_config.model_dump(mode="json")
+
+
+def _current_modeling_config_json(state: TFMStateModel) -> dict[str, Any] | None:
+    if state.modeling_config is None:
+        return None
+    return state.modeling_config.model_dump(mode="json")
+
+
+def _modeling_config_key(config: ModelingConfig | None) -> str | None:
+    if config is None:
+        return None
+    return json.dumps(config.model_dump(mode="json"), sort_keys=True)
+
+
+def _fallback_learning_summary(failure_analysis: dict[str, Any]) -> str:
+    failure_modes = failure_analysis.get("failure_modes") or ["unknown_failure"]
+    return (
+        "Failure analysis found "
+        f"{', '.join(str(item) for item in failure_modes)}, but no validated "
+        "LLM retry decision was available."
+    )
+
+
+def _modeling_config_with_updates(
+    config: ModelingConfig,
+    updates: dict[str, Any],
+) -> ModelingConfig:
+    payload = config.model_dump(mode="json")
+    hyperparameters = dict(payload["hyperparameters"])
+    hyperparameters.update(updates)
+    return ModelingConfig(
+        model_name=payload["model_name"],
+        random_state=payload["random_state"],
+        hyperparameters=hyperparameters,
+    )
 
 
 def _modeler_turn(state: TFMStateModel) -> int:

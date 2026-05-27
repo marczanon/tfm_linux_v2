@@ -91,13 +91,239 @@ codigo/experiments/cwru_local/cwru_iforest_threshold_v1/
 \end{minipage}
 \end{center}
 
+\section{Comparacion Agentica de Ventanas CWRU}
+
+La Fase 3 incorpora un experimento donde el agente estructurador no solo elige
+una configuracion, sino que propone alternativas comparables. La ejecucion se
+lanzo con:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_cwru_agentic_window_comparison \
+  --model qwen3.5:4b \
+  --plan-id cwru-agentic-window-qwen-fase3
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Qwen propuso tres configuraciones de ventana, todas con solape del 50\%:
+2048 muestras como seleccion principal, 1024 muestras para aumentar resolucion
+temporal y 4096 muestras para aumentar contexto por ventana. El protocolo
+experimental materializo esas propuestas sin anadir configuraciones no
+decididas por el agente.
+
+\begin{table}[h]
+\centering
+\caption{Comparacion agentica de ventanas sobre CWRU}
+\label{tab:cwru-agentic-window}
+\begin{tabular}{lccccc}
+\toprule
+Ventana & Solape & Precision & Recall & F1 & FPR \\
+\midrule
+2048 & 0.50 & 0.9991 & 1.0000 & 0.9996 & 0.0513 \\
+1024 & 0.50 & 0.9996 & 0.9999 & 0.9998 & 0.0212 \\
+4096 & 0.50 & 0.9991 & 1.0000 & 0.9996 & 0.0517 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+La configuracion de 1024 muestras obtuvo la mejor precision, el mejor F1-score
+y la menor tasa de falsos positivos. La configuracion principal de 2048
+muestras mantuvo recall 1.0000, pero produjo mas falsas alarmas. Este resultado
+apoya la idea central del sistema: los agentes formulan hipotesis tecnicas y la
+aplicacion las convierte en evidencia experimental trazable.
+
+Los artefactos quedan en:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+codigo/experiments/cwru_local/cwru-agentic-window-qwen-fase3/
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+\section{Comparacion Agentica de Modelos CWRU}
+
+Tras seleccionar la ventana de 1024 muestras, se ejecuto una comparacion
+agentica de modelos. El modelador propuso Isolation Forest, PCA con error de
+reconstruccion y una variante conservadora de Isolation Forest:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_cwru_agentic_model_comparison \
+  --model qwen3.5:4b \
+  --plan-id cwru-agentic-model-qwen-fase3
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+\begin{table}[h]
+\centering
+\caption{Comparacion agentica de modelos sobre CWRU}
+\label{tab:cwru-agentic-model}
+\begin{tabular}{lccccc}
+\toprule
+Modelo & Umbral & Precision & Recall & F1 & FPR \\
+\midrule
+Isolation Forest & 0.99 & 0.9996 & 0.9999 & 0.9998 & 0.0212 \\
+PCA reconstruction & 0.99 & 1.0000 & 0.9623 & 0.9808 & 0.0000 \\
+Isolation Forest cons. & 1.00 & 0.9999 & 0.9994 & 0.9996 & 0.0085 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+PCA elimina falsos positivos en este protocolo, pero reduce el recall a
+0.9623. Esta comparacion es relevante porque rompe el patron de resultados
+perfectos y muestra un trade-off mas creible entre sensibilidad y falsas
+alarmas.
+
+\section{Prueba Smoke NASA IMS con Agentes Qwen}
+
+Dentro de la Fase 3 se ha ejecutado una prueba smoke sobre una estructura NASA
+IMS sintetica preextraida. La ejecucion usa el grafo completo y agentes
+Qwen/Ollama, pero bloquea deliberadamente el modelado final porque el dataset
+run-to-failure aun no dispone de etiquetas por ventana ni de una politica de
+particion temporal validada.
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+python -m codigo.scripts.run_nasa_ims_qwen_smoke \
+  --model qwen3.5:4b \
+  --run-id nasa-ims-qwen-smoke-fase3-qwen
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El snapshot queda persistido en:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/runs/nasa-ims-qwen-smoke-fase3-qwen/
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La prueba registro 12 decisiones agenticas. Entre ellas, el limpiador selecciono
+`channel\_1`, el estructurador eligio ventanas de 1024 muestras con solape del
+50\% y el modelador propuso `isolation\_forest`. El resultado final fue
+`failed`, no por fallo de ingestion o procesamiento, sino por guardarrail
+metodologico. Por tanto, esta ejecucion se interpreta como validacion de la
+adaptacion inicial de agentes y artefactos, no como experimento de rendimiento
+NASA IMS.
+
+Para evitar presentar metricas supervisadas sin etiquetas defendibles, se ha
+anadido un diagnostico no supervisado de degradacion sobre las features NASA
+generadas:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_nasa_ims_degradation_diagnostics
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El diagnostico no calcula recall ni F1. Sobre la prueba sintetica NASA IMS
+detecta una tendencia creciente: media inicial 0.3080, media final 0.6866,
+ratio final/inicial 2.2296 y pendiente temporal 0.1893.
+
+\section{Benchmark NASA IMS Sintetico Etiquetado}
+
+Para obtener una evaluacion supervisada multi-dataset sin usar etiquetas
+inventadas sobre NASA IMS real, se ejecuto un benchmark sintetico temporal. La
+estructura mantiene el formato NASA IMS Set 2, pero las etiquetas binarias son
+controladas por construccion.
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_nasa_ims_synthetic_temporal_benchmark \
+  --model qwen3.5:4b \
+  --run-id nasa-ims-synth-agentic-qwen-fase3
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+\begin{table}[h]
+\centering
+\caption{Run agentica sobre benchmark NASA IMS sintetico etiquetado}
+\label{tab:nasa-ims-synth-agentic}
+\begin{tabular}{lccccc}
+\toprule
+Modelo & Precision & Recall & F1 & ROC-AUC & FPR \\
+\midrule
+Isolation Forest & 0.9130 & 0.6000 & 0.7241 & 0.8041 & 0.1429 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+La ejecucion quedo rechazada por el agente evaluador, ya que no cumple el
+recall minimo de 0.90 ni la tasa maxima de falsos positivos de 0.10. Este
+resultado es deliberadamente util: aporta un caso no perfecto sobre un dataset
+distinto de CWRU y muestra que el sistema no solo informa exitos, sino tambien
+fallos tecnicos que requieren una nueva iteracion de configuracion.
+
+\section{Iteracion Agentica sobre NASA IMS Sintetico}
+
+A partir de la run rechazada se ejecuto un bucle de reintento acotado, con dos
+intentos maximos. El modelador recibio un analisis de fallo con falsos
+negativos, falsos positivos y convencion del umbral. En ambos intentos Qwen
+interpreto que el problema principal era la perdida de anomalias y propuso
+bajar `threshold\_quantile`.
+
+\begin{table}[h]
+\centering
+\caption{Reintentos agenticos sobre benchmark NASA IMS sintetico}
+\label{tab:nasa-ims-agentic-retry}
+\begin{tabular}{lccccc}
+\toprule
+Run & Umbral & Precision & Recall & F1 & FPR \\
+\midrule
+Base & 0.99 & 0.9130 & 0.6000 & 0.7241 & 0.1429 \\
+Retry 1 & 0.95 & 0.8846 & 0.6571 & 0.7541 & 0.2143 \\
+Retry 2 & 0.50 & 0.7143 & 1.0000 & 0.8333 & 1.0000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+El resultado ilustra el comportamiento buscado para el TFM. El agente aprende
+de los falsos negativos y actua en la direccion tecnica correcta: reducir el
+umbral aumenta el recall. Sin embargo, el segundo reintento muestra tambien el
+riesgo industrial de optimizar solo sensibilidad: se alcanza recall 1.0000,
+pero todos los normales del split de test pasan a clasificarse como anomalias.
+La ejecucion queda rechazada por FPR excesiva y el sistema detiene el bucle con
+`next\_action = stop` al agotarse el presupuesto de reintentos. Por tanto, la
+arquitectura permite deliberacion y correccion agentica, pero conserva un
+limite explicito contra busquedas indefinidas o aprobaciones engañosas.
+
+Sobre estos reintentos se genero una auditoria de razonamiento. El primer caso
+se clasifico automaticamente como `partially\_supported`, ya que la hipotesis
+mejoro recall y F1 pero mantuvo FPR por encima del umbral. El segundo se
+clasifico como `overcorrected`: la direccion del razonamiento era correcta,
+pero la magnitud del cambio fue insegura. En ambos casos se creo una solicitud
+de revision humana para que el razonamiento pueda etiquetarse posteriormente
+como ejemplo positivo, negativo o caso frontera antes de incorporarlo a una
+memoria contextual.
+
 \section{Experimentos posteriores}
 
 Experimentos previstos:
 
 \begin{itemize}
-  \item sensibilidad al tamaño de ventana;
   \item comparación entre features temporales y frecuenciales;
   \item validación leave-one-load-out;
-  \item validación sobre NASA IMS cuando el MVP esté estabilizado.
+  \item refinamiento de la iteracion agentica para que el modelador compare
+        tambien cambios de modelo, no solo de umbral;
+  \item validación sobre NASA IMS real cuando exista una politica temporal de
+        etiquetado defendible.
 \end{itemize}

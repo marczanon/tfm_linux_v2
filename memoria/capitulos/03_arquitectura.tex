@@ -18,6 +18,22 @@ es proponer configuraciones, interpretar perfiles y decidir la siguiente fase
 del flujo. Los ejecutores leen artefactos desde disco, aplican operaciones
 deterministas y devuelven rutas, métricas y logs.
 
+Para que agentes basados en LLM locales puedan actuar como expertos sin depender
+de conocimiento interno sobre datasets de nicho, la arquitectura introduce el
+patrón de expediente experto. Antes de cada decisión relevante, un ejecutor
+determinista resume la evidencia disponible, calcula diagnósticos, enumera
+opciones soportadas y explicita advertencias o bloqueos. El agente conserva
+libertad para escoger, ordenar alternativas, justificar su criterio o solicitar
+una capacidad no implementada, pero su respuesta sigue validándose mediante un
+contrato Pydantic.
+
+Como extensión futura, se contempla un agente investigador controlado. Su papel
+no sería ejecutar transformaciones, sino responder solicitudes estructuradas de
+otros agentes mediante evidencia local o fuentes autorizadas, registrando citas,
+fecha, confianza y limitaciones. De este modo la arquitectura puede incorporar
+búsqueda documental o RAG sin conceder navegación libre ni capacidad de ejecutar
+acciones fuera de los contratos.
+
 \section{Nodos previstos}
 
 El grafo mínimo previsto contiene:

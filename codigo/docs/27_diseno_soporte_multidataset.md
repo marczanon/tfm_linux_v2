@@ -450,7 +450,36 @@ solo con carpetas preextraidas y sinteticas. La ingestion directa del paquete
 anidado `zip -> 7z -> rar` queda pospuesta hasta decidir dependencias y
 experiencia de interfaz.
 
-El siguiente paso tecnico sera adaptar el perfilado para consumir el manifiesto
-comun NASA IMS y validar, sobre una carpeta sintetica o subconjunto preextraido,
-que los resumenes de canales, duracion, frecuencia y calidad quedan persistidos
-sin cargar senales completas en el estado global.
+Tambien se ha adaptado el perfilado para consumir el manifiesto comun NASA IMS
+y validar, sobre una carpeta sintetica preextraida, que los resumenes de
+canales, frecuencia, etiquetas y estadisticos ligeros quedan persistidos sin
+cargar senales completas en el estado global. Los snapshots IMS sin extension se
+leen como tablas numericas mediante la capa de adaptadores de senal, incluyendo
+una funcion publica `read_signal_frame(...)` para inspeccionarlos como
+`DataFrame`.
+
+Tambien se ha adaptado la limpieza para consumir tanto el manifiesto historico
+CWRU como el manifiesto comun. El contrato `CleaningConfig` incorpora
+`selected_channel`, de modo que NASA IMS puede limpiarse sobre un canal
+declarado (`channel_1`, `channel_2`, etc.) sin inferencias libres ni cambios ad
+hoc en el ejecutor. Si el canal pedido no aparece en `channel_names`, la
+ejecucion se rechaza antes de escribir artefactos.
+
+Tambien se ha enriquecido el perfilado con un `decision_summary` orientado al
+agente limpiador. Este resumen traduce los estadisticos en un expediente de
+decision con estado de calidad, acciones requeridas, canales candidatos,
+opciones de limpieza soportadas y advertencias bloqueantes o no bloqueantes. El
+objetivo es que un LLM local no tenga que conocer NASA IMS de memoria: decide
+sobre evidencia calculada y opciones validas. El criterio general queda
+documentado en `codigo/docs/29_agentes_expertos_llm_locales.md`.
+
+Tambien se ha extendido el patron al agente estructurador sobre senales limpias.
+El resumen de decision propone configuraciones de ventana y solape dentro de
+rangos soportados, estima numero de ventanas y coste, enumera conjuntos de
+features temporales ejecutables y advierte sobre fuga de informacion por
+fichero, run o secuencia temporal. NASA IMS sigue sin pasar a modelado hasta
+definir particion temporal y politica de etiquetas defendibles.
+
+El siguiente paso tecnico sera ejecutar y persistir, sobre CWRU, al menos dos
+configuraciones de ventana propuestas por este expediente para comprobar que son
+comparables antes de generalizar el flujo.

@@ -93,6 +93,7 @@ class CleaningConfig(StrictBaseModel):
     remove_non_finite: bool = True
     resample_to_hz: PositiveInt | None = None
     normalization: Literal["none", "zscore", "robust"] = "none"
+    selected_channel: str | None = Field(default=None, min_length=1)
     audit_log_path: str | None = None
 
 

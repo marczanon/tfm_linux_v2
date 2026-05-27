@@ -18,7 +18,6 @@ from codigo.app.services.llm import (
 )
 
 
-DEFAULT_REPORT_PATH = "codigo/reports/cwru_bearing/final_report.md"
 DEFAULT_REPORT_FORMAT = "markdown"
 REQUIRED_SECTION_TITLES = [
     "Resumen ejecutivo",
@@ -77,7 +76,7 @@ def decide_report_action_deterministic(state: TFMStateModel) -> ReportDecision:
             "context, pipeline configuration, metrics, artifacts and limitations."
         ),
         confidence=1.0,
-        output_path=DEFAULT_REPORT_PATH,
+        output_path=_default_report_path(state),
         output_format=DEFAULT_REPORT_FORMAT,
         sections=_default_sections(state),
     )
@@ -119,7 +118,7 @@ def _report_writer_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
                     "- output_format debe ser markdown.",
-                    f"- output_path debe ser {DEFAULT_REPORT_PATH}.",
+                    f"- output_path debe ser {_default_report_path(state)}.",
                     "- Incluye todas las secciones obligatorias.",
                     "- source_paths solo puede contener rutas ya presentes en el estado.",
                     f"- decision_id debe ser: {state.run_id}:report_writer:{_report_turn(state):03d}",
@@ -135,7 +134,7 @@ def _report_json_template(state: TFMStateModel) -> dict[str, Any]:
         "decision_id": f"{state.run_id}:report_writer:{_report_turn(state):03d}",
         "rationale": "Motivo tecnico breve de la estructura propuesta.",
         "confidence": 0.9,
-        "output_path": DEFAULT_REPORT_PATH,
+        "output_path": _default_report_path(state),
         "output_format": DEFAULT_REPORT_FORMAT,
         "sections": [section.model_dump(mode="json") for section in _default_sections(state)],
     }
@@ -184,8 +183,9 @@ def _validate_report_decision_bounds(
 ) -> None:
     if decision.output_format != DEFAULT_REPORT_FORMAT:
         raise ValueError("output_format must be markdown for the MVP")
-    if decision.output_path != DEFAULT_REPORT_PATH:
-        raise ValueError(f"output_path must be {DEFAULT_REPORT_PATH}")
+    expected_path = _default_report_path(state)
+    if decision.output_path != expected_path:
+        raise ValueError(f"output_path must be {expected_path}")
 
     titles = [section.title for section in decision.sections]
     missing = [title for title in REQUIRED_SECTION_TITLES if title not in titles]
@@ -218,6 +218,10 @@ def _allowed_source_paths(state: TFMStateModel) -> set[str]:
         if value:
             paths.add(value)
     return paths
+
+
+def _default_report_path(state: TFMStateModel) -> str:
+    return f"codigo/reports/{state.project_context.dataset}/{state.run_id}/final_report.md"
 
 
 def _report_turn(state: TFMStateModel) -> int:

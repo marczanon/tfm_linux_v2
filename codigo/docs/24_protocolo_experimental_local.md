@@ -23,7 +23,7 @@ codigo/app/services/experiment_protocol.py
 Contratos principales:
 
 - `ExperimentSpec`: una ejecucion concreta con `experiment_id`, `run_id`,
-  descripcion y `ModelingConfig`;
+  descripcion, `ModelingConfig` y, opcionalmente, `StructuringConfig`;
 - `ExperimentPlan`: manifiesto del conjunto experimental;
 - `ExperimentRunSummary`: resumen de cada snapshot generado;
 - `ExperimentPlanResult`: resultado agregado con rutas y comparacion.
@@ -31,6 +31,8 @@ Contratos principales:
 Funciones principales:
 
 - `default_cwru_experiment_plan(...)`;
+- `cwru_window_experiment_plan_from_decision(...)`;
+- `cwru_model_experiment_plan_from_decision(...)`;
 - `run_cwru_experiment_plan(...)`.
 
 ## Plan inicial
@@ -103,6 +105,72 @@ La comparacion identifica como mejor ejecucion global al experimento
 recall queda empatado en 1.0000, por lo que el registro conserva el primer run
 con ese valor como mejor fila para esa metrica.
 
+## Extension agentica para ventanas
+
+En Fase 3 el protocolo se ha ampliado para aceptar configuraciones de
+estructuracion propuestas por el agente. `StructuringDecision` puede incluir
+`comparison_candidates`, y `cwru_window_experiment_plan_from_decision(...)`
+convierte la configuracion principal y sus alternativas en un `ExperimentPlan`.
+
+Regla de diseno:
+
+```text
+El protocolo no inventa alternativas de ventana.
+Si el agente no propone al menos dos configuraciones unicas, no hay plan.
+```
+
+La primera ejecucion real se lanzo con:
+
+```text
+python -m codigo.scripts.run_cwru_agentic_window_comparison \
+  --model qwen3.5:4b \
+  --plan-id cwru-agentic-window-qwen-fase3
+```
+
+Resultados:
+
+| Ventana | Solape | Precision | Recall | F1 | FPR |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2048 | 0.50 | 0.9991 | 1.0000 | 0.9996 | 0.0513 |
+| 1024 | 0.50 | 0.9996 | 0.9999 | 0.9998 | 0.0212 |
+| 4096 | 0.50 | 0.9991 | 1.0000 | 0.9996 | 0.0517 |
+
+La alternativa de 1024 muestras obtiene el mejor F1 y la menor tasa de falsos
+positivos. Los artefactos agregados quedan en:
+
+```text
+codigo/experiments/cwru_local/cwru-agentic-window-qwen-fase3/
+```
+
+## Extension agentica para modelos
+
+El mismo patron se ha aplicado al agente modelador. `ModelingDecision` puede
+incluir `comparison_candidates`, y
+`cwru_model_experiment_plan_from_decision(...)` convierte la configuracion
+principal y sus alternativas en un plan comparable.
+
+La ejecucion real se lanzo con:
+
+```text
+python -m codigo.scripts.run_cwru_agentic_model_comparison \
+  --model qwen3.5:4b \
+  --plan-id cwru-agentic-model-qwen-fase3
+```
+
+Resultados sobre ventana 1024/50%:
+
+| Modelo | Threshold | Precision | Recall | F1 | FPR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Isolation Forest | 0.99 | 0.9996 | 0.9999 | 0.9998 | 0.0212 |
+| PCA reconstruction | 0.99 | 1.0000 | 0.9623 | 0.9808 | 0.0000 |
+| Isolation Forest conservador | 1.00 | 0.9999 | 0.9994 | 0.9996 | 0.0085 |
+
+Los artefactos agregados quedan en:
+
+```text
+codigo/experiments/cwru_local/cwru-agentic-model-qwen-fase3/
+```
+
 ## Validacion
 
 Validacion focalizada del hito:
@@ -114,7 +182,7 @@ conda run -n tfm_v2 python -m unittest codigo.tests.test_experiment_protocol
 Resultado:
 
 ```text
-Ran 3 tests in 0.037s
+Ran 8 tests
 OK
 ```
 
