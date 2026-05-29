@@ -5,9 +5,14 @@
 Implementar la primera version del Hito 6 de la Fase 2: exponer por HTTP la
 persistencia local y el registro consultable de ejecuciones.
 
-Esta version es deliberadamente de lectura. No lanza todavia ejecuciones nuevas
-ni abre trabajos costosos desde la API. Esa decision evita mezclar la base de
-servicio con politicas futuras de aprobacion, colas o control de recursos.
+La version original de Fase 2 era deliberadamente de lectura. En Fase 4 se ha
+anadido una primera ejecucion controlada mediante `POST /runs`, manteniendo
+`dry_run=true` por defecto y guardarrailes de ruta, politica de dataset y coste
+inicial. El detalle de esta ampliacion queda en:
+
+```text
+codigo/docs/34_api_ejecucion_controlada_fase4.md
+```
 
 ## Modulos implementados
 
@@ -35,6 +40,8 @@ GET /runs/compare
 GET /runs/{run_id}
 GET /runs/{run_id}/artifacts
 GET /runs/{run_id}/report
+GET /run-jobs/{job_id}
+POST /runs
 ```
 
 ### GET /health
@@ -83,6 +90,38 @@ Devuelve las referencias ligeras a artefactos guardadas para una ejecucion.
 Devuelve el informe Markdown asociado al run, si existe en disco. Si el run no
 tiene informe o la ruta ya no existe, responde con `404`.
 
+### POST /runs
+
+Planifica o ejecuta una run local usando `ApiRunRequest`.
+
+Por defecto:
+
+```text
+dry_run = true
+```
+
+En ese modo devuelve un `DatasetPipelinePlan` sin ejecutar. Para ejecutar hay
+que enviar `dry_run=false`; la API valida que `raw_path` este dentro de raices
+permitidas, que la politica de dataset permita las fases solicitadas y que
+`run_id` no exista ya. En esta primera version no se permite ejecutar desde API
+con `use_llm=true` ni con memoria RAG activada.
+
+La solicitud tambien acepta `human_review` con los modos `off`, `passive` y
+`required`, reutilizando `HumanReviewSettings`. En modo `required`, si hay un
+punto de decision que requiere revision y no llega `human_approval.approved=true`,
+la ejecucion responde `409`.
+
+Si se envia `background=true` junto con `dry_run=false`, la API acepta la
+ejecucion como job local y responde `202`. El job se consulta mediante:
+
+```text
+GET /run-jobs/{job_id}
+```
+
+Esta primera version usa un registro en memoria del proceso, definido en
+`api_run_jobs.py`. La persistencia duradera sigue siendo el snapshot local de la
+run cuando la ejecucion termina.
+
 ## Ejecucion local
 
 Comando recomendado desde la raiz del repositorio:
@@ -99,7 +138,12 @@ curl -sS http://127.0.0.1:8010/health
 
 ## Decisiones de diseno
 
-- La API no recalcula metricas ni vuelve a ejecutar el pipeline.
+- Los endpoints GET no recalculan metricas ni vuelven a ejecutar el pipeline.
+- `POST /runs` planifica siempre antes de ejecutar.
+- La ejecucion desde API es explicita (`dry_run=false`) y conserva los mismos
+  snapshots locales que una ejecucion por script.
+- La ejecucion en segundo plano no crea otro runner; envuelve
+  `run_dataset_pipeline(...)`.
 - Los endpoints leen desde `run_registry.py` y `run_persistence.py`.
 - Las respuestas principales reutilizan contratos Pydantic existentes:
   `RunIndexEntry`, `RunSnapshot` y `RunComparison`.
@@ -116,7 +160,7 @@ Tests focalizados:
 conda run -n tfm_v2 python -m unittest codigo.tests.test_api_runs
 ```
 
-Resultado:
+Resultado historico:
 
 ```text
 Ran 6 tests in 0.049s
@@ -129,7 +173,7 @@ Suite completa:
 conda run -n tfm_v2 python -m unittest discover codigo/tests
 ```
 
-Resultado:
+Resultado historico:
 
 ```text
 Ran 127 tests in 0.335s
@@ -138,5 +182,6 @@ OK
 
 ## Siguientes ampliaciones posibles
 
-El endpoint `POST /runs` queda para una fase posterior, cuando se definan las
-politicas de ejecucion, aprobacion humana y control de coste.
+`POST /runs` ya existe como version controlada inicial. Quedan para fases
+posteriores la ejecucion con LLM, memoria RAG, cola persistida, cancelacion de
+trabajos, autenticacion y una interfaz de aprobaciones humanas mas completa.

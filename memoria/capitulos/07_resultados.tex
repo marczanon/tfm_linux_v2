@@ -224,6 +224,44 @@ modelo. Al mismo tiempo, el evaluador conserva el control experimental y evita
 aceptar una alternativa que reduce falsos positivos a costa de perder demasiadas
 anomalias.
 
+\subsection{Resultado con memoria transversal}
+
+La extension de memoria a estructurador y evaluador se valido con dos runs CWRU
+completas. La primera genero episodios y candidatos para ambos agentes; la
+segunda, ejecutada con Qwen, recupero esos recuerdos. El estructurador y el
+evaluador declararon `used\_memory\_context=true` y citaron los
+`memory\_record\_id` correspondientes de la run anterior.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Run & Precision & Recall & F1 & FPR & Memorias \\
+\midrule
+Transversal 1 & 0.9991 & 1.0000 & 0.9996 & 0.0513 & 2 \\
+Transversal 2 Qwen & 0.9991 & 1.0000 & 0.9996 & 0.0513 & 4 \\
+\bottomrule
+\end{tabular}
+\caption{Primer ciclo de memoria transversal en CWRU.}
+\label{tab:resultados_memoria_transversal}
+\end{table}
+
+El resultado no pretende demostrar mejora metrica, porque CWRU ya estaba casi
+resuelto por el pipeline base. Su valor es arquitectonico: confirma que la
+memoria agentica puede operar por rol dentro de una ejecucion completa. Tras la
+segunda run, el indice contiene 20 registros: 16 en `modeler\_memory`, 2 en
+`structurer\_memory` y 2 en `evaluator\_memory`. Esto demuestra que la memoria
+supervisada empieza a representar aprendizaje de proceso, no solo ajustes de
+hiperparametros.
+
+La auditoria posterior del uso transversal clasifico ambas decisiones como
+`memory\_aligned`. No se detectaron recuerdos citados fuera del contexto
+recuperado ni declaraciones de uso ausentes. El evaluador mantuvo respaldo
+metrico independiente de la memoria: recall 1.0000 y FPR 0.0513 bajo los
+umbrales exigidos. Por tanto, los nuevos candidatos quedan aceptados como
+contexto reutilizable, pero no como evidencia academica principal sin revision
+humana.
+
 \section{Resultados cualitativos}
 
 La prueba smoke con agentes Qwen sobre una carpeta NASA IMS sintetica
@@ -234,6 +272,16 @@ y el modelador propuso un modelo ejecutable. Sin embargo, la run termino en
 estado `failed` por guardarrail metodologico: NASA IMS no debe evaluarse como
 problema supervisado hasta definir etiquetas por ventana y particion temporal
 sin fuga.
+
+En Fase 4 se ha dado el primer paso para retirar ese bloqueo de forma
+controlada: la politica `nasa\_ims\_temporal\_v1` etiqueta el tramo inicial de
+cada secuencia como normalidad proxy, el tramo posterior como degradacion proxy
+y declara esos metadatos en el manifiesto derivado. La run
+`nasa-runner-temporal-policy-v1-completed-low-metrics-002` alcanzo modelado,
+evaluacion e informe final. Termino como `completed`, pero con
+`approved=false` por FPR 1.0000. Este resultado es util precisamente porque
+separa dos conceptos: la infraestructura ya puede ejecutar NASA IMS con
+politica declarada, pero las metricas aun no son evidencia aprobada.
 
 La Fase 3 tambien introduce auditoria del razonamiento. Cada reintento puede
 generar un post-mortem que compara la hipotesis declarada por el agente con el
@@ -253,11 +301,12 @@ protocolo experimental, no como garantia de generalizacion industrial. CWRU es
 un benchmark controlado, con condiciones experimentales limpias y diferencias
 claras entre normalidad y fallo.
 
-NASA IMS real aporta mayor interes industrial, pero no se ha usado para metricas
-supervisadas porque carece de etiquetas por ventana y requiere una politica
-temporal defendible. La version sintetica permite estudiar el comportamiento
-multiagente ante metricas no perfectas, pero no debe presentarse como resultado
-oficial sobre NASA IMS real.
+NASA IMS real aporta mayor interes industrial. La politica temporal v1 permite
+metricas supervisadas proxy, pero estas no deben presentarse como etiquetas
+oficiales ni como resultado principal sin mas validacion. La version sintetica
+permite estudiar el comportamiento multiagente ante metricas no perfectas, y la
+politica temporal permite estudiar el flujo run-to-failure, pero ambos casos
+requieren cautela metodologica.
 
 Otra limitacion es que los agentes locales siguen dependiendo de la calidad del
 expediente experto que reciben. El sistema evita delegar conocimiento de nicho

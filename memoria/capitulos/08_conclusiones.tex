@@ -71,13 +71,12 @@ Las lineas principales son:
         persistencia y evaluacion comparable;
   \item ampliar la experimentacion multi-dataset con planes acotados y
         comparacion frente a politicas deterministas;
-  \item definir ejecuciones controladas desde API y Human Review conmutable
-        antes de permitir trabajos costosos mediante `POST /runs`, manteniendo
-        las pruebas automatizadas con intervencion humana apagada por defecto;
-  \item consolidar en Fase 4 una memoria agentica supervisada, basada en
-        post-mortems, revisiones humanas, embeddings locales y bases vectoriales
-        por agente, que pueda alimentar un RAG local para estructurador,
-        modelador y evaluador sin modificar metricas ni saltarse contratos;
+  \item construir en Fase 5 una aplicacion local backend/frontend que permita
+        seleccionar o recibir datasets, lanzar runs controladas, seguir jobs,
+        visualizar resultados y consultar memoria agentica local;
+  \item evolucionar Human Review desde la puerta API inicial hacia una experiencia
+        visual de aprobacion, manteniendo las pruebas automatizadas con
+        intervencion humana apagada por defecto;
   \item preparar Docker, SLURM y checkpoints persistentes cuando el flujo local
         y la politica de ejecucion esten suficientemente estabilizados.
 \end{itemize}

@@ -83,3 +83,15 @@ Documentos iniciales:
 - `32_hoja_ruta_fase_4.md`: hoja de ruta activa de Fase 4; define memoria
   agentica supervisada con embeddings y base vectorial por agente, modos
   conmutables de Human-in-the-loop y aprendizaje controlado de experiencias.
+- `33_politica_temporal_nasa_ims.md`: politica temporal versionada para ejecutar
+  NASA IMS con etiquetas proxy declaradas y sin presentarlas como oficiales.
+- `34_api_ejecucion_controlada_fase4.md`: primera version de `POST /runs` con
+  dry-run por defecto, raices permitidas, politica multi-dataset y ejecucion
+  local controlada, incluyendo jobs locales en memoria para `background=true`.
+- `35_protocolo_reutilizacion_anti_duplicacion.md`: protocolo transversal para
+  buscar capacidades existentes antes de crear codigo, contratos, scripts,
+  endpoints o tests nuevos.
+- `36_hoja_ruta_fase_5_aplicacion.md`: hoja de ruta activa para construir la
+  aplicacion local backend/frontend, con seleccion o ingesta de datasets,
+  ejecucion de runs, seguimiento de jobs, visualizacion de artefactos y memoria
+  local.

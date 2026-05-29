@@ -256,7 +256,7 @@ class SupervisorAgentTests(unittest.TestCase):
         self.assertEqual(decision.next_node, "report_writer")
         self.assertIsNone(decision.stop_reason)
 
-    def test_evaluation_stage_returns_failed_after_rejection(self):
+    def test_evaluation_stage_routes_to_report_writer_after_low_metrics(self):
         state_dict = create_initial_cwru_state(
             thread_id="cwru-supervisor-test",
             run_id="run-supervisor-evaluator-004",
@@ -278,9 +278,9 @@ class SupervisorAgentTests(unittest.TestCase):
 
         decision = decide_supervisor_action(state)
 
-        self.assertEqual(decision.next_stage, "failed")
-        self.assertIsNone(decision.next_node)
-        self.assertEqual(decision.stop_reason, "Ejecucion rechazada.")
+        self.assertEqual(decision.next_stage, "reporting")
+        self.assertEqual(decision.next_node, "report_writer")
+        self.assertIsNone(decision.stop_reason)
 
     def test_reporting_stage_returns_completed_after_report_exists(self):
         state_dict = create_initial_cwru_state(

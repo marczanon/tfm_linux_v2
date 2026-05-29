@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,10 +12,16 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from codigo.app.agents.cleaner import decide_cleaning_action
-from codigo.app.agents.evaluator import decide_evaluation_action
+from codigo.app.agents.evaluator import (
+    decide_evaluation_action,
+    retrieve_evaluator_memory_context,
+)
 from codigo.app.agents.modeler import decide_modeling_action
 from codigo.app.agents.report_writer import decide_report_action
-from codigo.app.agents.structurer import decide_structuring_action
+from codigo.app.agents.structurer import (
+    decide_structuring_action,
+    retrieve_structurer_memory_context,
+)
 from codigo.app.agents.supervisor import decide_supervisor_action
 from codigo.app.executors.cleaning import (
     DEFAULT_CLEANING_CONFIG,
@@ -51,18 +58,28 @@ from codigo.app.schemas.agent_decisions import (
     StructuringDecision,
     SupervisorDecision,
 )
+from codigo.app.schemas.reasoning import RetrievedMemoryContext
 from codigo.app.schemas.state import (
+    ArtifactRef,
     DatasetProfileSummary,
     MetricsReport,
     PipelineError,
     StateMessage,
     TFMStateModel,
 )
+from codigo.app.services.decision_memory import (
+    build_evaluation_decision_episode,
+    build_evaluation_memory_candidate,
+    build_structuring_decision_episode,
+    build_structuring_memory_candidate,
+    write_decision_memory_artifacts,
+)
 from codigo.app.services.run_persistence import (
     DEFAULT_RUNS_DIR,
     RunSnapshot,
     save_run_snapshot,
 )
+from codigo.app.services.vector_memory import VectorMemoryStore
 
 
 @dataclass(frozen=True)
@@ -91,6 +108,19 @@ class PipelineAgents:
 
 
 @dataclass(frozen=True)
+class PipelineMemoryConfig:
+    """Configuracion opcional de memoria RAG para agentes del grafo."""
+
+    memory_store: VectorMemoryStore | None = None
+    output_root: Path | str = Path("codigo/reports")
+    structurer_top_k: int = 3
+    evaluator_top_k: int = 3
+    min_similarity: float = 0.0
+    generate_decision_memory: bool = True
+    reusable_as_context: bool = True
+
+
+@dataclass(frozen=True)
 class PersistedPipelineRun:
     """Resultado de ejecutar el pipeline y guardar su snapshot local."""
 
@@ -101,11 +131,13 @@ class PersistedPipelineRun:
 def build_cwru_pipeline(
     executors: PipelineExecutors | None = None,
     agents: PipelineAgents | None = None,
+    memory_config: PipelineMemoryConfig | None = None,
 ) -> Any:
     """Compila el grafo supervisado minimo del MVP CWRU."""
 
     runner = executors or PipelineExecutors()
     agent_runner = agents or PipelineAgents()
+    memory_runner = memory_config
     graph = StateGraph(TFMState)
     graph.add_node("supervisor", lambda state: _supervisor_node(state, agent_runner))
     graph.add_node(
@@ -123,11 +155,11 @@ def build_cwru_pipeline(
     )
     graph.add_node(
         "structuring_agent",
-        lambda state: _structurer_node(state, agent_runner),
+        lambda state: _structurer_node(state, agent_runner, memory_runner),
     )
     graph.add_node(
         "structuring_executor",
-        lambda state: _structuring_node(state, runner),
+        lambda state: _structuring_node(state, runner, memory_runner),
     )
     graph.add_node("modeling_agent", lambda state: _modeler_node(state, agent_runner))
     graph.add_node(
@@ -137,7 +169,7 @@ def build_cwru_pipeline(
     graph.add_node("evaluator", lambda state: _evaluation_node(state, runner))
     graph.add_node(
         "evaluation_agent",
-        lambda state: _evaluator_agent_node(state, agent_runner),
+        lambda state: _evaluator_agent_node(state, agent_runner, memory_runner),
     )
     graph.add_node(
         "report_writer",
@@ -164,10 +196,15 @@ def run_cwru_pipeline(
     initial_state: TFMState,
     executors: PipelineExecutors | None = None,
     agents: PipelineAgents | None = None,
+    memory_config: PipelineMemoryConfig | None = None,
 ) -> TFMState:
     """Ejecuta el grafo compilado y devuelve el estado final validado."""
 
-    final_state = build_cwru_pipeline(executors, agents).invoke(initial_state)
+    final_state = build_cwru_pipeline(
+        executors=executors,
+        agents=agents,
+        memory_config=memory_config,
+    ).invoke(initial_state)
     return TFMState(**validate_state(final_state).to_langgraph_state())
 
 
@@ -176,12 +213,23 @@ def run_and_persist_cwru_pipeline(
     executors: PipelineExecutors | None = None,
     agents: PipelineAgents | None = None,
     runs_dir: Path | str = DEFAULT_RUNS_DIR,
+    memory_config: PipelineMemoryConfig | None = None,
 ) -> PersistedPipelineRun:
     """Ejecuta el pipeline y guarda un snapshot local de la ejecucion."""
 
-    final_state = run_cwru_pipeline(initial_state, executors, agents)
+    final_state = run_cwru_pipeline(
+        initial_state,
+        executors=executors,
+        agents=agents,
+        memory_config=memory_config,
+    )
     snapshot = save_run_snapshot(validate_state(final_state), runs_dir)
     return PersistedPipelineRun(state=final_state, snapshot=snapshot)
+
+
+build_pipeline = build_cwru_pipeline
+run_pipeline = run_cwru_pipeline
+run_and_persist_pipeline = run_and_persist_cwru_pipeline
 
 
 def _supervisor_node(state: TFMState, agents: PipelineAgents) -> TFMState:
@@ -271,10 +319,30 @@ def _cleaning_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
     )
 
 
-def _structurer_node(state: TFMState, agents: PipelineAgents) -> TFMState:
+def _structurer_node(
+    state: TFMState,
+    agents: PipelineAgents,
+    memory_config: PipelineMemoryConfig | None,
+) -> TFMState:
     model = validate_state(state)
-    decision = agents.structurer(model)
+    memory_context = _retrieve_structurer_context(model, memory_config)
+    memory_context_path = _write_memory_context_artifact(
+        model,
+        "structurer",
+        memory_context,
+        memory_config,
+    )
+    decision = _call_agent_with_optional_memory(
+        agents.structurer,
+        model,
+        memory_context,
+    )
     updated = model.to_langgraph_state()
+    memory_artifacts = _memory_context_artifacts(
+        "structurer",
+        memory_context,
+        memory_context_path,
+    )
     updated["messages"] = [
         *updated["messages"],
         StateMessage(
@@ -283,25 +351,40 @@ def _structurer_node(state: TFMState, agents: PipelineAgents) -> TFMState:
             content=decision.model_dump_json(),
         ).model_dump(mode="json"),
     ]
+    updated["artifacts"] = [
+        *updated["artifacts"],
+        *[artifact.model_dump(mode="json") for artifact in memory_artifacts],
+    ]
     updated["structuring_config"] = decision.structuring_config.model_dump(mode="json")
     updated["current_stage"] = "structuring"
     updated["next_node"] = "supervisor"
     return TFMState(**validate_state(updated).to_langgraph_state())
 
 
-def _structuring_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
+def _structuring_node(
+    state: TFMState,
+    executors: PipelineExecutors,
+    memory_config: PipelineMemoryConfig | None,
+) -> TFMState:
     model = validate_state(state)
     if not model.clean_path:
         return _missing_input_state(model, "structuring", "structuring_executor", "clean_path")
 
     config = model.structuring_config or DEFAULT_STRUCTURING_CONFIG
     result = executors.structuring(clean_dir=model.clean_path, config=config)
-    return _apply_result(
+    updated = _apply_result(
         model,
         result,
         next_stage="modeling",
         next_node="supervisor",
         extra_updates={"structuring_config": config.model_dump(mode="json")},
+    )
+    if result.status != "success":
+        return updated
+    return _append_structuring_decision_memory_artifacts(
+        updated,
+        result,
+        memory_config,
     )
 
 
@@ -360,10 +443,30 @@ def _evaluation_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
     )
 
 
-def _evaluator_agent_node(state: TFMState, agents: PipelineAgents) -> TFMState:
+def _evaluator_agent_node(
+    state: TFMState,
+    agents: PipelineAgents,
+    memory_config: PipelineMemoryConfig | None,
+) -> TFMState:
     model = validate_state(state)
-    decision = agents.evaluator(model)
+    memory_context = _retrieve_evaluator_context(model, memory_config)
+    memory_context_path = _write_memory_context_artifact(
+        model,
+        "evaluator",
+        memory_context,
+        memory_config,
+    )
+    decision = _call_agent_with_optional_memory(
+        agents.evaluator,
+        model,
+        memory_context,
+    )
     updated = model.to_langgraph_state()
+    memory_artifacts = _memory_context_artifacts(
+        "evaluator",
+        memory_context,
+        memory_context_path,
+    )
     updated["messages"] = [
         *updated["messages"],
         StateMessage(
@@ -372,10 +475,18 @@ def _evaluator_agent_node(state: TFMState, agents: PipelineAgents) -> TFMState:
             content=decision.model_dump_json(),
         ).model_dump(mode="json"),
     ]
+    updated["artifacts"] = [
+        *updated["artifacts"],
+        *[artifact.model_dump(mode="json") for artifact in memory_artifacts],
+    ]
     updated["evaluation"] = decision.evaluation.model_dump(mode="json")
     updated["current_stage"] = "evaluation"
     updated["next_node"] = "supervisor"
-    return TFMState(**validate_state(updated).to_langgraph_state())
+    updated_state = TFMState(**validate_state(updated).to_langgraph_state())
+    return _append_evaluation_decision_memory_artifacts(
+        updated_state,
+        memory_config,
+    )
 
 
 def _report_writer_node(
@@ -401,6 +512,259 @@ def _report_writer_node(
         result,
         next_stage="reporting",
         next_node="supervisor",
+    )
+
+
+def _retrieve_structurer_context(
+    model: TFMStateModel,
+    memory_config: PipelineMemoryConfig | None,
+) -> RetrievedMemoryContext | None:
+    if memory_config is None or memory_config.memory_store is None:
+        return None
+    return retrieve_structurer_memory_context(
+        model,
+        memory_store=memory_config.memory_store,
+        top_k=memory_config.structurer_top_k,
+        min_similarity=memory_config.min_similarity,
+    )
+
+
+def _retrieve_evaluator_context(
+    model: TFMStateModel,
+    memory_config: PipelineMemoryConfig | None,
+) -> RetrievedMemoryContext | None:
+    if memory_config is None or memory_config.memory_store is None:
+        return None
+    return retrieve_evaluator_memory_context(
+        model,
+        memory_store=memory_config.memory_store,
+        top_k=memory_config.evaluator_top_k,
+        min_similarity=memory_config.min_similarity,
+    )
+
+
+def _call_agent_with_optional_memory(
+    agent: Callable[..., Any],
+    model: TFMStateModel,
+    memory_context: RetrievedMemoryContext | None,
+) -> Any:
+    if memory_context is None or not _accepts_memory_context(agent):
+        return agent(model)
+    return agent(model, memory_context=memory_context)
+
+
+def _accepts_memory_context(agent: Callable[..., Any]) -> bool:
+    try:
+        signature = inspect.signature(agent)
+    except (TypeError, ValueError):
+        return False
+    return "memory_context" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _write_memory_context_artifact(
+    model: TFMStateModel,
+    agent_name: str,
+    memory_context: RetrievedMemoryContext | None,
+    memory_config: PipelineMemoryConfig | None,
+) -> str | None:
+    if memory_context is None or memory_config is None:
+        return None
+    output_dir = _agent_memory_output_dir(model, agent_name, memory_config)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "retrieved_memory_context.json"
+    path.write_text(
+        json.dumps(memory_context.model_dump(mode="json"), indent=2),
+        encoding="utf-8",
+    )
+    return path.as_posix()
+
+
+def _memory_context_artifacts(
+    agent_name: str,
+    memory_context: RetrievedMemoryContext | None,
+    memory_context_path: str | None,
+) -> list[ArtifactRef]:
+    if memory_context is None or memory_context_path is None:
+        return []
+    return [
+        ArtifactRef(
+            name=f"{agent_name}_retrieved_memory_context",
+            artifact_type="config",
+            path=memory_context_path,
+            producer=agent_name,
+            description=f"Contexto RAG recuperado para el agente {agent_name}.",
+            metadata={
+                "context_id": memory_context.context_id,
+                "query_id": memory_context.query.query_id,
+                "n_items": len(memory_context.items),
+            },
+        )
+    ]
+
+
+def _append_structuring_decision_memory_artifacts(
+    state: TFMState,
+    result: StructuringResult,
+    memory_config: PipelineMemoryConfig | None,
+) -> TFMState:
+    if memory_config is None or not memory_config.generate_decision_memory:
+        return state
+    model = validate_state(state)
+    decision = _latest_structuring_decision(model)
+    if decision is None:
+        return state
+    memory_context = _latest_memory_context(model, "structurer")
+    episode = build_structuring_decision_episode(
+        state=model,
+        decision=decision,
+        execution_result_summary=(
+            f"{result.message} n_windows={result.n_windows}; "
+            f"features_path={result.features_path}; splits_path={result.splits_path}."
+        ),
+        outcome="supported",
+        memory_context=memory_context,
+    )
+    candidate = build_structuring_memory_candidate(
+        episode,
+        reusable_as_context=memory_config.reusable_as_context,
+    )
+    artifacts = write_decision_memory_artifacts(
+        episode=episode,
+        candidate=candidate,
+        output_dir=_agent_memory_output_dir(model, "structurer", memory_config),
+    )
+    return _append_artifacts(
+        model,
+        _decision_memory_artifact_refs("structurer", artifacts),
+    )
+
+
+def _append_evaluation_decision_memory_artifacts(
+    state: TFMState,
+    memory_config: PipelineMemoryConfig | None,
+) -> TFMState:
+    if memory_config is None or not memory_config.generate_decision_memory:
+        return state
+    model = validate_state(state)
+    decision = _latest_evaluation_decision(model)
+    if decision is None:
+        return state
+    memory_context = _latest_memory_context(model, "evaluator")
+    episode = build_evaluation_decision_episode(
+        state=model,
+        decision=decision,
+        memory_context=memory_context,
+    )
+    candidate = build_evaluation_memory_candidate(
+        episode,
+        reusable_as_context=memory_config.reusable_as_context,
+    )
+    artifacts = write_decision_memory_artifacts(
+        episode=episode,
+        candidate=candidate,
+        output_dir=_agent_memory_output_dir(model, "evaluator", memory_config),
+    )
+    return _append_artifacts(
+        model,
+        _decision_memory_artifact_refs("evaluator", artifacts),
+    )
+
+
+def _decision_memory_artifact_refs(
+    agent_name: str,
+    artifacts: Any,
+) -> list[ArtifactRef]:
+    return [
+        ArtifactRef(
+            name=f"{agent_name}_decision_episode",
+            artifact_type="config",
+            path=artifacts.episode_path,
+            producer=agent_name,
+            description=f"Episodio de decision generado para {agent_name}.",
+            metadata={"episode_id": artifacts.episode.episode_id},
+        ),
+        ArtifactRef(
+            name=f"{agent_name}_decision_episode_report",
+            artifact_type="report",
+            path=artifacts.episode_report_path,
+            producer=agent_name,
+            description=f"Informe legible del episodio de decision de {agent_name}.",
+            metadata={"episode_id": artifacts.episode.episode_id},
+        ),
+        ArtifactRef(
+            name=f"{agent_name}_memory_candidate",
+            artifact_type="config",
+            path=artifacts.candidate_path,
+            producer=agent_name,
+            description=f"Candidato de memoria destilado para {agent_name}.",
+            metadata={"candidate_id": artifacts.candidate.candidate_id},
+        ),
+        ArtifactRef(
+            name=f"{agent_name}_memory_candidate_report",
+            artifact_type="report",
+            path=artifacts.candidate_report_path,
+            producer=agent_name,
+            description=f"Informe legible del candidato de memoria de {agent_name}.",
+            metadata={"candidate_id": artifacts.candidate.candidate_id},
+        ),
+    ]
+
+
+def _append_artifacts(
+    model: TFMStateModel,
+    artifacts: list[ArtifactRef],
+) -> TFMState:
+    if not artifacts:
+        return TFMState(**model.to_langgraph_state())
+    updated = model.to_langgraph_state()
+    updated["artifacts"] = [
+        *updated["artifacts"],
+        *[artifact.model_dump(mode="json") for artifact in artifacts],
+    ]
+    return TFMState(**validate_state(updated).to_langgraph_state())
+
+
+def _latest_structuring_decision(model: TFMStateModel) -> StructuringDecision | None:
+    for message in reversed(model.messages):
+        if message.role == "agent" and message.name == "structurer":
+            return StructuringDecision.model_validate_json(message.content)
+    return None
+
+
+def _latest_evaluation_decision(model: TFMStateModel) -> EvaluationDecision | None:
+    for message in reversed(model.messages):
+        if message.role == "agent" and message.name == "evaluator":
+            return EvaluationDecision.model_validate_json(message.content)
+    return None
+
+
+def _latest_memory_context(
+    model: TFMStateModel,
+    agent_name: str,
+) -> RetrievedMemoryContext | None:
+    artifact_name = f"{agent_name}_retrieved_memory_context"
+    for artifact in reversed(model.artifacts):
+        if artifact.name == artifact_name:
+            return RetrievedMemoryContext.model_validate_json(
+                Path(artifact.path).read_text(encoding="utf-8")
+            )
+    return None
+
+
+def _agent_memory_output_dir(
+    model: TFMStateModel,
+    agent_name: str,
+    memory_config: PipelineMemoryConfig,
+) -> Path:
+    return (
+        Path(memory_config.output_root)
+        / model.project_context.dataset
+        / model.run_id
+        / "agent_memory"
+        / agent_name
     )
 
 

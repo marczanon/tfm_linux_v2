@@ -85,19 +85,6 @@ def decide_supervisor_action_deterministic(state: TFMStateModel) -> SupervisorDe
             stop_reason=_last_error_message(state) or "failed",
             confidence=1.0,
         )
-    if (
-        state.current_stage == "evaluation"
-        and state.evaluation is not None
-        and state.evaluation.next_action != "continue"
-    ):
-        return _terminal_decision(
-            state,
-            decision_id,
-            next_stage="failed",
-            rationale="Evaluation agent rejected the run.",
-            stop_reason=state.evaluation.summary,
-            confidence=1.0,
-        )
     if state.current_stage == "reporting" and state.report_path is not None:
         return _terminal_decision(
             state,
@@ -236,15 +223,6 @@ def _allowed_transition_text(state: TFMStateModel) -> str:
             f"Decision terminal obligatoria: next_stage='{state.current_stage}', "
             "next_node=null y stop_reason no nulo."
         )
-    if (
-        state.current_stage == "evaluation"
-        and state.evaluation is not None
-        and state.evaluation.next_action != "continue"
-    ):
-        return (
-            "Decision terminal obligatoria: next_stage='failed', "
-            "next_node=null y stop_reason no nulo porque la evaluacion rechazo la ejecucion."
-        )
     if state.current_stage == "reporting" and state.report_path is not None:
         return (
             "Decision terminal obligatoria: next_stage='completed', "
@@ -278,14 +256,6 @@ def _validate_supervisor_decision_bounds(
     if state.current_stage in {"completed", "failed"}:
         if decision.next_stage != state.current_stage or decision.next_node is not None:
             raise ValueError("terminal stage must remain terminal")
-        return
-    if (
-        state.current_stage == "evaluation"
-        and state.evaluation is not None
-        and state.evaluation.next_action != "continue"
-    ):
-        if decision.next_stage != "failed" or decision.next_node is not None:
-            raise ValueError("rejected evaluation must route to failed")
         return
     if state.current_stage == "reporting" and state.report_path is not None:
         if decision.next_stage != "completed" or decision.next_node is not None:
@@ -330,9 +300,7 @@ def _plan_for_state(state: TFMStateModel) -> tuple[str, str, list[str]] | None:
             return ("evaluation", "evaluator", ["predictions_artifact"])
         if state.evaluation is None:
             return ("evaluation", "evaluation_agent", ["metrics"])
-        if state.evaluation.next_action == "continue":
-            return ("reporting", "report_writer", ["evaluation"])
-        return None
+        return ("reporting", "report_writer", ["evaluation"])
     if state.current_stage == "reporting":
         if state.report_path is None:
             return ("reporting", "report_writer", ["evaluation"])

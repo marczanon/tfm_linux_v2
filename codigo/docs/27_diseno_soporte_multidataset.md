@@ -4,8 +4,9 @@
 
 Definir la frontera tecnica para que el pipeline deje de estar acoplado a CWRU
 sin perder reproducibilidad, trazabilidad ni seguridad. Este documento es el
-primer paso operativo de la Fase 3 y debe leerse antes de modificar
-`dataset_manifest.py`, `data_profiler.py`, `cleaning.py` o `structuring.py`.
+primer paso operativo historico de la Fase 3 y sigue siendo referencia en Fase
+4 antes de modificar `dataset_manifest.py`, `data_profiler.py`, `cleaning.py`,
+`structuring.py`, el runner comun o la API de ejecucion.
 
 Estado inicial: implementados los contratos comunes `DatasetDescriptor`,
 `DatasetAdapterInfo` y `CommonManifestRecord`, junto con el registro local
@@ -483,3 +484,330 @@ definir particion temporal y politica de etiquetas defendibles.
 El siguiente paso tecnico sera ejecutar y persistir, sobre CWRU, al menos dos
 configuraciones de ventana propuestas por este expediente para comprobar que son
 comparables antes de generalizar el flujo.
+
+## Decision de Fase 4: runner comun para API e interfaz
+
+Tras extender la memoria agentica a varios agentes, se ha fijado la forma de
+ejecucion que debera usar una futura API o interfaz grafica. La decision es no
+crear una aplicacion separada por dataset. Se mantiene un runner comun que
+recibe una peticion explicita, resuelve el adaptador y aplica una politica de
+capacidades antes de ejecutar.
+
+Implementacion inicial:
+
+```text
+codigo/app/schemas/pipeline_run.py
+codigo/app/services/pipeline_runner.py
+codigo/scripts/run_dataset_pipeline_with_memory.py
+codigo/tests/test_pipeline_runner.py
+```
+
+Contratos principales:
+
+```text
+PipelineRunRequest
+DatasetRunPolicy
+DatasetCapabilityRule
+DatasetPipelinePaths
+DatasetPipelinePlan
+```
+
+La futura interfaz podra usar este flujo:
+
+```text
+seleccion de dataset/adaptador/ruta
+-> PipelineRunRequest
+-> plan_dataset_pipeline_run(...)
+-> mostrar descriptor, capacidades y bloqueos
+-> ejecutar solo si can_execute_requested_stages=true
+```
+
+Reglas adoptadas:
+
+- el usuario o la UI seleccionan `dataset_id` y opcionalmente `adapter_id`;
+- la inferencia de adaptador solo se usa cuando no hay ambiguedad;
+- si `adapter_id` y `dataset_id` no coinciden, la planificacion falla antes de
+  ejecutar;
+- las rutas se derivan de forma canonica por `dataset_id/run_id`;
+- CWRU permite el pipeline supervisado completo;
+- NASA IMS real permite manifiesto, perfilado, limpieza y estructuracion, pero
+  bloquea modelado y evaluacion supervisados hasta tener politica temporal y
+  etiquetas defendibles;
+- NASA IMS puede habilitar una ejecucion completa si la peticion declara una
+  politica temporal versionada, empezando por `nasa_ims_temporal_v1`;
+- NASA IMS sintetico o controlado puede habilitar modelado supervisado solo si
+  la peticion declara `allow_synthetic_labels=true`;
+- los scripts especificos por dataset quedan como atajos reproducibles de
+  experimentos concretos, no como arquitectura principal.
+
+Ejemplos de planificacion:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id cwru_bearing \
+  --adapter-id cwru_bearing \
+  --raw-path codigo/data/raw/cwru_bearing/mat \
+  --run-id plan-cwru-smoke \
+  --plan-only
+```
+
+Resultado esperado: `can_execute_requested_stages=true`.
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id plan-nasa-full-smoke \
+  --plan-only
+```
+
+Resultado esperado: `can_execute_requested_stages=false`, con bloqueos en
+`modeling` y `evaluation`.
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id plan-nasa-diagnostic-smoke \
+  --execution-mode diagnostic \
+  --plan-only
+```
+
+Resultado esperado: `can_execute_requested_stages=true`, limitado a manifiesto,
+perfilado, limpieza y estructuracion.
+
+Con esto, la seleccion futura desde interfaz no llamara directamente a scripts
+`cwru_*` o `nasa_*`, sino a la misma logica de planificacion. Los scripts por
+dataset permanecen para reproducir runs canonicas ya documentadas.
+
+## Validacion del runner comun
+
+Se ha ejecutado una validacion importante para comprobar que la nueva capa
+multi-dataset no rompe el benchmark CWRU ni salta los guardarrailes NASA IMS.
+
+### CWRU completo con runner comun
+
+Comando:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id cwru_bearing \
+  --adapter-id cwru_bearing \
+  --raw-path codigo/data/raw/cwru_bearing/mat \
+  --run-id cwru-runner-common-validation-fase4-001
+```
+
+Resultado:
+
+- `final_stage`: `completed`;
+- `approved`: `true`;
+- errores: `0`;
+- snapshot:
+  `codigo/reports/runs/cwru-runner-common-validation-fase4-001`;
+- informe:
+  `codigo/reports/cwru_bearing/cwru-runner-common-validation-fase4-001/final_report.md`.
+
+Metricas:
+
+```text
+precision = 0.9991497803599263
+recall = 1.0
+f1_score = 0.9995747093847462
+false_positive_rate = 0.05128205128205128
+```
+
+Estas metricas coinciden exactamente con:
+
+```text
+cwru-memory-transversal-fase4-001
+cwru_iforest_threshold_v1_baseline_threshold_099
+```
+
+Interpretacion: el runner comun reproduce el comportamiento CWRU conocido y no
+altera el benchmark de regresion.
+
+### NASA IMS diagnostic con runner comun
+
+Comando:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id nasa-runner-common-diagnostic-fase4-001 \
+  --execution-mode diagnostic
+```
+
+Resultado:
+
+- `final_stage`: `completed`;
+- metricas: `null`;
+- evaluacion: `null`;
+- errores: `0`;
+- artefactos generados: `manifest`, `profile`, `clean_signals`, `log`,
+  `features`, `tensors`, `splits`;
+- mensajes de herramienta ejecutados: `dataset_manifest`, `data_profiler`,
+  `cleaning`, `structuring`.
+
+Interpretacion: el modo `diagnostic` ejecuta solo las fases permitidas para
+NASA IMS real/preextraido y se detiene antes de modelado supervisado.
+
+### NASA IMS full sin politica sigue bloqueado
+
+Comando:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id nasa-runner-common-full-block-check-fase4-001 \
+  --plan-only
+```
+
+Resultado:
+
+- `can_execute_requested_stages=false`;
+- bloqueo en `modeling`;
+- bloqueo en `evaluation`;
+- motivo: NASA IMS real requiere declarar una politica temporal versionada o
+  etiquetas sinteticas/controladas antes de evaluacion supervisada.
+
+### NASA IMS full con politica temporal v1
+
+Se ha incorporado la primera politica temporal versionada:
+
+```text
+codigo/docs/33_politica_temporal_nasa_ims.md
+codigo/app/services/nasa_ims_temporal_policy.py
+```
+
+La peticion declara:
+
+```text
+dataset_policy_id = "nasa_ims_temporal_v1"
+```
+
+Con esta politica, el runner genera primero el manifiesto NASA IMS comun y
+despues escribe un manifiesto derivado:
+
+```text
+manifest_temporal_policy_v1.csv
+```
+
+La politica ordena cada `run_id` cronologicamente, etiqueta el tramo inicial
+como `normal`, el tramo posterior como `degradation` y anade en
+`metadata_json`:
+
+```text
+dataset_policy_id
+label_source = "temporal_proxy_v1"
+official_nasa_labels = false
+split_hint
+split_source
+temporal_order_index
+temporal_phase
+```
+
+El ejecutor de estructuracion lee `split_hint` desde los `.npz` limpios y usa
+la estrategia `metadata_json_split_hint` cuando todos los registros la declaran.
+Si no hay hints, CWRU y los flujos existentes conservan la estrategia anterior.
+
+Comando validado:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id nasa-runner-temporal-policy-v1-completed-low-metrics-002 \
+  --dataset-policy-id nasa_ims_temporal_v1
+```
+
+Resultado:
+
+- `can_execute_requested_stages=true`;
+- el pipeline alcanza modelado y evaluacion;
+- `final_stage=completed`;
+- `approved=false`;
+- informe final generado en
+  `codigo/reports/nasa_ims_bearing/nasa-runner-temporal-policy-v1-completed-low-metrics-002/final_report.md`;
+- manifiesto temporal: 2 registros `normal` y 1 `degradation`;
+- splits: 1 registro normal a `train`, 1 normal a `test`, 1 degradacion a
+  `test`;
+- ventanas: 3 `train` normales y 6 `test`;
+- metricas de test: precision 0.5000, recall 1.0000, F1 0.6667, FPR 1.0000.
+
+Interpretacion: la politica v1 desbloquea ejecucion completa auditable sobre
+NASA IMS, pero no aprueba automaticamente el resultado. Una run con metricas
+bajas queda completada y trazada con `approved=false`, no marcada como fallo de
+infraestructura. Las metricas son proxy metodologicas y deben citar la politica
+temporal usada.
+
+Conclusion: la logica comun queda lista como base para preflight de API/UI. El
+paso siguiente sera decidir si se ajusta el protocolo/modelo NASA para reducir
+FPR o si se expone primero esta planificacion desde un endpoint de aplicacion,
+sin introducir todavia interfaz grafica.
+
+## API controlada inicial
+
+El preflight multi-dataset ya se ha expuesto en la API mediante:
+
+```text
+POST /runs
+```
+
+La solicitud usa `ApiRunRequest`, que extiende `PipelineRunRequest` con
+`dry_run`. El valor por defecto es `dry_run=true`, por lo que una futura UI
+puede pedir el plan, mostrar descriptor, rutas, capacidades y bloqueos, y solo
+despues lanzar la ejecucion enviando `dry_run=false`.
+
+Guardarrailes de esta version:
+
+- `raw_path` debe estar dentro de raices permitidas por `create_app`;
+- por defecto solo se permite `codigo/data/raw`;
+- si la politica multi-dataset bloquea fases, la ejecucion responde `409`;
+- `use_llm=true` y memoria RAG quedan fuera de la ejecucion API inicial;
+- Human Review usa los contratos existentes `HumanReviewSettings` y
+  `HumanApproval`;
+- en modo `passive` se devuelven razones sin bloquear; en modo `required`, la
+  ejecucion necesita `human_approval.approved=true`;
+- `background=true` acepta la ejecucion como job local en memoria, observable
+  mediante `GET /run-jobs/{job_id}`;
+- `run_id` no se sobrescribe desde API;
+- los snapshots se guardan en el mismo `codigo/reports/runs/` que los scripts.
+
+Documento especifico:
+
+```text
+codigo/docs/34_api_ejecucion_controlada_fase4.md
+```
+
+## Regla transversal de reutilizacion
+
+El soporte multi-dataset y la futura interfaz deben seguir el protocolo de
+reutilizacion definido en:
+
+```text
+codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md
+```
+
+Implicaciones directas para este diseno:
+
+- no crear un runner nuevo por dataset si `pipeline_runner.py` puede planificar o
+  ejecutar la misma capacidad;
+- no duplicar contratos de solicitud si `PipelineRunRequest` o `ApiRunRequest`
+  ya expresan el concepto;
+- no meter logica de politica temporal en la API si pertenece a
+  `nasa_ims_temporal_policy.py`;
+- no crear otra puerta de revision humana si `human_review.py`,
+  `HumanReviewSettings` y `HumanApproval` ya cubren el caso;
+- antes de anadir endpoints nuevos, revisar si deben delegar en
+  `run_registry.py`, `run_persistence.py` o `pipeline_runner.py`.
+
+La decision por defecto sera adaptar o extender la pieza canonica existente. Una
+pieza nueva solo se justificara si evita mezclar responsabilidades o si no hay
+frontera clara donde colocar la capacidad.

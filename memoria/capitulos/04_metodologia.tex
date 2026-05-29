@@ -117,6 +117,25 @@ inseguro o insuficiente. Esta etiqueta no modifica las metricas; se conserva
 como memoria supervisada para futuros prompts, RAG local o filtrado de
 comportamientos erroneos repetidos.
 
+\section{Control de reutilización técnica}
+
+Para evitar que la ampliación incremental genere contratos, scripts o servicios
+duplicados, se adopta una regla metodológica adicional: antes de implementar una
+nueva capacidad debe realizarse un inventario explícito de piezas existentes. El
+proceso consiste en describir la capacidad buscada, buscar en código,
+documentación y tests, identificar el propietario canónico de esa
+responsabilidad y decidir si se reutiliza, adapta, extiende o crea una pieza
+nueva.
+
+Esta regla es especialmente relevante a partir de la Fase 4, donde conviven
+runners multi-dataset, memoria agentica, API, revisión humana y políticas
+temporales por dataset. El objetivo no es frenar el desarrollo, sino preservar
+la trazabilidad arquitectónica: una capacidad debe vivir en una frontera clara y
+ser consumida por CLI, API o futura interfaz sin duplicar lógica. Por ejemplo,
+la API no debe reimplementar la planificación multi-dataset, sino delegar en el
+runner común; del mismo modo, la revisión humana debe reutilizar los contratos
+existentes de configuración y aprobación.
+
 \section{Manifiesto del dataset}
 
 El primer artefacto metodológico será un manifiesto con una fila por fichero

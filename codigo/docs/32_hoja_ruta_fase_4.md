@@ -1,6 +1,7 @@
 # Hoja de ruta Fase 4
 
 Fecha de inicio propuesta: 2026-05-27.
+Fecha de cierre operativo: 2026-05-29.
 
 ## Nombre de la fase
 
@@ -23,6 +24,32 @@ La Fase 3 deja cerrada una base multiagente local defendible:
 
 La Fase 4 debe convertir esa evidencia acumulada en memoria operacional para
 los agentes, sin caer en fine-tuning prematuro ni en reglas hardcodeadas.
+
+## Cierre operativo
+
+La Fase 4 queda cerrada como fase de infraestructura agentica supervisada. Sus
+resultados principales son:
+
+- memoria vectorial local por agente;
+- indexacion de post-mortems, revisiones y episodios de decision;
+- recuperacion RAG para modelador, estructurador y evaluador;
+- auditoria de uso de memoria;
+- runner comun multi-dataset;
+- politica temporal NASA IMS versionada;
+- `POST /runs` controlado;
+- jobs API locales en memoria;
+- Human Review inicial `off/passive/required`;
+- protocolo anti-duplicacion obligatorio.
+
+La guia operativa activa pasa a ser:
+
+```text
+codigo/docs/36_hoja_ruta_fase_5_aplicacion.md
+```
+
+Esta hoja queda como referencia historica y tecnica de la Fase 4. Las nuevas
+decisiones de aplicacion, backend/frontend e interfaz deben documentarse en la
+hoja de ruta de Fase 5.
 
 ## Objetivo de la Fase 4
 
@@ -82,6 +109,29 @@ agente, el tipo de decision y el dataset.
   inseguros y casos que requieren mas evidencia.
 - Los tests automatizados deben poder ejecutarse con Human-in-the-loop apagado.
 - La redaccion academica debe actualizarse en paralelo a cada hito canonico.
+- Antes de implementar una pieza nueva debe hacerse inventario previo de codigo,
+  contratos, scripts, tests y documentacion existentes.
+
+## Protocolo anti-duplicacion
+
+A partir de este punto de Fase 4, ninguna ampliacion tecnica debe empezar
+creando codigo directamente. Primero se aplicara el protocolo descrito en:
+
+```text
+codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md
+```
+
+La regla operativa es:
+
+```text
+buscar -> identificar propietario canonico -> reutilizar/adaptar/extender -> crear solo si no existe frontera adecuada
+```
+
+Esto afecta especialmente a API, runners, contratos Pydantic, Human Review,
+memoria RAG y scripts de ejecucion. Si una pieza historica tiene un nombre
+especifico, por ejemplo CWRU, no se crea automaticamente otra paralela: primero
+se evalua si debe mantenerse como wrapper especifico, si conviene generalizarla
+o si ya existe una capa comun como `pipeline_runner.py`.
 
 ## Human-in-the-loop conmutable
 
@@ -206,6 +256,18 @@ Criterio de aceptacion:
 - existe un test de modo `required` con revision simulada;
 - la memoria solo incluye casos aprobados para reutilizacion.
 
+Estado inicial implementado:
+
+- la API reutiliza `HumanReviewSettings` y `HumanApproval`;
+- la logica queda centralizada en `codigo/app/services/human_review.py`;
+- `passive` devuelve razones de revision sin bloquear la ejecucion;
+- `required` bloquea ejecucion API si no llega `human_approval.approved=true`;
+- una aprobacion simulada se pasa al estado inicial y se persiste en el snapshot;
+- Human-in-the-loop sigue apagado por defecto.
+
+Interpretacion: el hito queda iniciado de forma pequena y coherente con la API,
+sin modificar todavia el supervisor LangGraph ni introducir colas de aprobacion.
+
 ## Hito 5: Agente investigador con RAG local
 
 Objetivo: resolver dudas de otros agentes usando evidencia, no navegacion libre.
@@ -264,6 +326,33 @@ Criterio de aceptacion:
 - ninguna metrica supervisada se presenta sin explicar la politica temporal;
 - los agentes reciben la limitacion como contexto, no como verdad escondida.
 
+Estado inicial implementado:
+
+- se ha creado `codigo/docs/33_politica_temporal_nasa_ims.md`;
+- se ha definido `dataset_policy_id = "nasa_ims_temporal_v1"`;
+- el runner comun bloquea NASA IMS completo si no se declara politica temporal
+  o etiquetas sinteticas/controladas;
+- con `nasa_ims_temporal_v1`, el manifiesto NASA IMS se deriva a
+  `manifest_temporal_policy_v1.csv`;
+- las etiquetas quedan marcadas como `temporal_proxy_v1` y
+  `official_nasa_labels=false`;
+- la estructuracion respeta `split_hint` desde `metadata_json` cuando todos los
+  registros lo declaran;
+- la ejecucion
+  `nasa-runner-temporal-policy-v1-completed-low-metrics-002` alcanzo modelado,
+  evaluacion e informe final; termino como `completed` con `approved=false`
+  por FPR 1.0000.
+
+Interpretacion: el hito queda abierto. La infraestructura y la trazabilidad ya
+permiten ejecuciones completas NASA IMS con politica declarada, pero falta
+mejorar o justificar el protocolo experimental antes de tratar esas metricas
+como evidencia principal.
+
+Decision operativa anadida: una evaluacion con metricas bajas no se considera
+fallo tecnico del pipeline. El supervisor debe completar la run y generar
+informe con `approved=false`; `failed` queda reservado para errores de
+infraestructura, contratos o artefactos.
+
 ## Hito 8: API controlada de ejecucion
 
 Objetivo: abrir `POST /runs` sin romper seguridad ni reproducibilidad.
@@ -282,6 +371,26 @@ Criterio de aceptacion:
 - Human-in-the-loop esta apagado por defecto;
 - las ejecuciones costosas pueden requerir revision;
 - los runs generados por API quedan en el mismo registro local.
+
+Estado inicial implementado:
+
+- se ha creado `ApiRunRequest` y `ApiRunResponse`;
+- `POST /runs` reutiliza `PipelineRunRequest` y `DatasetPipelinePlan`;
+- `dry_run=true` por defecto devuelve solo el plan;
+- con `dry_run=false`, la API ejecuta el runner comun si la politica lo permite;
+- `raw_path` se limita a raices permitidas (`codigo/data/raw` por defecto);
+- `use_llm=true` y memoria RAG quedan bloqueados en ejecucion API inicial;
+- un `run_id` existente responde `409` para evitar sobrescrituras;
+- las ejecuciones API persistidas aparecen en el mismo registro local que los
+  scripts;
+- Human Review `off/passive/required` queda integrado en la puerta de ejecucion
+  de la API usando los contratos existentes;
+- `background=true` permite aceptar ejecuciones como jobs locales observables
+  sin crear un runner paralelo.
+
+Interpretacion: el hito queda iniciado, no cerrado. Falta integrar
+cola persistida, cancelacion y una politica de ejecucion con LLM/memoria antes
+de usar la API como interfaz completa.
 
 ## Hito 9: Campana experimental con memoria
 
@@ -1360,7 +1469,7 @@ memoria de proceso. A partir de ahora el sistema puede almacenar, por ejemplo:
 Por tanto, la memoria empieza a representar aprendizaje operacional de todo el
 pipeline, no solo ajustes de hiperparametros del modelador.
 
-Siguiente paso natural:
+El paso inmediato derivaba en:
 
 - conectar estos episodios transversales a una ejecucion completa sin forzar
   errores;
@@ -1369,3 +1478,432 @@ Siguiente paso natural:
   revision humana;
 - observar si, tras varias runs normales, estructurador y evaluador empiezan a
   citar experiencias previas de forma util y trazable.
+
+## Avance de conexion transversal al grafo completo
+
+Se ha implementado la conexion opcional de memoria transversal en el grafo
+CWRU completo, sin cambiar el comportamiento por defecto del pipeline.
+
+Cambios introducidos:
+
+- `PipelineMemoryConfig` permite activar memoria RAG en el grafo mediante un
+  `VectorMemoryStore`, con `top_k`, similitud minima y directorio de salida;
+- el estructurador recupera memoria propia antes de decidir cuando la memoria
+  esta activada;
+- el evaluador recupera memoria propia antes de emitir juicio cuando la memoria
+  esta activada;
+- el contexto recuperado se persiste como:
+
+```text
+codigo/reports/<dataset>/<run_id>/agent_memory/<agent>/retrieved_memory_context.json
+```
+
+- tras ejecutar la estructuracion se generan `decision_episode.json` y
+  `memory_candidate.json` para `structurer_memory`;
+- tras la decision del evaluador se generan los mismos artefactos para
+  `evaluator_memory`;
+- Human-in-the-loop sigue apagado por defecto y la memoria continua siendo
+  opcional.
+
+La integracion esta en:
+
+```text
+codigo/app/graph/pipeline.py
+codigo/tests/test_graph_pipeline.py
+```
+
+La prueba nueva valida una ejecucion completa con memoria simulada en la que:
+
+- el estructurador recibe y cita un recuerdo recuperado;
+- el evaluador recibe y cita un recuerdo recuperado;
+- se escriben los contextos RAG recuperados;
+- se escriben candidatos indexables para `structurer_memory` y
+  `evaluator_memory`;
+- el pipeline sigue completando la ejecucion sin Human-in-the-loop.
+
+Estado de verificacion de este hito: `217` tests pasan correctamente.
+
+A partir de esta ejecucion quedaban tres tareas inmediatas:
+
+- ejecutar una run normal con memoria transversal activada usando el indice
+  local real;
+- reconstruir el indice con los nuevos `memory_candidate.json`;
+- comprobar que aparecen colecciones `structurer_memory` y `evaluator_memory`;
+- observar si nuevas runs empiezan a recuperar y citar esos recuerdos de forma
+  util, sin convertir la memoria en mecanismo de aprobacion.
+
+## Ejecucion canonica con memoria transversal
+
+Se ha creado un script canonico para ejecutar el pipeline CWRU completo con
+memoria RAG transversal:
+
+```text
+codigo/scripts/run_cwru_pipeline_with_memory.py
+```
+
+Este script es deliberadamente especifico de CWRU. No selecciona entre CWRU y
+NASA IMS ni debe usarse para runs NASA. Crea el estado con
+`create_initial_cwru_state`, usa los ejecutores CWRU por defecto y deja que el
+indexador infiera el dataset por rutas al reconstruir la memoria. Para NASA IMS
+se conservan los scripts propios de NASA y, si se necesita una entrada comun,
+debera crearse un wrapper multi-dataset explicito. Ademas, el script aborta si
+la ruta `--raw-path` parece apuntar a NASA/IMS, para evitar etiquetar una run
+NASA como CWRU por accidente.
+
+El script permite:
+
+- activar `PipelineMemoryConfig` sobre el grafo completo;
+- seleccionar proveedor de embeddings (`ollama` o `local_hash`);
+- usar agentes deterministas por defecto o agentes Qwen con `--use-llm`;
+- persistir la run mediante el registro local;
+- reconstruir el indice de memoria al finalizar con `--rebuild-index`;
+- resumir artefactos de memoria, decisiones y colecciones indexadas.
+
+Primera ejecucion canonica, sin LLM generativo, para crear memoria transversal
+inicial:
+
+```text
+python -m codigo.scripts.run_cwru_pipeline_with_memory \
+  --run-id cwru-memory-transversal-fase4-001 \
+  --rebuild-index \
+  --clear-existing \
+  --embedding-provider ollama \
+  --embedding-model qwen3-embedding:0.6b
+```
+
+Resultado:
+
+- run completada y aprobada sobre CWRU;
+- precision `0.9991`, recall `1.0000`, F1 `0.9996`, FPR `0.0513`;
+- se generaron artefactos RAG para `structurer` y `evaluator`;
+- el indice reconstruido quedo con:
+  - `modeler_memory`: `16`;
+  - `structurer_memory`: `1`;
+  - `evaluator_memory`: `1`.
+
+Segunda ejecucion, con Qwen activado, para comprobar si los agentes recuperan y
+citan memoria transversal real:
+
+```text
+python -m codigo.scripts.run_cwru_pipeline_with_memory \
+  --run-id cwru-memory-transversal-fase4-002-llm \
+  --use-llm \
+  --model qwen3.5:4b \
+  --rebuild-index \
+  --clear-existing \
+  --embedding-provider ollama \
+  --embedding-model qwen3-embedding:0.6b
+```
+
+Resultado:
+
+- run completada y aprobada sobre CWRU;
+- el estructurador declaro `used_memory_context=true`;
+- el evaluador declaro `used_memory_context=true`;
+- ambos citaron recuerdos recuperados de la run
+  `cwru-memory-transversal-fase4-001`;
+- el indice reconstruido quedo con:
+  - `modeler_memory`: `16`;
+  - `structurer_memory`: `2`;
+  - `evaluator_memory`: `2`;
+  - total: `20` registros.
+
+Interpretacion:
+
+Este hito confirma que la memoria de Fase 4 ya no esta limitada al modelador.
+Una run completa puede generar memoria para estructurador y evaluador, y una
+run posterior con LLM puede recuperar y citar esos recuerdos sin que la memoria
+apruebe metricas ni salte validaciones. La memoria actua como contexto
+trazable, no como ejecutor ni autoridad de aprobacion.
+
+A partir de esta ejecucion quedaban tres tareas inmediatas:
+
+- auditar cualitativamente las dos nuevas decisiones con memoria transversal;
+- decidir si los candidatos de `structurer_memory` y `evaluator_memory`
+  requieren revision humana antes de consolidarse como evidencia principal;
+- preparar una comparacion breve con y sin memoria transversal en CWRU o NASA
+  sintetico, centrada en uso de memoria y no solo en metricas.
+
+## Auditoria cualitativa de memoria transversal
+
+Se ha implementado y ejecutado el siguiente paso natural: una auditoria
+especifica para decisiones de `structurer` y `evaluator` que usan memoria
+transversal.
+
+Implementacion:
+
+```text
+codigo/app/services/transversal_memory_audit.py
+codigo/scripts/audit_transversal_memory_run.py
+codigo/tests/test_transversal_memory_audit.py
+```
+
+La auditoria comprueba:
+
+- que los recuerdos citados por el agente aparecian en el contexto recuperado;
+- que cada recuerdo citado tiene una declaracion `memory_record_uses`;
+- que los recuerdos recuperados corresponden al agente y dataset esperados;
+- que el evaluador no aprueba por memoria, sino por metricas actuales;
+- si el candidato resultante puede reutilizarse como contexto;
+- si requiere revision humana antes de tratarse como evidencia academica
+  principal.
+
+Comando ejecutado sobre la run Qwen:
+
+```text
+python -m codigo.scripts.audit_transversal_memory_run \
+  --run-id cwru-memory-transversal-fase4-002-llm
+```
+
+Artefactos generados:
+
+```text
+codigo/reports/cwru_bearing/cwru-memory-transversal-fase4-002-llm/agent_memory/audit/transversal_memory_audit.json
+codigo/reports/cwru_bearing/cwru-memory-transversal-fase4-002-llm/agent_memory/audit/transversal_memory_audit.md
+```
+
+Resultado:
+
+- resultado global: `memory_aligned`;
+- `structurer`: cito el recuerdo recuperado de la run
+  `cwru-memory-transversal-fase4-001` y declaro uso `adapted`;
+- `evaluator`: cito el recuerdo recuperado de la run
+  `cwru-memory-transversal-fase4-001` y declaro uso `adapted`;
+- el evaluador quedo respaldado por metricas actuales: recall `1.0000` y FPR
+  `0.0513`, con umbrales `0.9000` y `0.1000`;
+- los candidatos pueden reutilizarse como contexto, pero requieren revision
+  humana antes de presentarse como evidencia principal.
+
+Estado de verificacion:
+
+- `python -m py_compile codigo/scripts/run_cwru_pipeline_with_memory.py codigo/scripts/audit_transversal_memory_run.py codigo/app/services/transversal_memory_audit.py`;
+- `python -m unittest codigo.tests.test_transversal_memory_audit`;
+- `python -m unittest codigo.tests.test_transversal_memory_audit codigo.tests.test_graph_pipeline`;
+- `python -m unittest discover codigo/tests`: `226` tests correctos.
+
+Siguiente paso natural:
+
+- decidir si se crea una revision humana ligera para estos dos candidatos
+  CWRU, o si se mantienen como contexto no principal;
+- preparar una comparacion breve con y sin memoria transversal, dejando claro
+  que en CWRU el valor esperado es trazabilidad de decisiones, no mejora
+  metrica.
+
+## Planificacion comun multi-dataset para futuras interfaces
+
+Tras revisar `codigo/docs/27_diseno_soporte_multidataset.md`, se ha corregido
+la direccion operativa: el script CWRU con memoria queda como atajo canonico de
+experimento, pero la arquitectura para API/interfaz debe ser un runner comun
+que planifica y valida datasets de forma explicita.
+
+Implementacion inicial:
+
+```text
+codigo/app/schemas/pipeline_run.py
+codigo/app/services/pipeline_runner.py
+codigo/scripts/run_dataset_pipeline_with_memory.py
+codigo/tests/test_pipeline_runner.py
+```
+
+La nueva capa introduce:
+
+- `PipelineRunRequest`, contrato que puede construir una CLI, API o UI;
+- `DatasetRunPolicy`, politica de capacidades por dataset;
+- `DatasetCapabilityRule`, con estados `allowed`, `blocked` o
+  `not_supported`;
+- `DatasetPipelinePlan`, plan auditable antes de ejecutar;
+- rutas canonicas por `dataset_id/run_id`;
+- alias neutrales del grafo (`run_pipeline`, `run_and_persist_pipeline`) sin
+  eliminar los nombres historicos CWRU.
+
+Comportamiento validado:
+
+- CWRU con `adapter_id=cwru_bearing` permite manifiesto, perfilado, limpieza,
+  estructuracion, modelado, evaluacion, reporting y memoria;
+- NASA IMS real/preextraido permite modo `diagnostic` hasta estructuracion;
+- NASA IMS en modo `full` bloquea `modeling` y `evaluation` si no se declara
+  `allow_synthetic_labels=true`;
+- un `adapter_id` que no coincide con `dataset_id` falla antes de ejecutar;
+- el runner comun puede mostrar el plan con `--plan-only`, que es el mismo
+  patron que deberia usar una futura interfaz.
+
+Ejemplos de humo ejecutados:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id cwru_bearing \
+  --adapter-id cwru_bearing \
+  --raw-path codigo/data/raw/cwru_bearing/mat \
+  --run-id plan-cwru-smoke \
+  --plan-only
+```
+
+Resultado: `can_execute_requested_stages=true`.
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id plan-nasa-full-smoke \
+  --plan-only
+```
+
+Resultado: `can_execute_requested_stages=false`, con bloqueos en `modeling` y
+`evaluation`.
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id plan-nasa-diagnostic-smoke \
+  --execution-mode diagnostic \
+  --plan-only
+```
+
+Resultado: `can_execute_requested_stages=true`, limitado a manifiesto,
+perfilado, limpieza y estructuracion.
+
+Verificacion focalizada:
+
+- `python -m py_compile codigo/scripts/run_dataset_pipeline_with_memory.py codigo/app/services/pipeline_runner.py codigo/app/schemas/pipeline_run.py`;
+- `python -m unittest codigo.tests.test_pipeline_runner`.
+- `python -m unittest discover codigo/tests`: `226` tests correctos.
+
+Siguiente paso natural:
+
+- conectar el endpoint `POST /runs` o un endpoint de preflight a
+  `plan_dataset_pipeline_run(...)`;
+- mantener los scripts `cwru_*` y `nasa_*` como reproduccion de experimentos,
+  pero hacer que la app use el runner comun.
+
+## Validacion del runner comun
+
+Se ha ejecutado la validacion de no regresion antes de avanzar hacia API/UI.
+
+Run CWRU completa:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id cwru_bearing \
+  --adapter-id cwru_bearing \
+  --raw-path codigo/data/raw/cwru_bearing/mat \
+  --run-id cwru-runner-common-validation-fase4-001
+```
+
+Resultado:
+
+- `completed`, aprobada, sin errores;
+- precision `0.9991497803599263`;
+- recall `1.0`;
+- F1 `0.9995747093847462`;
+- FPR `0.05128205128205128`;
+- metricas identicas a `cwru-memory-transversal-fase4-001` y
+  `cwru_iforest_threshold_v1_baseline_threshold_099`.
+
+Run NASA IMS diagnostic:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id nasa-runner-common-diagnostic-fase4-001 \
+  --execution-mode diagnostic
+```
+
+Resultado:
+
+- `completed`, sin errores;
+- metricas `null` y evaluacion `null`;
+- solo ejecuto `dataset_manifest`, `data_profiler`, `cleaning` y
+  `structuring`;
+- artefactos: manifiesto, perfil, senales limpias, log, features, tensores y
+  splits;
+- no genero modelo, predicciones ni metricas.
+
+Plan NASA IMS full:
+
+```text
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id nasa-runner-common-full-block-check-fase4-001 \
+  --plan-only
+```
+
+Resultado:
+
+- `can_execute_requested_stages=false`;
+- bloqueos declarados en `modeling` y `evaluation`.
+
+Conclusion:
+
+El runner comun queda validado como base de seleccion multi-dataset: no cambia
+CWRU, permite diagnostico NASA y bloquea evaluacion supervisada NASA sin
+politica temporal. A partir de esta base se pudo crear una operacion de
+preflight consultable por API antes de abrir ejecuciones remotas completas.
+
+## API controlada y Human Review inicial
+
+Se ha implementado el siguiente paso logico sobre el runner comun: una primera
+operacion `POST /runs` para planificar y, si se solicita explicitamente, ejecutar
+una run desde API con guardarrailes.
+
+Implementacion:
+
+```text
+codigo/app/schemas/api_runs.py
+codigo/app/services/api_run_jobs.py
+codigo/app/services/human_review.py
+codigo/app/api/app.py
+codigo/app/api/routes.py
+codigo/tests/test_api_runs.py
+codigo/docs/34_api_ejecucion_controlada_fase4.md
+```
+
+La API reutiliza contratos existentes en lugar de duplicar logica:
+
+- `ApiRunRequest` extiende `PipelineRunRequest`;
+- el plan se obtiene con `plan_dataset_pipeline_run(...)`;
+- la ejecucion real usa `run_dataset_pipeline(...)`;
+- los jobs locales usan `ApiRunJobStore` y no sustituyen los snapshots;
+- Human Review reutiliza `HumanReviewSettings` y `HumanApproval`;
+- la puerta comun vive en `human_review_gate_for_plan(...)`.
+
+Comportamiento actual:
+
+- `dry_run=true` por defecto devuelve el plan y no ejecuta;
+- `raw_path` queda limitado a raices permitidas (`codigo/data/raw` por defecto);
+- un `run_id` ya existente responde `409`;
+- una politica de dataset bloqueante responde `409` si se intenta ejecutar;
+- `use_llm=true` y memoria RAG desde API siguen deshabilitados;
+- `human_review.mode=off` no interviene;
+- `human_review.mode=passive` devuelve razones y un `HumanApproval` no bloqueante;
+- `human_review.mode=required` bloquea la ejecucion salvo que llegue
+  `human_approval.approved=true`;
+- si hay aprobacion, se inserta en el estado inicial y queda persistida en el
+  snapshot de la run;
+- `background=true` con `dry_run=false` responde `202` y permite consultar
+  `GET /run-jobs/{job_id}`;
+- si el job completa, la run queda disponible en `GET /runs/{run_id}`;
+- si falla, el job queda como `failed` con detalle del error.
+
+Verificacion:
+
+```text
+python -m py_compile codigo/app/services/human_review.py codigo/app/schemas/api_runs.py codigo/app/services/pipeline_runner.py codigo/app/api/routes.py codigo/tests/test_api_runs.py
+python -m unittest codigo.tests.test_api_runs
+python -m unittest discover codigo/tests
+```
+
+Resultado actual: `241` tests correctos.
+
+Interpretacion:
+
+El hito de API queda iniciado con una frontera pequeña pero real para futura UI.
+La revision humana ya existe como gate trazable, no como cola completa de
+aprobaciones. La ejecucion en segundo plano queda cubierta de forma local e
+inicial; todavia no es una cola persistida ni soporta cancelacion.

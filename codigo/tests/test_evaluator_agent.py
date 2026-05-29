@@ -60,7 +60,7 @@ class EvaluatorAgentTests(unittest.TestCase):
         decision = decide_evaluation_action(state)
 
         self.assertFalse(decision.evaluation.approved)
-        self.assertEqual(decision.evaluation.next_action, "retry_with_new_config")
+        self.assertEqual(decision.evaluation.next_action, "continue")
         self.assertIn("umbrales", " ".join(decision.evaluation.limitations))
 
     def test_deterministic_evaluator_uses_dataset_specific_limitation(self):
@@ -165,8 +165,8 @@ class EvaluatorAgentTests(unittest.TestCase):
                 "confidence": 0.9,
                 "evaluation": {
                     "approved": False,
-                    "summary": "Rejected because recall and FPR do not satisfy the local protocol.",
-                    "next_action": "retry_with_new_config",
+                    "summary": "Completed but not approved because recall and FPR do not satisfy the local protocol.",
+                    "next_action": "continue",
                     "limitations": [
                         "Prior memory supports caution; current metrics remain insufficient."
                     ],
@@ -251,7 +251,7 @@ class EvaluatorAgentTests(unittest.TestCase):
 
         self.assertEqual(client.calls, 1)
         self.assertFalse(decision.evaluation.approved)
-        self.assertEqual(decision.evaluation.next_action, "retry_with_new_config")
+        self.assertEqual(decision.evaluation.next_action, "continue")
         self.assertIn("Fallback after LLM failure", decision.rationale)
 
     def test_invalid_llm_evaluation_decision_falls_back(self):
@@ -286,7 +286,7 @@ class EvaluatorAgentTests(unittest.TestCase):
 
         self.assertEqual(client.calls, 1)
         self.assertFalse(decision.evaluation.approved)
-        self.assertEqual(decision.evaluation.next_action, "retry_with_new_config")
+        self.assertEqual(decision.evaluation.next_action, "continue")
         self.assertLessEqual(decision.confidence, 0.7)
         self.assertIn("Fallback after LLM failure", decision.rationale)
 

@@ -110,8 +110,12 @@ def _render_section(state: TFMStateModel, section: ReportSection) -> list[str]:
 
 
 def _summary_lines(state: TFMStateModel) -> list[str]:
-    approved = None if state.evaluation is None else state.evaluation.approved
-    status = "aprobada" if approved else "pendiente o no aprobada"
+    if state.evaluation is None:
+        status = "pendiente de evaluacion"
+    elif state.evaluation.approved:
+        status = "aprobada"
+    else:
+        status = "completada, no aprobada por metricas insuficientes"
     return [
         f"La ejecucion `{state.run_id}` queda {status} para el MVP local.",
         "El flujo mantiene separados los agentes LLM y los ejecutores deterministas.",

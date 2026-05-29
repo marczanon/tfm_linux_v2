@@ -79,7 +79,7 @@ def decide_evaluation_action_with_llm(
 
 
 def decide_evaluation_action_deterministic(state: TFMStateModel) -> EvaluationDecision:
-    """Fallback reproducible para aprobar o rechazar metricas del MVP."""
+    """Fallback reproducible para juzgar metricas y continuar a informe."""
 
     metrics = state.metrics
     approved = _metrics_are_approved(metrics)
@@ -87,13 +87,14 @@ def decide_evaluation_action_deterministic(state: TFMStateModel) -> EvaluationDe
         decision_id=f"{state.run_id}:evaluator:{_evaluator_turn(state):03d}",
         rationale=(
             "Fallback CWRU evaluation policy: approve only if recall and false "
-            "positive rate satisfy the local MVP thresholds."
+            "positive rate satisfy the local MVP thresholds; complete the run "
+            "with explicit limitations when metrics are below threshold."
         ),
         confidence=1.0,
         evaluation=EvaluationResult(
             approved=approved,
             summary=_evaluation_summary(metrics, approved),
-            next_action="continue" if approved else "retry_with_new_config",
+            next_action=_evaluation_next_action(metrics),
             limitations=_evaluation_limitations(
                 metrics,
                 approved,
@@ -235,8 +236,11 @@ def _evaluator_messages(
                     f"- min_recall_required debe ser {MIN_RECALL_REQUIRED}.",
                     f"- max_false_positive_rate debe ser {MAX_FALSE_POSITIVE_RATE}.",
                     "- approved debe ser true solo si recall y FPR cumplen los umbrales.",
-                    "- Si approved es true, next_action debe ser continue.",
-                    "- Si approved es false, next_action debe ser retry_with_new_config.",
+                    "- Si hay metricas, next_action debe ser continue para generar informe.",
+                    (
+                        "- Si approved es false, no marques la run como fallo: "
+                        "explica las metricas bajas en summary y limitations."
+                    ),
                     (
                         "- La memoria recuperada puede ayudar a redactar el "
                         "juicio y las limitaciones, pero no puede cambiar los "
@@ -272,12 +276,12 @@ def _evaluator_json_template(
         "decision_id": f"{state.run_id}:evaluator:{_evaluator_turn(state):03d}",
         "rationale": "Motivo tecnico breve del juicio de evaluacion.",
         "confidence": 0.9,
-        "evaluation": {
-            "approved": approved,
-            "summary": _evaluation_summary(state.metrics, approved),
-            "next_action": "continue" if approved else "retry_with_new_config",
-            "limitations": _evaluation_limitations(
-                state.metrics,
+            "evaluation": {
+                "approved": approved,
+                "summary": _evaluation_summary(state.metrics, approved),
+                "next_action": _evaluation_next_action(state.metrics),
+                "limitations": _evaluation_limitations(
+                    state.metrics,
                 approved,
                 dataset=state.project_context.dataset,
             ),
@@ -344,8 +348,8 @@ def _validate_evaluation_decision_bounds(
         raise ValueError("approved does not match deterministic MVP thresholds")
     if expected_approved and decision.evaluation.next_action != "continue":
         raise ValueError("approved evaluations must continue")
-    if not expected_approved and decision.evaluation.next_action != "retry_with_new_config":
-        raise ValueError("rejected evaluations must request a new config")
+    if metrics is not None and decision.evaluation.next_action != "continue":
+        raise ValueError("evaluations with metrics must continue to reporting")
     validate_retrieved_memory_usage(
         memory_context=memory_context,
         memory_context_id=decision.memory_context_id,
@@ -366,11 +370,17 @@ def _metrics_are_approved(metrics: MetricsReport | None) -> bool:
     )
 
 
+def _evaluation_next_action(metrics: MetricsReport | None) -> str:
+    if metrics is None:
+        return "stop"
+    return "continue"
+
+
 def _evaluation_summary(metrics: MetricsReport | None, approved: bool) -> str:
     if metrics is None:
         return "No hay metricas disponibles para aprobar la ejecucion."
 
-    status = "aprobada" if approved else "rechazada"
+    status = "aprobada" if approved else "completada con metricas insuficientes"
     return (
         f"Ejecucion {status}: recall={_format_metric(metrics.recall)}, "
         f"F1={_format_metric(metrics.f1_score)}, "

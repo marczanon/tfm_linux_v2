@@ -64,6 +64,13 @@ from codigo.app.services.memory_usage_audit import (
     build_modeling_retry_memory_usage_audit,
     write_memory_usage_audit,
 )
+from codigo.app.services.transversal_memory_audit import (
+    TransversalMemoryAuditArtifacts,
+    TransversalMemoryAuditReport,
+    audit_transversal_memory_run,
+    build_transversal_memory_audit,
+    write_transversal_memory_audit,
+)
 from codigo.app.services.agent_memory import (
     memory_context_for_llm,
     memory_record_ids,
@@ -150,7 +157,11 @@ __all__ = [
     "ReasoningMemoryIndexResult",
     "SignalChannel",
     "StoredMemoryVector",
+    "TransversalMemoryAuditArtifacts",
+    "TransversalMemoryAuditReport",
     "VectorMemoryStore",
+    "audit_transversal_memory_run",
+    "build_transversal_memory_audit",
     "compare_runs",
     "collection_for_agent",
     "cwru_model_experiment_plan_from_decision",
@@ -200,4 +211,5 @@ __all__ = [
     "write_reasoning_postmortem",
     "write_decision_memory_artifacts",
     "write_memory_usage_audit",
+    "write_transversal_memory_audit",
 ]

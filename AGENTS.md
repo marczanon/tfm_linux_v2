@@ -9,13 +9,17 @@ Este repositorio corresponde a un TFM sobre una aplicacion multiagente para proc
 Documento de referencia principal:
 
 - `Documento TFM_ Arquitectura y Hoja de Ruta.pdf`
+- `codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`
+- `codigo/docs/32_hoja_ruta_fase_4.md`
+- `codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md`
 - `codigo/docs/26_hoja_ruta_fase_3.md`
 - `codigo/docs/20_hoja_ruta_fase_2.md`
 - `codigo/docs/19_estado_actual_mvp.md`
 
 `HOJA_RUTA_TFM.md` queda como referencia historica de la Fase 1. A partir del
-cierre de la Fase 2, la guia operativa para nuevas sesiones es la hoja de ruta
-de Fase 3.
+cierre operativo de la Fase 4, la guia operativa para nuevas sesiones es
+`codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`, usando Fase 4, Fase 3 y Fase 2
+como contexto historico.
 
 La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los agentes toman decisiones y generan configuraciones estructuradas. Los ejecutores Python deterministas realizan las transformaciones reales sobre los datos.
 
@@ -26,13 +30,48 @@ La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los 
 - La memoria LaTeX vive en `memoria/`.
 - Los recursos academicos, PDFs, referencias y diagramas viven en `recursos/`.
 - La memoria debe actualizarse en paralelo al desarrollo.
-- Antes de implementar una fase, revisar `codigo/docs/26_hoja_ruta_fase_3.md`
-  y, como contexto historico, `codigo/docs/20_hoja_ruta_fase_2.md`.
-- Priorizar un MVP local antes de Docker, SLURM o frontend.
+- Antes de implementar una fase, revisar
+  `codigo/docs/36_hoja_ruta_fase_5_aplicacion.md` y
+  `codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md`; usar
+  `codigo/docs/32_hoja_ruta_fase_4.md`, `codigo/docs/26_hoja_ruta_fase_3.md`
+  y `codigo/docs/20_hoja_ruta_fase_2.md` como contexto historico.
+- En Fase 5, frontend local queda dentro de alcance; Docker, SLURM y despliegue
+  cloud siguen fuera de alcance salvo decision explicita.
 - No permitir que un agente escriba y ejecute codigo arbitrario para transformar datos.
 - Las decisiones de agentes deben pasar por esquemas Pydantic o contratos JSON estrictos.
 - Los ejecutores deben ser funciones o modulos Python reproducibles y testeables.
 - Mantener trazabilidad de datos, configuraciones, metricas y artefactos.
+
+## Protocolo obligatorio de reutilizacion
+
+Antes de crear codigo nuevo, scripts, contratos, endpoints, servicios o tests, se
+debe comprobar si ya existe una pieza equivalente o ampliable. Este paso es
+obligatorio y debe hacerse antes del diseno de la solucion.
+
+Checklist minima:
+
+1. Definir en una frase la capacidad que se quiere anadir.
+2. Buscar en `codigo/app/`, `codigo/scripts/`, `codigo/tests/` y `codigo/docs/`
+   con `rg` usando nombres funcionales, sinonimos y conceptos relacionados.
+3. Identificar el modulo canonico que ya posee esa responsabilidad, si existe.
+4. Decidir explicitamente una de estas opciones:
+   - reutilizar sin cambios;
+   - adaptar una funcion o contrato existente;
+   - extender una pieza existente manteniendo compatibilidad;
+   - crear una pieza nueva solo si no hay propietario claro.
+5. Si se crea algo nuevo, documentar por que no encaja en lo existente y que
+   frontera de responsabilidad tendra para evitar solapamientos futuros.
+
+Regla practica: no se debe duplicar una funcion, contrato o script porque el
+nombre actual parezca especifico. Primero se evalua si conviene renombrar,
+envolver o generalizar la pieza existente. Ejemplos actuales:
+
+- ejecucion multi-dataset: `pipeline_runner.py`;
+- contratos de ejecucion API: `api_runs.py` extendiendo `PipelineRunRequest`;
+- revision humana: `HumanReviewSettings`, `HumanApproval` y `human_review.py`;
+- persistencia y consulta de runs: `run_persistence.py` y `run_registry.py`;
+- adaptadores de dataset y senal: `dataset_adapters.py` y `signal_adapters.py`;
+- memoria RAG: `vector_memory.py`, `agent_memory.py` y servicios asociados.
 
 ## Primer paso de implementacion
 
@@ -81,8 +120,8 @@ recursos/diagramas/
 ## Orden recomendado de desarrollo
 
 Este orden historico corresponde a la Fase 1 y se conserva como contexto del
-MVP ya construido. Para trabajo nuevo, seguir la Fase 3 definida en
-`codigo/docs/26_hoja_ruta_fase_3.md`.
+MVP ya construido. Para trabajo nuevo, seguir la Fase 4 definida en
+`codigo/docs/32_hoja_ruta_fase_4.md`.
 
 1. Crear estructura de directorios.
 2. Crear esqueleto LaTeX de la memoria.
@@ -219,7 +258,7 @@ Prioridades de verificacion:
 - Validacion de rutas y artefactos generados.
 - Revision de que la memoria sigue separada del codigo.
 
-## Fases futuras
+## Referencias historicas de alcance
 
 No abordar dentro de la Fase 2:
 
@@ -234,7 +273,7 @@ No abordar dentro de la Fase 2:
 ## Nota operativa
 
 Antes de empezar cualquier cambio de codigo, leer este archivo y
-`codigo/docs/26_hoja_ruta_fase_3.md`, usando
-`codigo/docs/20_hoja_ruta_fase_2.md` como referencia de cierre de la fase
+`codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`, usando
+`codigo/docs/32_hoja_ruta_fase_4.md` como referencia de cierre de la fase
 anterior. El proyecto debe avanzar paso a paso, manteniendo reproducibilidad,
 trazabilidad y separacion limpia entre aplicacion y memoria academica.

@@ -220,7 +220,7 @@ def build_temporal_dataset(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    split_by_file = _assign_splits(files)
+    split_by_file, split_strategy = _assign_splits(files)
     rows, windows = _window_files(files, split_by_file, config)
     if not rows:
         raise ValueError("no windows generated; check window_size and clean signals")
@@ -230,7 +230,7 @@ def build_temporal_dataset(
     splits_path = output / "splits.json"
     _write_features(features_path, rows, config.features)
     _write_tensors(tensors_path, rows, windows)
-    splits = _split_summary(rows, split_by_file, config)
+    splits = _split_summary(rows, split_by_file, config, strategy=split_strategy)
     splits_path.write_text(json.dumps(splits, indent=2), encoding="utf-8")
 
     return {
@@ -250,6 +250,7 @@ def _load_clean_file(path: Path, config: StructuringConfig) -> dict[str, Any]:
             raise ValueError(f"{path.name} sample_rate_hz={sample_rate}, expected {config.target_sample_rate_hz}")
         if channel != config.main_channel:
             raise ValueError(f"{path.name} channel={channel}, expected {config.main_channel}")
+        metadata = _clean_metadata(data)
         return {
             "path": path,
             "signal": np.asarray(data["signal"], dtype=np.float32).ravel(),
@@ -258,12 +259,14 @@ def _load_clean_file(path: Path, config: StructuringConfig) -> dict[str, Any]:
             "fault_type": str(data["fault_type"].item() or ""),
             "sample_rate_hz": sample_rate,
             "channel": channel,
+            "split_hint": _split_hint(metadata),
         }
 
 
 def _load_clean_file_metadata(path: Path) -> dict[str, Any]:
     with np.load(path) as data:
         signal = np.asarray(data["signal"], dtype=np.float32).ravel()
+        metadata = _clean_metadata(data)
         return {
             "path": path,
             "file_id": str(data["file_id"].item()),
@@ -275,6 +278,7 @@ def _load_clean_file_metadata(path: Path) -> dict[str, Any]:
             "sample_rate_hz": int(data["sample_rate_hz"].item()),
             "channel": str(data["channel"].item()),
             "n_samples": int(signal.size),
+            "split_hint": _split_hint(metadata),
         }
 
 
@@ -299,6 +303,13 @@ def _clean_files_summary(files: list[dict[str, Any]]) -> dict[str, Any]:
                 item["condition_id"]
                 for item in files
                 if item.get("condition_id")
+            )
+        ),
+        "split_hint_counts": dict(
+            Counter(
+                item["split_hint"]
+                for item in files
+                if item.get("split_hint")
             )
         ),
         "min_samples": min(n_samples),
@@ -436,8 +447,10 @@ def _structuring_non_blocking_warnings(
         warnings.append("labels_unknown_structuring_only")
     if summary["run_counts"]:
         warnings.append("preserve_run_boundaries_to_avoid_leakage")
-    if dataset == "nasa_ims_bearing":
+    if dataset == "nasa_ims_bearing" and not summary.get("split_hint_counts"):
         warnings.append("requires_temporal_split_policy_before_modeling")
+    elif dataset == "nasa_ims_bearing":
+        warnings.append("uses_manifest_split_hints_from_temporal_policy")
     if candidate_configurations and candidate_configurations[0]["cost_level"] != "low":
         warnings.append("windowing_cost_not_low")
     return warnings
@@ -505,23 +518,55 @@ def _npz_text(data: Any, key: str, default: str) -> str:
     return value or default
 
 
-def _assign_splits(files: list[dict[str, Any]]) -> dict[str, str]:
+def _clean_metadata(data: Any) -> dict[str, Any]:
+    if "metadata_json" not in data.files:
+        return {}
+    text = str(data["metadata_json"].item() or "").strip()
+    if not text:
+        return {}
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("clean metadata_json must be a JSON object")
+    return parsed
+
+
+def _split_hint(metadata: dict[str, Any]) -> str | None:
+    value = metadata.get("split_hint")
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text not in {"train", "validation", "test"}:
+        raise ValueError(f"unsupported split_hint: {text}")
+    return text
+
+
+def _assign_splits(files: list[dict[str, Any]]) -> tuple[dict[str, str], str]:
+    hinted = {item["file_id"]: item.get("split_hint") for item in files}
+    if hinted and all(value in {"train", "validation", "test"} for value in hinted.values()):
+        return (
+            {file_id: str(split) for file_id, split in hinted.items()},
+            "metadata_json_split_hint",
+        )
+
     normal_ids = [item["file_id"] for item in files if item["label"] == "normal"]
     n_train = max(1, int(len(normal_ids) * 0.6)) if normal_ids else 0
     remaining = len(normal_ids) - n_train
     n_val = 1 if remaining > 1 else remaining
     train = set(normal_ids[:n_train])
     validation = set(normal_ids[n_train : n_train + n_val])
-    return {
-        item["file_id"]: (
-            "train"
-            if item["file_id"] in train
-            else "validation"
-            if item["file_id"] in validation
-            else "test"
-        )
-        for item in files
-    }
+    return (
+        {
+            item["file_id"]: (
+                "train"
+                if item["file_id"] in train
+                else "validation"
+                if item["file_id"] in validation
+                else "test"
+            )
+            for item in files
+        },
+        "file_level_normal_train_fault_test",
+    )
 
 
 def _window_files(
@@ -619,12 +664,14 @@ def _split_summary(
     rows: list[dict[str, Any]],
     split_by_file: dict[str, str],
     config: StructuringConfig,
+    *,
+    strategy: str,
 ) -> dict[str, Any]:
     labels_by_split: dict[str, Counter[str]] = defaultdict(Counter)
     for row in rows:
         labels_by_split[row["split"]][row["label"]] += 1
     return {
-        "strategy": "file_level_normal_train_fault_test",
+        "strategy": strategy,
         "generated_at": datetime.now(UTC).isoformat(),
         "config": config.model_dump(mode="json"),
         "files": {

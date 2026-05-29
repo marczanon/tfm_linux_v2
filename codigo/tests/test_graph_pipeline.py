@@ -4,11 +4,14 @@ import unittest
 from pathlib import Path
 
 from codigo.app.graph.pipeline import (
+    PipelineAgents,
     PipelineExecutors,
+    PipelineMemoryConfig,
     run_and_persist_cwru_pipeline,
     run_cwru_pipeline,
 )
 from codigo.app.graph.state import create_initial_cwru_state, validate_state
+from codigo.app.schemas.agent_decisions import EvaluationDecision, StructuringDecision
 from codigo.app.schemas.executor_results import (
     CleaningResult,
     EvaluationExecutorResult,
@@ -17,6 +20,12 @@ from codigo.app.schemas.executor_results import (
     ProfileResult,
     ReportExecutorResult,
     StructuringResult,
+)
+from codigo.app.schemas.reasoning import (
+    AgentMemoryQuery,
+    ReasoningMemoryRecord,
+    RetrievedMemoryContext,
+    RetrievedMemoryItem,
 )
 from codigo.app.schemas.state import ArtifactRef, PipelineError
 from codigo.app.services.run_persistence import load_run_index
@@ -120,6 +129,76 @@ class GraphPipelineTests(unittest.TestCase):
                 "report",
                 "report",
             ],
+        )
+
+    def test_memory_aware_graph_writes_structurer_and_evaluator_memory_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            calls: list[str] = []
+            paths = _paths(base)
+            executors = _successful_executors(paths, calls)
+            memory_output = base / "reports"
+            state = create_initial_cwru_state(
+                thread_id="cwru-graph-memory-test",
+                run_id="run-memory-001",
+                raw_path=str(base / "raw"),
+            )
+            agents = PipelineAgents(
+                structurer=_memory_aware_structurer,
+                evaluator=_memory_aware_evaluator,
+            )
+
+            final_state = run_cwru_pipeline(
+                state,
+                executors=executors,
+                agents=agents,
+                memory_config=PipelineMemoryConfig(
+                    memory_store=_FakeMemoryStore(),
+                    output_root=memory_output,
+                    reusable_as_context=True,
+                ),
+            )
+            validated = validate_state(final_state)
+            artifacts_by_name = {artifact.name: artifact for artifact in validated.artifacts}
+            structurer_candidate_exists = Path(
+                artifacts_by_name["structurer_memory_candidate"].path
+            ).exists()
+            evaluator_candidate_exists = Path(
+                artifacts_by_name["evaluator_memory_candidate"].path
+            ).exists()
+
+        self.assertEqual(validated.current_stage, "completed")
+        self.assertIn("structurer_retrieved_memory_context", artifacts_by_name)
+        self.assertIn("structurer_decision_episode", artifacts_by_name)
+        self.assertIn("structurer_memory_candidate", artifacts_by_name)
+        self.assertIn("evaluator_retrieved_memory_context", artifacts_by_name)
+        self.assertIn("evaluator_decision_episode", artifacts_by_name)
+        self.assertIn("evaluator_memory_candidate", artifacts_by_name)
+        self.assertTrue(structurer_candidate_exists)
+        self.assertTrue(evaluator_candidate_exists)
+        structurer_decision = json.loads(
+            [
+                message.content
+                for message in validated.messages
+                if message.role == "agent" and message.name == "structurer"
+            ][-1]
+        )
+        evaluator_decision = json.loads(
+            [
+                message.content
+                for message in validated.messages
+                if message.role == "agent" and message.name == "evaluator"
+            ][-1]
+        )
+        self.assertTrue(structurer_decision["used_memory_context"])
+        self.assertTrue(evaluator_decision["used_memory_context"])
+        self.assertEqual(
+            structurer_decision["memory_record_ids"],
+            ["memory-structurer-001"],
+        )
+        self.assertEqual(
+            evaluator_decision["memory_record_ids"],
+            ["memory-evaluator-001"],
         )
 
     def test_failed_executor_stops_graph_without_calling_later_nodes(self):
@@ -466,6 +545,118 @@ def _successful_executors(paths: dict[str, Path], calls: list[str]) -> PipelineE
         modeling=modeling,
         evaluation=evaluation,
         reporting=reporting,
+    )
+
+
+class _FakeMemoryStore:
+    def query(self, query: AgentMemoryQuery) -> RetrievedMemoryContext:
+        record = _memory_record(query)
+        return RetrievedMemoryContext(
+            context_id=f"{query.query_id}:retrieved_memory_context",
+            query=query,
+            items=[
+                RetrievedMemoryItem(
+                    record=record,
+                    similarity=0.91,
+                    retrieval_use="evidence_context",
+                    rank=1,
+                )
+            ],
+            retrieval_backend="fake_memory_store",
+            embedding_model="fake_embedding:v1",
+        )
+
+
+def _memory_record(query: AgentMemoryQuery) -> ReasoningMemoryRecord:
+    collection_by_agent = {
+        "structurer": "structurer_memory",
+        "evaluator": "evaluator_memory",
+    }
+    return ReasoningMemoryRecord(
+        memory_record_id=f"memory-{query.target_agent}-001",
+        collection_name=collection_by_agent[query.target_agent],
+        target_agent=query.target_agent,
+        source_type="decision_episode",
+        source_path="codigo/reports/example/memory_candidate.json",
+        run_id="historic-run",
+        decision_id="historic-decision",
+        dataset=query.dataset,
+        source_agent_name=query.target_agent,
+        outcome="supported",
+        memory_role="evidence",
+        reusable_as_context=True,
+        summary=f"Historic evidence for {query.target_agent}.",
+        content=f"Use this prior {query.target_agent} decision as cautious evidence.",
+        tags=["test_memory"],
+    )
+
+
+def _memory_aware_structurer(
+    state,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> StructuringDecision:
+    memory_id = memory_context.items[0].record.memory_record_id
+    return StructuringDecision(
+        decision_id=f"{state.run_id}:structurer:001",
+        rationale="Use the supported default structure and cite retrieved memory.",
+        confidence=0.9,
+        structuring_config={
+            "window_size": 2048,
+            "overlap": 0.5,
+            "main_channel": "DE_time",
+            "target_sample_rate_hz": 12000,
+            "label_mode": "binary_anomaly",
+            "features": ["mean", "std", "rms", "energy"],
+        },
+        expected_features_path="codigo/data/tensors/cwru_bearing/windows_features.csv",
+        expected_tensors_path="codigo/data/tensors/cwru_bearing/windows_raw.npz",
+        expected_splits_path="codigo/data/tensors/cwru_bearing/splits.json",
+        memory_context_id=memory_context.context_id,
+        used_memory_context=True,
+        memory_record_ids=[memory_id],
+        memory_usage_summary="Adapt prior structuring evidence without changing guards.",
+        memory_record_uses=[
+            {
+                "memory_record_id": memory_id,
+                "usage": "adapted",
+                "influence_summary": "Use the memory as evidence for supported windows.",
+                "risk_mitigation": "Keep supported window size, overlap and channel.",
+            }
+        ],
+    )
+
+
+def _memory_aware_evaluator(
+    state,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> EvaluationDecision:
+    memory_id = memory_context.items[0].record.memory_record_id
+    return EvaluationDecision(
+        decision_id=f"{state.run_id}:evaluator:001",
+        rationale="Approve only because metrics satisfy the local protocol.",
+        confidence=0.93,
+        evaluation={
+            "approved": True,
+            "summary": "Metrics satisfy recall and FPR requirements.",
+            "next_action": "continue",
+            "limitations": ["Memory is supporting context, not approval authority."],
+        },
+        min_recall_required=0.9,
+        max_false_positive_rate=0.1,
+        memory_context_id=memory_context.context_id,
+        used_memory_context=True,
+        memory_record_ids=[memory_id],
+        memory_usage_summary="Use prior evaluator evidence as a methodological reminder.",
+        memory_record_uses=[
+            {
+                "memory_record_id": memory_id,
+                "usage": "adapted",
+                "influence_summary": "The memory supports documenting the same thresholds.",
+                "risk_mitigation": "Approval still depends only on current metrics.",
+            }
+        ],
     )
 
 

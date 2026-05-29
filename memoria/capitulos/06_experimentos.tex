@@ -482,6 +482,164 @@ objetivo metodologico: provocar un cambio real de familia de modelo y generar
 evidencia sobre por que esa alternativa concreta tampoco es suficiente en su
 configuracion conservadora.
 
+\section{Memoria Transversal en una Run Completa CWRU}
+
+Despues de validar la memoria del modelador, se ejecuto el pipeline CWRU
+completo con memoria transversal activada para estructurador y evaluador. La
+primera run uso agentes deterministas y sirvio para generar los primeros
+episodios reutilizables de esos dos roles:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_cwru_pipeline_with_memory \
+  --run-id cwru-memory-transversal-fase4-001 \
+  --rebuild-index \
+  --clear-existing \
+  --embedding-provider ollama \
+  --embedding-model qwen3-embedding:0.6b
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La run fue aprobada con precision 0.9991, recall 1.0000, F1 0.9996 y FPR
+0.0513. Tras reconstruir el indice, aparecieron por primera vez las memorias
+del estructurador y del evaluador, con un registro cada una.
+
+La segunda run activo Qwen para comprobar si esos recuerdos eran recuperados y
+citados por agentes reales:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_cwru_pipeline_with_memory \
+  --run-id cwru-memory-transversal-fase4-002-llm \
+  --use-llm \
+  --model qwen3.5:4b \
+  --rebuild-index \
+  --clear-existing \
+  --embedding-provider ollama \
+  --embedding-model qwen3-embedding:0.6b
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El estructurador declaro `used\_memory\_context=true` y cito el episodio de
+estructuracion de la run anterior. El evaluador hizo lo mismo con el episodio
+de evaluacion previo. Las metricas finales fueron equivalentes a la primera
+run y la ejecucion quedo aprobada. El indice reconstruido contiene veinte
+registros: dieciseis en `modeler\_memory`, dos en `structurer\_memory` y dos en
+`evaluator\_memory`.
+
+La importancia de este experimento es cualitativa. La memoria ya no solo ayuda
+a un reintento de modelado, sino que se propaga por el proceso completo:
+estructura, evaluacion y modelado pueden dejar y recuperar experiencias
+separadas por rol. Al mismo tiempo, el evaluador sigue aprobando solo por las
+metricas actuales, no porque exista un recuerdo recuperado.
+
+Como cierre del hito, se ejecuto la auditoria cualitativa transversal:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.audit_transversal_memory_run \
+  --run-id cwru-memory-transversal-fase4-002-llm
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La auditoria clasifico el uso de memoria como `memory\_aligned` para el
+estructurador y para el evaluador. Ambos agentes citaron recuerdos que habian
+sido recuperados en su contexto RAG y declararon el uso como `adapted`. En el
+caso del evaluador, la aprobacion queda respaldada por las metricas actuales
+del run, no por la existencia de memoria previa: recall 1.0000 frente al umbral
+0.9000 y FPR 0.0513 frente al maximo 0.1000. La auditoria recomienda revision
+humana si estos candidatos se quieren tratar como evidencia principal, aunque
+permite su reutilizacion como contexto trazable.
+
+\section{Validacion del Runner Comun Multi-dataset}
+
+Para comprobar que la capa comun de planificacion no modifica el comportamiento
+ya validado, se ejecuto CWRU mediante el runner multi-dataset:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id cwru_bearing \
+  --adapter-id cwru_bearing \
+  --raw-path codigo/data/raw/cwru_bearing/mat \
+  --run-id cwru-runner-common-validation-fase4-001
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La ejecucion completo el pipeline, fue aprobada y no produjo errores. Las
+metricas fueron precision 0.9991497803599263, recall 1.0000, F1
+0.9995747093847462 y FPR 0.05128205128205128. Estos valores coinciden
+exactamente con las dos referencias CWRU previas usadas como baseline, por lo
+que el runner comun no introduce regresion en el benchmark principal.
+
+Tambien se ejecuto NASA IMS en modo diagnostico:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id nasa-runner-common-diagnostic-fase4-001 \
+  --execution-mode diagnostic
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La ejecucion termino sin errores, pero sin metricas ni evaluacion. Solo se
+ejecutaron manifiesto, perfilado, limpieza y estructuracion; los artefactos
+generados fueron manifiesto, perfil, senales limpias, log, features, tensores
+y splits. Esto confirma que el modo diagnostico no entra en modelado
+supervisado.
+
+Por ultimo, se comprobo que NASA IMS en modo completo sigue bloqueado en la
+fase de planificacion, con `can\_execute\_requested\_stages=false` y bloqueos en
+`modeling` y `evaluation`. La causa declarada es la ausencia de una politica
+temporal y de etiquetas por ventana defendible para NASA IMS real.
+
+Una vez implementada la primera politica temporal versionada, se repitio la
+planificacion y ejecucion completa declarando:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --raw-path codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen \
+  --run-id nasa-runner-temporal-policy-v1-completed-low-metrics-002 \
+  --dataset-policy-id nasa_ims_temporal_v1
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Con la politica temporal v1, el runner genero un manifiesto derivado, etiqueto
+dos snapshots como `normal` y uno como `degradation`, y la estructuracion uso
+los hints de split declarados en `metadata\_json`: un snapshot normal para entrenamiento, un
+snapshot normal para test y un snapshot de degradacion para test. La ejecucion
+alcanzo modelado y evaluacion sin errores de infraestructura. Sobre el split de
+test se obtuvieron precision 0.5000, recall 1.0000, F1 0.6667 y FPR 1.0000.
+El evaluador marco la run como `approved=false` por exceso de falsos positivos,
+pero el supervisor la completo y genero informe final. La conclusion
+experimental es que la politica temporal desbloquea una ejecucion completa y
+auditable, aunque las metricas siguen siendo proxy metodologicas y requieren un
+protocolo mas robusto antes de usarse como resultado principal.
+
 \section{Experimentos posteriores}
 
 Experimentos previstos:
@@ -493,6 +651,6 @@ Experimentos previstos:
         modelador y evaluador, sin forzar errores artificiales;
   \item analisis de si los agentes citan recuerdos utiles y los transforman en
         decisiones prudentes a lo largo de varias runs normales;
-  \item validación sobre NASA IMS real cuando exista una politica temporal de
-        etiquetado defendible.
+  \item mejora del protocolo NASA IMS temporal v1 sobre secuencias mas largas,
+        especialmente umbral, tramo nominal y control de falsos positivos.
 \end{itemize}
