@@ -48,6 +48,7 @@ from codigo.app.services.nasa_ims_temporal_policy import (
     apply_nasa_ims_temporal_policy_to_result,
 )
 from codigo.app.services.run_persistence import DEFAULT_RUNS_DIR
+from codigo.app.services.agent_runtime import AgentRuntimeRecorder
 
 FULL_RUN_STAGES: list[PipelineRunStage] = [
     "manifest",
@@ -81,6 +82,11 @@ def plan_dataset_pipeline_run(request: PipelineRunRequest) -> DatasetPipelinePla
         if request.adapter_id is not None
         else infer_dataset_adapter(request.raw_path)
     )
+    if not adapter.supports(Path(request.raw_path)):
+        raise ValueError(
+            "dataset adapter does not support path: "
+            f"{adapter.info.adapter_id} -> {request.raw_path}"
+        )
     if adapter.info.dataset_id != request.dataset_id:
         raise ValueError(
             "adapter/dataset mismatch: "
@@ -247,6 +253,7 @@ def run_dataset_pipeline(
     runs_dir: str | Path = DEFAULT_RUNS_DIR,
     memory_config: PipelineMemoryConfig | None = None,
     human_approval: HumanApproval | None = None,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
 ) -> PersistedPipelineRun:
     """Ejecuta el pipeline comun si la politica permite las fases pedidas."""
 
@@ -262,6 +269,7 @@ def run_dataset_pipeline(
         agents=_agents_for_plan(plan, agents),
         runs_dir=runs_dir,
         memory_config=memory_config,
+        runtime_recorder=runtime_recorder,
     )
 
 

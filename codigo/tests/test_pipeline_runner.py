@@ -161,6 +161,21 @@ class PipelineRunnerPlanningTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "adapter/dataset mismatch"):
                 plan_dataset_pipeline_run(request)
 
+    def test_explicit_adapter_must_support_raw_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_dir = Path(tmp) / "not_cwru"
+            raw_dir.mkdir()
+            (raw_dir / "README.txt").write_text("metadata only\n", encoding="utf-8")
+            request = PipelineRunRequest(
+                run_id="unsupported-adapter-path",
+                dataset_id="cwru_bearing",
+                raw_path=raw_dir.as_posix(),
+                adapter_id="cwru_bearing",
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not support path"):
+                plan_dataset_pipeline_run(request)
+
     def test_run_id_cannot_be_path(self):
         with self.assertRaisesRegex(ValueError, "plain identifier"):
             PipelineRunRequest(

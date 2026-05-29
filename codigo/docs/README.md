@@ -95,3 +95,24 @@ Documentos iniciales:
   aplicacion local backend/frontend, con seleccion o ingesta de datasets,
   ejecucion de runs, seguimiento de jobs, visualizacion de artefactos y memoria
   local.
+- `37_frontend_local_fase5.md`: primer esqueleto frontend React/Vite para Fase
+  5, conectado a `GET /health`, `GET /runs` y `POST /runs` con `dry_run=true`
+  mediante la API FastAPI existente.
+- `38_catalogo_datasets_fase5.md`: extension de FastAPI y frontend para listar
+  adaptadores registrados, describir rutas raw permitidas y eliminar el catalogo
+  local hardcodeado de la UI.
+- `39_jobs_frontend_fase5.md`: conexion del frontend con `POST /runs`
+  `background=true`, polling de `GET /run-jobs/{job_id}` y apertura del
+  snapshot persistido al completar.
+- `40_runs_detalle_fase5.md`: vista operativa de runs con filtros, detalle,
+  metricas, informe Markdown, artefactos y comparacion basica usando endpoints
+  de lectura existentes.
+- `41_observabilidad_agentica_fase5.md`: primera capa de telemetria runtime
+  para ver supervisor, agentes, memoria, ejecutores y eventos de job desde la
+  nueva pestaña `Agentes` del frontend.
+- `42_memoria_persistida_frontend_fase5.md`: endpoints read-only y vista
+  frontend para consultar colecciones, recuerdos filtrables y detalle de
+  `memory_record_id` desde la memoria agentica persistida.
+- `43_human_review_ui_fase5.md`: controles de interfaz para mostrar razones de
+  revision humana, recoger `human_approval` y respetar el bloqueo del modo
+  `required` reutilizando los contratos existentes.

@@ -35,3 +35,8 @@ memoria/*.toc
 memoria/*.fls
 memoria/*.fdb_latexmk
 memoria/*.synctex.gz
+
+# Frontend local
+codigo/frontend/node_modules/
+codigo/frontend/dist/
+codigo/frontend/.env

@@ -159,6 +159,20 @@ Criterio de aceptacion:
 - un dataset fuera de raiz permitida se rechaza;
 - CWRU y NASA IMS preextraido se distinguen de forma explicita.
 
+Avance 2026-05-29:
+
+- `GET /datasets/adapters` lista el catalogo canonico de
+  `dataset_adapters.py`;
+- `POST /datasets/describe` describe rutas `raw_path` bajo raices permitidas;
+- `create_app(...)` configura staging local bajo `codigo/data/raw/uploads/` o
+  bajo la primera raiz permitida de test;
+- `plan_dataset_pipeline_run(...)` rechaza adaptadores explicitos que no
+  soportan la ruta;
+- el frontend consume el catalogo backend y solicita descriptor antes del
+  dry-run de `POST /runs`;
+- queda fuera de este avance la subida multipart porque `python-multipart` no
+  esta fijado en el entorno.
+
 ## Hito 3: Ejecucion desde app con seguimiento de jobs
 
 Objetivo: lanzar runs desde la aplicacion y seguir su estado.
@@ -177,6 +191,24 @@ Criterio de aceptacion:
 - el usuario ve `queued/running/completed/failed`;
 - el snapshot queda en `codigo/reports/runs/`;
 - la UI no bloquea mientras corre la ejecucion.
+
+Avance 2026-05-29:
+
+- el frontend mantiene `Planificar` como dry-run visual;
+- se anade `Ejecutar` para enviar `POST /runs` con `dry_run=false` y
+  `background=true`;
+- la UI consulta `GET /run-jobs/{job_id}` por polling;
+- al completar, la UI obtiene el snapshot con `GET /runs/{run_id}` y refresca
+  el registro local;
+- los jobs `failed` muestran el detalle tecnico devuelto por backend;
+- no se han creado rutas nuevas ni otro store de jobs.
+
+Verificacion de humo:
+
+- `hito3-cwru-bg-20260529-01` se lanzo con `background=true`;
+- `GET /run-jobs/hito3-cwru-bg-20260529-01` devolvio `completed`;
+- el snapshot quedo disponible en
+  `codigo/reports/runs/hito3-cwru-bg-20260529-01`.
 
 ## Hito 4: Visualizacion de runs, metricas y artefactos
 
@@ -206,6 +238,26 @@ Criterio de aceptacion:
 - las metricas bajas se muestran como `completed` + `approved=false`, no como
   fallo de infraestructura.
 
+Avance 2026-05-29:
+
+- el frontend consume `GET /runs` con filtros por dataset, estado y aprobacion;
+- la tabla permite seleccionar una run y cargar `GET /runs/{run_id}`;
+- la vista detalle muestra metricas principales, snapshot, informe y artefactos;
+- el informe se obtiene con `GET /runs/{run_id}/report`;
+- los artefactos se obtienen con `GET /runs/{run_id}/artifacts`;
+- la comparacion basica usa `GET /runs/compare` con dos o mas `run_ids`;
+- no se han creado endpoints nuevos ni otro registro de runs.
+
+Verificacion de humo:
+
+- `GET /runs` lista runs existentes sin recalcular;
+- `GET /runs/hito3-cwru-bg-20260529-01/artifacts` devuelve 13 artefactos;
+- `GET /runs/hito3-cwru-bg-20260529-01/report` devuelve el informe Markdown;
+- `GET /runs/compare` compara
+  `hito3-cwru-bg-20260529-01` y
+  `cwru-runner-common-validation-fase4-001` con `spread=0.0` en las metricas
+  comunes.
+
 ## Hito 5: Memoria local visible desde la aplicacion
 
 Objetivo: que la aplicacion muestre la memoria agentica local como evidencia
@@ -232,6 +284,44 @@ Criterio de aceptacion:
 - una consulta devuelve recuerdos trazables;
 - queda claro si un recuerdo es ejemplo positivo, advertencia o caso frontera.
 
+Avance parcial 2026-05-29:
+
+- se anade una capa de observabilidad agentica viva mediante
+  `AgentRuntimeEvent` y `AgentRuntimeRecorder`;
+- `ApiRunJobStatus` incluye `events` y se expone
+  `GET /run-jobs/{job_id}/events`;
+- el grafo emite eventos de supervisor, agentes, recuperacion de memoria,
+  ejecutores, estado de job y errores;
+- la UI incorpora la pestaña `Agentes` con jerarquia visual, timeline y detalle
+  clicable de `rationale`, decision JSON, memoria citada y payload observable;
+- no se expone cadena de pensamiento privada: solo decisiones estructuradas,
+  justificacion declarada, memoria recuperada y resultados deterministas.
+
+Pendiente tras el avance parcial de observabilidad:
+
+- resumen de colecciones persistidas de memoria;
+- consulta por agente/dataset contra memoria indexada;
+- apertura de registros `memory_record_id` desde la UI.
+
+Avance 2026-05-29:
+
+- `GET /health` expone `memory_dir`;
+- `GET /memory/collections` resume colecciones canonicas del store local;
+- `GET /memory/records` lista recuerdos filtrables por agente, dataset, rol,
+  reutilizacion y texto;
+- `GET /memory/records/{memory_record_id}` abre un recuerdo completo bajo el
+  contrato `ReasoningMemoryRecord`;
+- la pestaña `Agentes` muestra memoria persistida del agente seleccionado junto
+  a la telemetria runtime;
+- la lectura reutiliza `LocalJsonVectorMemoryStore` y no crea otro indice ni
+  otro backend de memoria.
+
+Verificacion de humo:
+
+- los endpoints de memoria pasan pruebas contra un store temporal;
+- el frontend compila con el bloque de memoria persistida;
+- queda fuera de esta entrega la reconstruccion del indice desde UI.
+
 ## Hito 6: Human Review operativa minima
 
 Objetivo: permitir que la UI vea y envie aprobaciones simples cuando el backend
@@ -255,6 +345,24 @@ Criterio de aceptacion:
 - una run en modo `passive` muestra aviso sin bloquear;
 - una run en modo `required` no ejecuta hasta recibir aprobacion;
 - la aprobacion queda persistida en snapshot.
+
+Avance 2026-05-29:
+
+- el frontend muestra controles de Human Review reutilizando `human_review` y
+  `human_approval`;
+- el dry-run conserva y muestra `human_review_reasons`;
+- el modo `passive` se presenta como aviso no bloqueante;
+- el modo `required` bloquea la accion de ejecutar en la UI hasta marcar una
+  aprobacion explicita;
+- la aprobacion viaja en `human_approval` hacia `POST /runs`;
+- no se han creado contratos ni endpoints nuevos para aprobaciones.
+
+Verificacion:
+
+- los tests API existentes cubren `passive`, `required` bloqueante y
+  persistencia de `human_approval` en snapshot;
+- el frontend compila con los controles de revision humana;
+- la memoria academica se recompila tras documentar el hito.
 
 ## Hito 7: Frontend operativo
 
@@ -346,7 +454,7 @@ Criterio de aceptacion:
 
 ## Primer paso concreto siguiente
 
-El primer paso tecnico de Fase 5 sera crear el esqueleto frontend local y una
+El primer paso tecnico de Fase 5 era crear el esqueleto frontend local y una
 pantalla operativa minima que consuma:
 
 ```text
@@ -361,3 +469,42 @@ Antes de implementar se aplicara de nuevo el protocolo anti-duplicacion:
 - decidir ubicacion (`codigo/frontend/` salvo que aparezca una convencion mejor);
 - definir stack minimo;
 - no duplicar logica de planificacion que ya vive en la API.
+
+## Avance 2026-05-29: esqueleto frontend local
+
+Estado: completado.
+
+Se ha creado `codigo/frontend/` con React, TypeScript y Vite. La primera
+pantalla operativa consume `GET /health`, `GET /datasets/adapters`,
+`POST /datasets/describe`, `GET /runs` y `POST /runs` en modo `dry_run=true`,
+mostrando el descriptor y el plan devuelto por la API sin ejecutar
+transformaciones.
+
+Documentacion tecnica asociada:
+
+```text
+codigo/docs/37_frontend_local_fase5.md
+codigo/docs/38_catalogo_datasets_fase5.md
+codigo/docs/39_jobs_frontend_fase5.md
+codigo/docs/40_runs_detalle_fase5.md
+codigo/docs/41_observabilidad_agentica_fase5.md
+codigo/docs/42_memoria_persistida_frontend_fase5.md
+codigo/docs/43_human_review_ui_fase5.md
+codigo/frontend/README.md
+```
+
+Verificacion realizada:
+
+```text
+npm install
+npm run build
+curl -sS http://127.0.0.1:5173/
+curl -sS http://127.0.0.1:5173/api/health
+curl -sS http://127.0.0.1:5173/api/datasets/adapters
+npm run build
+curl -sS -X POST http://127.0.0.1:5173/api/runs ...
+curl -sS http://127.0.0.1:5173/api/runs/hito3-cwru-bg-20260529-01/artifacts
+```
+
+El siguiente paso logico pasa a ser consolidar el Hito 7 como flujo frontend
+operativo completo y preparar el empaquetado local de desarrollo del Hito 8.

@@ -8,15 +8,42 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import PlainTextResponse
 
+from codigo.app.schemas.agent_runtime import AgentRuntimeEvent
+from codigo.app.schemas.api_datasets import (
+    DatasetDescribeRequest,
+    DatasetDescribeResponse,
+)
+from codigo.app.schemas.api_memory import (
+    MemoryCollectionSummary,
+    MemoryRecordSummary,
+)
 from codigo.app.schemas.api_runs import ApiRunJobStatus, ApiRunRequest, ApiRunResponse
+from codigo.app.schemas.dataset import DatasetAdapterInfo
 from codigo.app.schemas.pipeline_run import PipelineRunRequest
+from codigo.app.schemas.reasoning import (
+    AgentMemoryCollection,
+    AgentMemoryTarget,
+    MemoryRole,
+    ReasoningMemoryRecord,
+)
 from codigo.app.schemas.state import HumanApproval
 from codigo.app.schemas.state import TFMStateModel
 from codigo.app.services.human_review import human_review_gate_for_plan
 from codigo.app.services.api_run_jobs import ApiRunJobStore
+from codigo.app.services.dataset_adapters import (
+    describe_dataset,
+    get_dataset_adapter,
+    infer_dataset_adapter,
+    list_dataset_adapters,
+)
 from codigo.app.services.pipeline_runner import (
     plan_dataset_pipeline_run,
     run_dataset_pipeline,
+)
+from codigo.app.services.memory_registry import (
+    get_memory_record,
+    list_memory_collections,
+    list_memory_records,
 )
 from codigo.app.services.run_persistence import RunIndexEntry, RunSnapshot
 from codigo.app.services.run_registry import (
@@ -32,13 +59,96 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health(request: Request) -> dict[str, str]:
+async def health(request: Request) -> dict[str, Any]:
     """Comprueba que la API esta disponible."""
 
     return {
         "status": "ok",
         "runs_dir": str(_runs_dir(request)),
+        "allowed_raw_roots": [root.as_posix() for root in _allowed_raw_roots(request)],
+        "dataset_uploads_dir": _dataset_uploads_dir(request).as_posix(),
+        "memory_dir": _memory_dir(request).as_posix(),
     }
+
+
+@router.get("/datasets/adapters", response_model=list[DatasetAdapterInfo])
+async def read_dataset_adapters() -> list[DatasetAdapterInfo]:
+    """Lista adaptadores de dataset registrados en el backend."""
+
+    return list_dataset_adapters()
+
+
+@router.post("/datasets/describe", response_model=DatasetDescribeResponse)
+async def describe_raw_dataset(
+    describe_request: DatasetDescribeRequest,
+    request: Request,
+) -> DatasetDescribeResponse:
+    """Describe una ruta raw permitida sin generar manifiestos ni transformar datos."""
+
+    _ensure_raw_path_is_allowed(
+        describe_request.raw_path,
+        _allowed_raw_roots(request),
+    )
+    adapter = _dataset_adapter_or_http(
+        describe_request.raw_path,
+        describe_request.adapter_id,
+    )
+    try:
+        descriptor = describe_dataset(
+            describe_request.raw_path,
+            adapter_id=adapter.info.adapter_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DatasetDescribeResponse(
+        adapter_info=adapter.info,
+        descriptor=descriptor,
+        allowed_raw_roots=[root.as_posix() for root in _allowed_raw_roots(request)],
+        uploads_dir=_dataset_uploads_dir(request).as_posix(),
+    )
+
+
+@router.get("/memory/collections", response_model=list[MemoryCollectionSummary])
+async def read_memory_collections(request: Request) -> list[MemoryCollectionSummary]:
+    """Resume colecciones de memoria agentica persistida."""
+
+    return list_memory_collections(_memory_dir(request))
+
+
+@router.get("/memory/records", response_model=list[MemoryRecordSummary])
+async def read_memory_records(
+    request: Request,
+    collection_name: AgentMemoryCollection | None = None,
+    target_agent: AgentMemoryTarget | None = None,
+    dataset: str | None = None,
+    memory_role: MemoryRole | None = None,
+    reusable_only: bool = False,
+    search_text: str | None = None,
+) -> list[MemoryRecordSummary]:
+    """Lista recuerdos filtrables sin reindexar memoria."""
+
+    return list_memory_records(
+        _memory_dir(request),
+        collection_name=collection_name,
+        target_agent=target_agent,
+        dataset=dataset,
+        memory_role=memory_role,
+        reusable_only=reusable_only,
+        search_text=search_text,
+    )
+
+
+@router.get("/memory/records/{memory_record_id}", response_model=ReasoningMemoryRecord)
+async def read_memory_record(
+    memory_record_id: str,
+    request: Request,
+) -> ReasoningMemoryRecord:
+    """Abre un recuerdo completo por `memory_record_id`."""
+
+    try:
+        return get_memory_record(_memory_dir(request), memory_record_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/runs", response_model=list[RunIndexEntry])
@@ -140,6 +250,23 @@ async def read_run_job(job_id: str, request: Request) -> ApiRunJobStatus:
     return job
 
 
+@router.get("/run-jobs/{job_id}/events", response_model=list[AgentRuntimeEvent])
+async def read_run_job_events(
+    job_id: str,
+    request: Request,
+    after_sequence: int | None = Query(default=None, ge=0),
+) -> list[AgentRuntimeEvent]:
+    """Devuelve eventos de observabilidad agentica de un job en memoria."""
+
+    events = _run_job_store(request).list_events(
+        job_id,
+        after_sequence=after_sequence,
+    )
+    if events is None:
+        raise HTTPException(status_code=404, detail=f"run job not found: {job_id}")
+    return events
+
+
 @router.get("/runs/compare", response_model=RunComparison)
 async def compare_persisted_runs(
     request: Request,
@@ -208,6 +335,19 @@ def _run_job_store(request: Request) -> ApiRunJobStore:
     return request.app.state.run_job_store
 
 
+def _dataset_uploads_dir(request: Request) -> Path:
+    uploads_dir = getattr(
+        request.app.state,
+        "dataset_uploads_dir",
+        Path("codigo/data/raw/uploads"),
+    )
+    return Path(uploads_dir)
+
+
+def _memory_dir(request: Request) -> Path:
+    return Path(getattr(request.app.state, "memory_dir", "codigo/reports/reasoning_memory"))
+
+
 def _get_run_or_404(run_id: str, runs_dir: Path) -> RunSnapshot:
     try:
         return get_run(run_id, runs_dir)
@@ -222,6 +362,26 @@ def _plan_or_http(pipeline_request: PipelineRunRequest):
         return plan_dataset_pipeline_run(pipeline_request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _dataset_adapter_or_http(raw_path: str, adapter_id: str | None):
+    try:
+        adapter = (
+            get_dataset_adapter(adapter_id)
+            if adapter_id is not None
+            else infer_dataset_adapter(raw_path)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not adapter.supports(Path(raw_path)):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"dataset adapter does not support path: "
+                f"{adapter.info.adapter_id} -> {raw_path}"
+            ),
+        )
+    return adapter
 
 
 def _ensure_raw_path_is_allowed(raw_path: str, allowed_roots: list[Path]) -> None:
@@ -303,11 +463,12 @@ def _run_job_target(
     human_approval: HumanApproval | None,
     runner,
 ):
-    def target() -> RunSnapshot:
+    def target(runtime_recorder) -> RunSnapshot:
         result = runner(
             pipeline_request,
             runs_dir=runs_dir,
             human_approval=human_approval,
+            runtime_recorder=runtime_recorder,
         )
         return result.snapshot
 

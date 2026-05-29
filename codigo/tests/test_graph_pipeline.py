@@ -28,6 +28,7 @@ from codigo.app.schemas.reasoning import (
     RetrievedMemoryItem,
 )
 from codigo.app.schemas.state import ArtifactRef, PipelineError
+from codigo.app.services.agent_runtime import AgentRuntimeRecorder
 from codigo.app.services.run_persistence import load_run_index
 
 
@@ -200,6 +201,43 @@ class GraphPipelineTests(unittest.TestCase):
             evaluator_decision["memory_record_ids"],
             ["memory-evaluator-001"],
         )
+
+    def test_runtime_recorder_receives_observable_agent_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            calls: list[str] = []
+            events = []
+            paths = _paths(base)
+            executors = _successful_executors(paths, calls)
+            state = create_initial_cwru_state(
+                thread_id="cwru-runtime-test",
+                run_id="run-runtime-001",
+                raw_path=str(base / "raw"),
+            )
+            recorder = AgentRuntimeRecorder("run-runtime-001", events.append)
+
+            final_state = run_cwru_pipeline(
+                state,
+                executors=executors,
+                runtime_recorder=recorder,
+            )
+            validated = validate_state(final_state)
+
+        kinds = [event.kind for event in events]
+        agent_events = [
+            event
+            for event in events
+            if event.kind == "agent_decision" and event.agent_name == "modeler"
+        ]
+        self.assertEqual(validated.current_stage, "completed")
+        self.assertEqual([event.sequence for event in events], list(range(1, len(events) + 1)))
+        self.assertIn("supervisor_decision", kinds)
+        self.assertIn("agent_decision", kinds)
+        self.assertIn("executor_result", kinds)
+        self.assertIn("memory_retrieval", kinds)
+        self.assertTrue(agent_events)
+        self.assertIn("rationale", agent_events[0].payload["decision"])
+        self.assertEqual(agent_events[0].payload["state"]["dataset"], "cwru_bearing")
 
     def test_failed_executor_stops_graph_without_calling_later_nodes(self):
         calls: list[str] = []

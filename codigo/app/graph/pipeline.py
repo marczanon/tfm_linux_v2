@@ -79,6 +79,7 @@ from codigo.app.services.run_persistence import (
     RunSnapshot,
     save_run_snapshot,
 )
+from codigo.app.services.agent_runtime import AgentRuntimeRecorder
 from codigo.app.services.vector_memory import VectorMemoryStore
 
 
@@ -132,6 +133,7 @@ def build_cwru_pipeline(
     executors: PipelineExecutors | None = None,
     agents: PipelineAgents | None = None,
     memory_config: PipelineMemoryConfig | None = None,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
 ) -> Any:
     """Compila el grafo supervisado minimo del MVP CWRU."""
 
@@ -139,41 +141,73 @@ def build_cwru_pipeline(
     agent_runner = agents or PipelineAgents()
     memory_runner = memory_config
     graph = StateGraph(TFMState)
-    graph.add_node("supervisor", lambda state: _supervisor_node(state, agent_runner))
+    graph.add_node(
+        "supervisor",
+        lambda state: _supervisor_node(state, agent_runner, runtime_recorder),
+    )
     graph.add_node(
         "manifest_executor",
-        lambda state: _manifest_node(state, runner),
+        lambda state: _manifest_node(state, runner, runtime_recorder),
     )
     graph.add_node(
         "profiler_executor",
-        lambda state: _profile_node(state, runner),
+        lambda state: _profile_node(state, runner, runtime_recorder),
     )
-    graph.add_node("cleaner_agent", lambda state: _cleaner_node(state, agent_runner))
+    graph.add_node(
+        "cleaner_agent",
+        lambda state: _cleaner_node(state, agent_runner, runtime_recorder),
+    )
     graph.add_node(
         "cleaning_executor",
-        lambda state: _cleaning_node(state, runner),
+        lambda state: _cleaning_node(state, runner, runtime_recorder),
     )
     graph.add_node(
         "structuring_agent",
-        lambda state: _structurer_node(state, agent_runner, memory_runner),
+        lambda state: _structurer_node(
+            state,
+            agent_runner,
+            memory_runner,
+            runtime_recorder,
+        ),
     )
     graph.add_node(
         "structuring_executor",
-        lambda state: _structuring_node(state, runner, memory_runner),
+        lambda state: _structuring_node(
+            state,
+            runner,
+            memory_runner,
+            runtime_recorder,
+        ),
     )
-    graph.add_node("modeling_agent", lambda state: _modeler_node(state, agent_runner))
+    graph.add_node(
+        "modeling_agent",
+        lambda state: _modeler_node(state, agent_runner, runtime_recorder),
+    )
     graph.add_node(
         "modeling_executor",
-        lambda state: _modeling_node(state, runner),
+        lambda state: _modeling_node(state, runner, runtime_recorder),
     )
-    graph.add_node("evaluator", lambda state: _evaluation_node(state, runner))
+    graph.add_node(
+        "evaluator",
+        lambda state: _evaluation_node(state, runner, runtime_recorder),
+    )
     graph.add_node(
         "evaluation_agent",
-        lambda state: _evaluator_agent_node(state, agent_runner, memory_runner),
+        lambda state: _evaluator_agent_node(
+            state,
+            agent_runner,
+            memory_runner,
+            runtime_recorder,
+        ),
     )
     graph.add_node(
         "report_writer",
-        lambda state: _report_writer_node(state, runner, agent_runner),
+        lambda state: _report_writer_node(
+            state,
+            runner,
+            agent_runner,
+            runtime_recorder,
+        ),
     )
 
     graph.add_edge(START, "supervisor")
@@ -197,6 +231,7 @@ def run_cwru_pipeline(
     executors: PipelineExecutors | None = None,
     agents: PipelineAgents | None = None,
     memory_config: PipelineMemoryConfig | None = None,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
 ) -> TFMState:
     """Ejecuta el grafo compilado y devuelve el estado final validado."""
 
@@ -204,6 +239,7 @@ def run_cwru_pipeline(
         executors=executors,
         agents=agents,
         memory_config=memory_config,
+        runtime_recorder=runtime_recorder,
     ).invoke(initial_state)
     return TFMState(**validate_state(final_state).to_langgraph_state())
 
@@ -214,6 +250,7 @@ def run_and_persist_cwru_pipeline(
     agents: PipelineAgents | None = None,
     runs_dir: Path | str = DEFAULT_RUNS_DIR,
     memory_config: PipelineMemoryConfig | None = None,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
 ) -> PersistedPipelineRun:
     """Ejecuta el pipeline y guarda un snapshot local de la ejecucion."""
 
@@ -222,6 +259,7 @@ def run_and_persist_cwru_pipeline(
         executors=executors,
         agents=agents,
         memory_config=memory_config,
+        runtime_recorder=runtime_recorder,
     )
     snapshot = save_run_snapshot(validate_state(final_state), runs_dir)
     return PersistedPipelineRun(state=final_state, snapshot=snapshot)
@@ -232,9 +270,26 @@ run_pipeline = run_cwru_pipeline
 run_and_persist_pipeline = run_and_persist_cwru_pipeline
 
 
-def _supervisor_node(state: TFMState, agents: PipelineAgents) -> TFMState:
+def _supervisor_node(
+    state: TFMState,
+    agents: PipelineAgents,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     decision = agents.supervisor(model)
+    _emit_decision_event(
+        runtime_recorder,
+        model=model,
+        decision=decision,
+        kind="supervisor_decision",
+        source="supervisor",
+        node="supervisor",
+        title="Supervisor decide siguiente nodo",
+        payload={
+            "requires_human_review": decision.requires_human_review,
+            "stop_reason": decision.stop_reason,
+        },
+    )
     updated = model.to_langgraph_state()
     updated["messages"] = [
         *updated["messages"],
@@ -249,7 +304,11 @@ def _supervisor_node(state: TFMState, agents: PipelineAgents) -> TFMState:
     return TFMState(**validate_state(updated).to_langgraph_state())
 
 
-def _manifest_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
+def _manifest_node(
+    state: TFMState,
+    executors: PipelineExecutors,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     result = executors.manifest(raw_dir=model.raw_path)
     return _apply_result(
@@ -257,13 +316,24 @@ def _manifest_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
         result,
         next_stage="profiling",
         next_node="supervisor",
+        runtime_recorder=runtime_recorder,
     )
 
 
-def _profile_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
+def _profile_node(
+    state: TFMState,
+    executors: PipelineExecutors,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     if not model.manifest_path:
-        return _missing_input_state(model, "profiling", "profiler_executor", "manifest_path")
+        return _missing_input_state(
+            model,
+            "profiling",
+            "profiler_executor",
+            "manifest_path",
+            runtime_recorder,
+        )
 
     result = executors.profile(manifest_path=model.manifest_path)
     profile_summary = _dataset_profile_from_path(result.profile_path)
@@ -276,12 +346,31 @@ def _profile_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
         next_stage="cleaning",
         next_node="supervisor",
         extra_updates=extra_updates,
+        runtime_recorder=runtime_recorder,
     )
 
 
-def _cleaner_node(state: TFMState, agents: PipelineAgents) -> TFMState:
+def _cleaner_node(
+    state: TFMState,
+    agents: PipelineAgents,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     decision = agents.cleaner(model)
+    _emit_decision_event(
+        runtime_recorder,
+        model=model,
+        decision=decision,
+        kind="agent_decision",
+        source="agent",
+        node="cleaner_agent",
+        title="Limpiador propone configuracion",
+        payload={
+            "cleaning_config": decision.cleaning_config.model_dump(mode="json"),
+            "expected_artifact_path": decision.expected_artifact_path,
+            "warnings": decision.warnings,
+        },
+    )
     updated = model.to_langgraph_state()
     updated["messages"] = [
         *updated["messages"],
@@ -297,12 +386,28 @@ def _cleaner_node(state: TFMState, agents: PipelineAgents) -> TFMState:
     return TFMState(**validate_state(updated).to_langgraph_state())
 
 
-def _cleaning_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
+def _cleaning_node(
+    state: TFMState,
+    executors: PipelineExecutors,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     if not model.manifest_path:
-        return _missing_input_state(model, "cleaning", "cleaning_executor", "manifest_path")
+        return _missing_input_state(
+            model,
+            "cleaning",
+            "cleaning_executor",
+            "manifest_path",
+            runtime_recorder,
+        )
     if not model.profile_path:
-        return _missing_input_state(model, "cleaning", "cleaning_executor", "profile_path")
+        return _missing_input_state(
+            model,
+            "cleaning",
+            "cleaning_executor",
+            "profile_path",
+            runtime_recorder,
+        )
 
     config = model.cleaning_config or DEFAULT_CLEANING_CONFIG
     result = executors.cleaning(
@@ -316,6 +421,7 @@ def _cleaning_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
         next_stage="structuring",
         next_node="supervisor",
         extra_updates={"cleaning_config": config.model_dump(mode="json")},
+        runtime_recorder=runtime_recorder,
     )
 
 
@@ -323,9 +429,16 @@ def _structurer_node(
     state: TFMState,
     agents: PipelineAgents,
     memory_config: PipelineMemoryConfig | None,
+    runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
     memory_context = _retrieve_structurer_context(model, memory_config)
+    _emit_memory_event(
+        runtime_recorder,
+        model=model,
+        agent_name="structurer",
+        memory_context=memory_context,
+    )
     memory_context_path = _write_memory_context_artifact(
         model,
         "structurer",
@@ -336,6 +449,28 @@ def _structurer_node(
         agents.structurer,
         model,
         memory_context,
+    )
+    _emit_decision_event(
+        runtime_recorder,
+        model=model,
+        decision=decision,
+        kind="agent_decision",
+        source="agent",
+        node="structuring_agent",
+        title="Estructurador decide ventanas y features",
+        payload={
+            "structuring_config": decision.structuring_config.model_dump(mode="json"),
+            "comparison_candidates": [
+                candidate.model_dump(mode="json")
+                for candidate in decision.comparison_candidates
+            ],
+            "used_memory_context": decision.used_memory_context,
+            "memory_usage_summary": decision.memory_usage_summary,
+            "memory_record_uses": [
+                item.model_dump(mode="json")
+                for item in decision.memory_record_uses
+            ],
+        },
     )
     updated = model.to_langgraph_state()
     memory_artifacts = _memory_context_artifacts(
@@ -365,10 +500,17 @@ def _structuring_node(
     state: TFMState,
     executors: PipelineExecutors,
     memory_config: PipelineMemoryConfig | None,
+    runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
     if not model.clean_path:
-        return _missing_input_state(model, "structuring", "structuring_executor", "clean_path")
+        return _missing_input_state(
+            model,
+            "structuring",
+            "structuring_executor",
+            "clean_path",
+            runtime_recorder,
+        )
 
     config = model.structuring_config or DEFAULT_STRUCTURING_CONFIG
     result = executors.structuring(clean_dir=model.clean_path, config=config)
@@ -378,6 +520,7 @@ def _structuring_node(
         next_stage="modeling",
         next_node="supervisor",
         extra_updates={"structuring_config": config.model_dump(mode="json")},
+        runtime_recorder=runtime_recorder,
     )
     if result.status != "success":
         return updated
@@ -388,9 +531,31 @@ def _structuring_node(
     )
 
 
-def _modeler_node(state: TFMState, agents: PipelineAgents) -> TFMState:
+def _modeler_node(
+    state: TFMState,
+    agents: PipelineAgents,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     decision = agents.modeler(model)
+    _emit_decision_event(
+        runtime_recorder,
+        model=model,
+        decision=decision,
+        kind="agent_decision",
+        source="agent",
+        node="modeling_agent",
+        title="Modelador selecciona algoritmo",
+        payload={
+            "modeling_config": decision.modeling_config.model_dump(mode="json"),
+            "train_split": decision.train_split,
+            "validation_split": decision.validation_split,
+            "comparison_candidates": [
+                candidate.model_dump(mode="json")
+                for candidate in decision.comparison_candidates
+            ],
+        },
+    )
     updated = model.to_langgraph_state()
     updated["messages"] = [
         *updated["messages"],
@@ -406,11 +571,21 @@ def _modeler_node(state: TFMState, agents: PipelineAgents) -> TFMState:
     return TFMState(**validate_state(updated).to_langgraph_state())
 
 
-def _modeling_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
+def _modeling_node(
+    state: TFMState,
+    executors: PipelineExecutors,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     features_path = _artifact_path(model, "features") or _features_from_tensor_path(model)
     if not features_path:
-        return _missing_input_state(model, "modeling", "modeling_executor", "features artifact")
+        return _missing_input_state(
+            model,
+            "modeling",
+            "modeling_executor",
+            "features artifact",
+            runtime_recorder,
+        )
 
     config = model.modeling_config or DEFAULT_MODELING_CONFIG
     result = executors.modeling(features_path=features_path, config=config)
@@ -420,14 +595,25 @@ def _modeling_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
         next_stage="evaluation",
         next_node="supervisor",
         extra_updates={"modeling_config": config.model_dump(mode="json")},
+        runtime_recorder=runtime_recorder,
     )
 
 
-def _evaluation_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
+def _evaluation_node(
+    state: TFMState,
+    executors: PipelineExecutors,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
     model = validate_state(state)
     predictions_path = _artifact_path(model, "predictions")
     if not predictions_path:
-        return _missing_input_state(model, "evaluation", "evaluator", "predictions artifact")
+        return _missing_input_state(
+            model,
+            "evaluation",
+            "evaluator",
+            "predictions artifact",
+            runtime_recorder,
+        )
 
     result = executors.evaluation(predictions_path=predictions_path)
     metrics = _metrics_from_path(result.metrics_path)
@@ -440,6 +626,7 @@ def _evaluation_node(state: TFMState, executors: PipelineExecutors) -> TFMState:
         next_stage="evaluation",
         next_node="supervisor",
         extra_updates=extra_updates,
+        runtime_recorder=runtime_recorder,
     )
 
 
@@ -447,9 +634,16 @@ def _evaluator_agent_node(
     state: TFMState,
     agents: PipelineAgents,
     memory_config: PipelineMemoryConfig | None,
+    runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
     memory_context = _retrieve_evaluator_context(model, memory_config)
+    _emit_memory_event(
+        runtime_recorder,
+        model=model,
+        agent_name="evaluator",
+        memory_context=memory_context,
+    )
     memory_context_path = _write_memory_context_artifact(
         model,
         "evaluator",
@@ -460,6 +654,26 @@ def _evaluator_agent_node(
         agents.evaluator,
         model,
         memory_context,
+    )
+    _emit_decision_event(
+        runtime_recorder,
+        model=model,
+        decision=decision,
+        kind="agent_decision",
+        source="agent",
+        node="evaluation_agent",
+        title="Evaluador interpreta metricas",
+        payload={
+            "evaluation": decision.evaluation.model_dump(mode="json"),
+            "min_recall_required": decision.min_recall_required,
+            "max_false_positive_rate": decision.max_false_positive_rate,
+            "used_memory_context": decision.used_memory_context,
+            "memory_usage_summary": decision.memory_usage_summary,
+            "memory_record_uses": [
+                item.model_dump(mode="json")
+                for item in decision.memory_record_uses
+            ],
+        },
     )
     updated = model.to_langgraph_state()
     memory_artifacts = _memory_context_artifacts(
@@ -493,9 +707,27 @@ def _report_writer_node(
     state: TFMState,
     executors: PipelineExecutors,
     agents: PipelineAgents,
+    runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
     decision = agents.report_writer(model)
+    _emit_decision_event(
+        runtime_recorder,
+        model=model,
+        decision=decision,
+        kind="agent_decision",
+        source="agent",
+        node="report_writer",
+        title="Redactor prepara informe",
+        payload={
+            "output_path": decision.output_path,
+            "output_format": decision.output_format,
+            "sections": [
+                section.model_dump(mode="json")
+                for section in decision.sections
+            ],
+        },
+    )
     updated = model.to_langgraph_state()
     updated["messages"] = [
         *updated["messages"],
@@ -512,6 +744,7 @@ def _report_writer_node(
         result,
         next_stage="reporting",
         next_node="supervisor",
+        runtime_recorder=runtime_recorder,
     )
 
 
@@ -754,6 +987,164 @@ def _latest_memory_context(
     return None
 
 
+def _emit_decision_event(
+    runtime_recorder: AgentRuntimeRecorder | None,
+    *,
+    model: TFMStateModel,
+    decision: Any,
+    kind: str,
+    source: str,
+    node: str,
+    title: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    rationale = getattr(decision, "rationale", None)
+    agent_name = getattr(decision, "agent_name", None)
+    memory_record_ids = getattr(decision, "memory_record_ids", [])
+    event_payload = {
+        "state": _state_runtime_payload(model),
+        "decision": decision.model_dump(mode="json"),
+    }
+    if payload:
+        event_payload.update(payload)
+    _emit_runtime_event(
+        runtime_recorder,
+        kind=kind,
+        source=source,
+        title=title,
+        summary=rationale or title,
+        stage=model.current_stage,
+        node=node,
+        agent_name=agent_name,
+        decision_id=getattr(decision, "decision_id", None),
+        rationale=rationale,
+        confidence=getattr(decision, "confidence", None),
+        next_stage=getattr(decision, "next_stage", None),
+        next_node=getattr(decision, "next_node", None),
+        memory_context_id=getattr(decision, "memory_context_id", None),
+        memory_record_ids=list(memory_record_ids or []),
+        payload=event_payload,
+    )
+
+
+def _emit_memory_event(
+    runtime_recorder: AgentRuntimeRecorder | None,
+    *,
+    model: TFMStateModel,
+    agent_name: str,
+    memory_context: RetrievedMemoryContext | None,
+) -> None:
+    if memory_context is None:
+        _emit_runtime_event(
+            runtime_recorder,
+            kind="memory_retrieval",
+            source="memory",
+            title=f"Memoria para {agent_name}",
+            summary="No se recupero contexto de memoria para esta decision.",
+            stage=model.current_stage,
+            node=f"{agent_name}_memory",
+            agent_name=agent_name,
+            payload={
+                "state": _state_runtime_payload(model),
+                "available": False,
+                "items": [],
+            },
+        )
+        return
+    items = [
+        {
+            "rank": item.rank,
+            "similarity": round(item.similarity, 6),
+            "retrieval_use": item.retrieval_use,
+            "memory_record_id": item.record.memory_record_id,
+            "memory_role": item.record.memory_role,
+            "human_verdict": item.record.human_verdict,
+            "run_id": item.record.run_id,
+            "summary": item.record.summary,
+            "tags": item.record.tags[:8],
+        }
+        for item in memory_context.items[:5]
+    ]
+    record_ids = [item["memory_record_id"] for item in items]
+    _emit_runtime_event(
+        runtime_recorder,
+        kind="memory_retrieval",
+        source="memory",
+        title=f"Memoria recuperada para {agent_name}",
+        summary=f"{len(memory_context.items)} recuerdos recuperados.",
+        stage=model.current_stage,
+        node=f"{agent_name}_memory",
+        agent_name=agent_name,
+        memory_context_id=memory_context.context_id,
+        memory_record_ids=record_ids,
+        payload={
+            "state": _state_runtime_payload(model),
+            "available": True,
+            "query_id": memory_context.query.query_id,
+            "retrieval_backend": memory_context.retrieval_backend,
+            "embedding_model": memory_context.embedding_model,
+            "items": items,
+        },
+    )
+
+
+def _emit_executor_event(
+    runtime_recorder: AgentRuntimeRecorder | None,
+    *,
+    model: TFMStateModel,
+    result: ExecutorResult,
+    next_stage: str,
+    next_node: str | None,
+) -> None:
+    _emit_runtime_event(
+        runtime_recorder,
+        kind="executor_result",
+        source="executor",
+        title=f"Ejecutor {result.executor_name}",
+        summary=result.message,
+        stage=result.stage,
+        node=result.executor_name,
+        next_stage="failed" if result.status != "success" else next_stage,
+        next_node=None if result.status != "success" else next_node,
+        payload={
+            "state": _state_runtime_payload(model),
+            "status": result.status,
+            "artifact_names": [artifact.name for artifact in result.artifacts],
+            "artifact_types": [artifact.artifact_type for artifact in result.artifacts],
+            "errors": [error.model_dump(mode="json") for error in result.errors],
+            "state_updates": result.state_updates,
+        },
+    )
+
+
+def _emit_runtime_event(
+    runtime_recorder: AgentRuntimeRecorder | None,
+    **event: Any,
+) -> None:
+    if runtime_recorder is None:
+        return
+    try:
+        runtime_recorder.emit(**event)
+    except Exception:
+        return
+
+
+def _state_runtime_payload(model: TFMStateModel) -> dict[str, Any]:
+    return {
+        "dataset": model.project_context.dataset,
+        "current_stage": model.current_stage,
+        "next_node": model.next_node,
+        "n_messages": len(model.messages),
+        "n_artifacts": len(model.artifacts),
+        "n_errors": len(model.errors),
+        "has_profile": model.profile_path is not None,
+        "has_clean_path": model.clean_path is not None,
+        "has_tensor_path": model.tensor_path is not None,
+        "has_metrics": model.metrics is not None,
+        "has_evaluation": model.evaluation is not None,
+    }
+
+
 def _agent_memory_output_dir(
     model: TFMStateModel,
     agent_name: str,
@@ -775,7 +1166,15 @@ def _apply_result(
     next_stage: str,
     next_node: str | None,
     extra_updates: dict[str, Any] | None = None,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
 ) -> TFMState:
+    _emit_executor_event(
+        runtime_recorder,
+        model=model,
+        result=result,
+        next_stage=next_stage,
+        next_node=next_node,
+    )
     state = model.to_langgraph_state()
     state["artifacts"] = [
         *state["artifacts"],
@@ -814,6 +1213,7 @@ def _missing_input_state(
     stage: str,
     node: str,
     field_name: str,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
 ) -> TFMState:
     error = PipelineError(
         stage=stage,
@@ -828,7 +1228,13 @@ def _missing_input_state(
         message=f"{node} could not start.",
         errors=[error],
     )
-    return _apply_result(model, result, next_stage="failed", next_node=None)
+    return _apply_result(
+        model,
+        result,
+        next_stage="failed",
+        next_node=None,
+        runtime_recorder=runtime_recorder,
+    )
 
 
 def _route_from_supervisor(state: TFMState) -> str:

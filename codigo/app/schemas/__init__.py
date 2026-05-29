@@ -13,6 +13,19 @@ from codigo.app.schemas.agent_decisions import (
     StructuringDecision,
     SupervisorDecision,
 )
+from codigo.app.schemas.agent_runtime import (
+    AgentRuntimeEvent,
+    AgentRuntimeEventKind,
+    AgentRuntimeEventSource,
+)
+from codigo.app.schemas.api_datasets import (
+    DatasetDescribeRequest,
+    DatasetDescribeResponse,
+)
+from codigo.app.schemas.api_memory import (
+    MemoryCollectionSummary,
+    MemoryRecordSummary,
+)
 from codigo.app.schemas.dataset import (
     CommonManifestRecord,
     DatasetAdapterInfo,
@@ -88,12 +101,17 @@ __all__ = [
     "AgentReasoningPostmortem",
     "AgentMemoryQuery",
     "AgentMemoryTarget",
+    "AgentRuntimeEvent",
+    "AgentRuntimeEventKind",
+    "AgentRuntimeEventSource",
     "CleaningDecision",
     "CleaningConfig",
     "CleaningResult",
     "CommonManifestRecord",
     "DatasetCapabilityRule",
     "DatasetAdapterInfo",
+    "DatasetDescribeRequest",
+    "DatasetDescribeResponse",
     "DatasetDescriptor",
     "DatasetManifest",
     "DatasetManifestRow",
@@ -120,6 +138,8 @@ __all__ = [
     "MemoryRole",
     "MemorySourceType",
     "MemoryCandidate",
+    "MemoryCollectionSummary",
+    "MemoryRecordSummary",
     "MemoryUsageAudit",
     "MemoryUsageAuditAssessment",
     "MemoryUsageAuditItem",

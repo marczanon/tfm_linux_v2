@@ -32,6 +32,89 @@ class APIRunsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertEqual(response.json()["runs_dir"], str(runs_dir))
+        self.assertTrue(response.json()["dataset_uploads_dir"].endswith("uploads"))
+
+    def test_list_dataset_adapters_returns_backend_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_app(runs_dir=Path(tmp) / "runs")
+
+            response = _get(app, "/datasets/adapters")
+
+        self.assertEqual(response.status_code, 200)
+        adapter_ids = {item["adapter_id"] for item in response.json()}
+        self.assertIn("cwru_bearing", adapter_ids)
+        self.assertIn("nasa_ims_bearing", adapter_ids)
+
+    def test_describe_dataset_returns_descriptor_for_allowed_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "raw" / "cwru"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "97.mat").touch()
+            app = create_app(
+                runs_dir=base / "runs",
+                allowed_raw_roots=[base / "raw"],
+            )
+
+            response = _post(
+                app,
+                "/datasets/describe",
+                json={
+                    "raw_path": raw_dir.as_posix(),
+                    "adapter_id": "cwru_bearing",
+                },
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["adapter_info"]["adapter_id"], "cwru_bearing")
+        self.assertEqual(payload["descriptor"]["dataset_id"], "cwru_bearing")
+        self.assertEqual(payload["descriptor"]["source_format"], "directory")
+
+    def test_describe_dataset_rejects_path_outside_allowed_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "external" / "cwru"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "97.mat").touch()
+            app = create_app(
+                runs_dir=base / "runs",
+                allowed_raw_roots=[base / "raw"],
+            )
+
+            response = _post(
+                app,
+                "/datasets/describe",
+                json={
+                    "raw_path": raw_dir.as_posix(),
+                    "adapter_id": "cwru_bearing",
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_describe_dataset_rejects_explicit_unsupported_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "raw" / "unknown"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "README.txt").write_text("not a numeric signal\n", encoding="utf-8")
+            app = create_app(
+                runs_dir=base / "runs",
+                allowed_raw_roots=[base / "raw"],
+            )
+
+            response = _post(
+                app,
+                "/datasets/describe",
+                json={
+                    "raw_path": raw_dir.as_posix(),
+                    "adapter_id": "cwru_bearing",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("does not support path", response.json()["detail"])
 
     def test_list_runs_supports_filters(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -422,6 +505,21 @@ class APIRunsTests(unittest.TestCase):
             app = create_app(runs_dir=runs_dir, allowed_raw_roots=[base / "raw"])
 
             def fake_run_dataset_pipeline(pipeline_request, *, runs_dir, **kwargs):
+                runtime_recorder = kwargs.get("runtime_recorder")
+                if runtime_recorder is not None:
+                    runtime_recorder.emit(
+                        kind="agent_decision",
+                        source="agent",
+                        title="Modelador simulado",
+                        summary="El modelador simulado selecciona Isolation Forest.",
+                        stage="modeling",
+                        node="modeling_agent",
+                        agent_name="modeler",
+                        decision_id=f"{pipeline_request.run_id}:modeler:001",
+                        rationale="Isolation Forest es suficiente para la prueba API.",
+                        confidence=0.8,
+                        payload={"model_name": "isolation_forest"},
+                    )
                 state = _state(base, pipeline_request.run_id, f1_score=0.89)
                 snapshot = save_run_snapshot(state, runs_dir)
                 return SimpleNamespace(
@@ -457,6 +555,20 @@ class APIRunsTests(unittest.TestCase):
             self.assertEqual(job_response.status_code, 200)
             self.assertEqual(job_payload["status"], "completed")
             self.assertEqual(job_payload["snapshot"]["run_id"], "api-background-cwru")
+            event_titles = [event["title"] for event in job_payload["events"]]
+            self.assertIn("Job en ejecucion", event_titles)
+            self.assertIn("Modelador simulado", event_titles)
+            self.assertIn("Job completado", event_titles)
+
+            events_response = _get(
+                app,
+                "/run-jobs/api-background-cwru/events",
+                params={"after_sequence": 1},
+            )
+            self.assertEqual(events_response.status_code, 200)
+            self.assertTrue(
+                all(event["sequence"] > 1 for event in events_response.json())
+            )
 
             snapshot_response = _get(app, "/runs/api-background-cwru")
             self.assertEqual(snapshot_response.status_code, 200)

@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from codigo.app.schemas.agent_runtime import AgentRuntimeEvent
 from codigo.app.schemas.common import StrictBaseModel
 from codigo.app.schemas.pipeline_run import DatasetPipelinePlan, PipelineRunRequest
 from codigo.app.schemas.reasoning import HumanReviewSettings
@@ -28,6 +29,7 @@ class ApiRunJobStatus(StrictBaseModel):
     finished_at: datetime | None = None
     detail: str | None = Field(default=None, min_length=1)
     snapshot: RunSnapshot | None = None
+    events: list[AgentRuntimeEvent] = Field(default_factory=list)
 
 
 class ApiRunRequest(PipelineRunRequest):

@@ -1458,3 +1458,87 @@ artefactos, y consultar la memoria local generada por los agentes. Esta fase
 mantendra las mismas reglas metodologicas: reutilizacion de componentes
 existentes, documentacion tecnica paralela y actualizacion de la memoria
 academica.
+
+Como primer avance de esta fase se ha creado un esqueleto de frontend local en
+React, TypeScript y Vite. La pantalla inicial consulta el estado de la API,
+lista las ejecuciones persistidas y permite enviar una solicitud `POST /runs`
+con `dry\_run=true`, mostrando el plan devuelto por el backend sin ejecutar el
+pipeline. Esta decision mantiene la logica de planificacion y las politicas de
+dataset en FastAPI y en los servicios Python existentes, evitando duplicar
+contratos en la interfaz. La verificacion incluyo la compilacion del frontend y
+una prueba HTTP del proxy local hacia `GET /health` y `POST /runs`.
+
+El segundo avance de Fase 5 sustituye el catalogo local de la interfaz por una
+consulta al backend. Se han incorporado los endpoints `GET
+/datasets/adapters` y `POST /datasets/describe`, ambos delegando en el registro
+existente de adaptadores de dataset. La descripcion de un dataset valida que la
+ruta pertenezca a una raiz permitida, infiere o comprueba el adaptador y
+devuelve un descriptor compacto sin cargar el dataset completo ni generar
+manifiestos. Asimismo, la aplicacion crea un area de staging bajo
+`codigo/data/raw/uploads/` para futuras ingestas locales controladas. Esta capa
+mantiene `POST /runs` con `dry\_run=true` como preflight canonico de capacidades
+antes de ejecutar. La verificacion incluyo tests de catalogo, rechazo de rutas
+fuera de raiz, rechazo de adaptadores incompatibles y una nueva compilacion del
+frontend.
+
+El tercer avance conecta la interfaz con la ejecucion real en segundo plano ya
+disponible en la API. La vista mantiene un boton de planificacion basado en
+`dry\_run=true` y habilita la accion de ejecucion solamente cuando el plan
+devuelto por el backend es ejecutable. La ejecucion envia `POST /runs` con
+`dry\_run=false` y `background=true`, recibe un identificador de job local y
+consulta periodicamente `GET /run-jobs/\{job\_id\}`. Cuando el job termina, la
+interfaz obtiene el snapshot persistido mediante `GET /runs/\{run\_id\}` y
+refresca el registro de ejecuciones. Si el job falla, se muestra el detalle
+tecnico devuelto por el backend, preservando la trazabilidad del error sin
+confundirlo con un resultado metodologicamente no aprobado.
+Como prueba de humo se lanzo una run CWRU en segundo plano, que completo con
+snapshot persistido, informe tecnico y artefactos registrados.
+
+El cuarto avance convierte el registro de ejecuciones en una vista operativa.
+La interfaz consume los endpoints de lectura ya existentes: `GET /runs` para
+listar con filtros, `GET /runs/\{run\_id\}` para cargar el snapshot,
+`GET /runs/\{run\_id\}/artifacts` para inspeccionar artefactos,
+`GET /runs/\{run\_id\}/report` para previsualizar el informe Markdown y
+`GET /runs/compare` para comparar metricas entre varias ejecuciones. De este
+modo, la aplicacion no recalcula resultados ni lee ficheros directamente desde
+el navegador, sino que reutiliza el registro local persistido y los contratos
+`RunIndexEntry`, `RunSnapshot` y `RunComparison`. La vista distingue el fallo de
+infraestructura de una ejecucion completada pero no aprobada por metricas,
+manteniendo la semantica metodologica del evaluador.
+
+El quinto avance inicia la observabilidad agentica en tiempo real. Se ha
+definido el contrato `AgentRuntimeEvent` y un `AgentRuntimeRecorder` que permite
+al job en segundo plano acumular eventos de supervisor, agentes, recuperacion de
+memoria, ejecutores, estado del job y errores. El grafo LangGraph emite estos
+eventos de forma opcional y no bloqueante, de modo que la telemetria no altera
+la ejecucion ni sustituye los snapshots persistidos. La API expone los eventos
+en `GET /run-jobs/\{job\_id\}` y en `GET
+/run-jobs/\{job\_id\}/events`. En el frontend se ha anadido la pestana
+`Agentes`, que representa la jerarquia supervisor-agentes, un timeline de
+comunicacion y un panel de detalle con `decision\_id`, confianza, `rationale`,
+memoria citada y payload JSON observable. Esta vista muestra decisiones y
+justificaciones estructuradas, no cadena de pensamiento privada del modelo.
+
+El siguiente incremento completa la visibilidad de memoria persistida. Se ha
+anadido una capa API de solo lectura sobre `LocalJsonVectorMemoryStore`, sin
+crear otro indice ni modificar la logica de recuperacion RAG de los agentes. La
+API expone `GET /memory/collections` para resumir colecciones canonicas,
+`GET /memory/records` para listar recuerdos filtrables por agente, dataset, rol,
+reutilizacion y texto, y `GET /memory/records/\{memory\_record\_id\}` para
+abrir el `ReasoningMemoryRecord` completo. En el frontend, la pestana
+`Agentes` muestra para el agente seleccionado la coleccion persistida, numero de
+recuerdos, recuerdos reutilizables, busqueda textual y detalle de fuente,
+veredicto humano, `run\_id`, `decision\_id` y contenido. La memoria se presenta
+como evidencia trazable y no como mecanismo de aprobacion automatica.
+
+El sexto avance hace operativa la revision humana minima desde la interfaz. Se
+reutilizan los contratos existentes `HumanReviewSettings` y `HumanApproval`, asi
+como las razones `human\_review\_reasons` calculadas por la API durante el
+preflight. La UI permite seleccionar el modo `off`, `passive` o `required`,
+indicar el revisor, marcar los puntos de revision explicita y, cuando procede,
+registrar una aprobacion simple con motivo y fecha. En modo `passive`, las
+razones se muestran como advertencia sin bloquear la ejecucion. En modo
+`required`, la accion de ejecutar queda bloqueada hasta que exista aprobacion
+explicita, manteniendo ademas la validacion del backend como fuente de verdad.
+Este incremento no introduce un sistema multiusuario de aprobaciones, sino una
+puerta local y trazable coherente con el alcance de Fase 5.
