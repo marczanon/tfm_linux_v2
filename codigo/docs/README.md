@@ -116,3 +116,15 @@ Documentos iniciales:
 - `43_human_review_ui_fase5.md`: controles de interfaz para mostrar razones de
   revision humana, recoger `human_approval` y respetar el bloqueo del modo
   `required` reutilizando los contratos existentes.
+- `44_frontend_operativo_fase5.md`: cierre del frontend como dashboard local
+  operativo, con vistas `Pipeline` y `Agentes` y banda fija de contexto de
+  ejecucion.
+- `45_visualizaciones_frontend_fase5.md`: ampliacion visual con traduccion
+  legible de eventos agenticos, endpoint de visualizacion de runs, graficas de
+  metricas y proyeccion PCA 2D con anomalias.
+- `46_ollama_qwen_frontend_fase5.md`: activacion controlada de `use_llm=true`
+  desde la aplicacion web, con `GET /llm/status`, modelo por defecto
+  `qwen3.5:4b` y agentes Ollama reales en ejecuciones API.
+- `47_rediseño_dashboard_frontend_fase5.md`: refactor UX/UI del frontend hacia
+  un dashboard SaaS/MLOps local con shell, navegacion, paneles operativos y
+  detalles tecnicos plegables sin cambiar contratos backend.

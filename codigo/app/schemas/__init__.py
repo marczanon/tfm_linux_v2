@@ -26,6 +26,13 @@ from codigo.app.schemas.api_memory import (
     MemoryCollectionSummary,
     MemoryRecordSummary,
 )
+from codigo.app.schemas.api_llm import LLMStatusResponse
+from codigo.app.schemas.api_visualization import (
+    ProjectionBoundary,
+    ProjectionPoint,
+    RunVisualizationData,
+    VisualizationMetric,
+)
 from codigo.app.schemas.dataset import (
     CommonManifestRecord,
     DatasetAdapterInfo,
@@ -132,6 +139,7 @@ __all__ = [
     "HumanReviewSettings",
     "HumanReasoningReview",
     "HumanReasoningReviewRequest",
+    "LLMStatusResponse",
     "ManifestResult",
     "MemoryRecordUse",
     "MemoryRetrievalUse",
@@ -157,6 +165,8 @@ __all__ = [
     "PipelineRunStage",
     "ProfileResult",
     "ProjectContext",
+    "ProjectionBoundary",
+    "ProjectionPoint",
     "ReportDecision",
     "ReportExecutorResult",
     "ReportSection",
@@ -164,6 +174,7 @@ __all__ = [
     "ReasoningMemoryRecord",
     "RetrievedMemoryContext",
     "RetrievedMemoryItem",
+    "RunVisualizationData",
     "SignalChannel",
     "StateMessage",
     "StructuringAlternative",
@@ -172,4 +183,5 @@ __all__ = [
     "StructuringResult",
     "SupervisorDecision",
     "TFMStateModel",
+    "VisualizationMetric",
 ]

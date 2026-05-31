@@ -17,7 +17,9 @@ from codigo.app.schemas.api_memory import (
     MemoryCollectionSummary,
     MemoryRecordSummary,
 )
+from codigo.app.schemas.api_llm import LLMStatusResponse
 from codigo.app.schemas.api_runs import ApiRunJobStatus, ApiRunRequest, ApiRunResponse
+from codigo.app.schemas.api_visualization import RunVisualizationData
 from codigo.app.schemas.dataset import DatasetAdapterInfo
 from codigo.app.schemas.pipeline_run import PipelineRunRequest
 from codigo.app.schemas.reasoning import (
@@ -45,6 +47,7 @@ from codigo.app.services.memory_registry import (
     list_memory_collections,
     list_memory_records,
 )
+from codigo.app.services.llm import get_default_llm_status
 from codigo.app.services.run_persistence import RunIndexEntry, RunSnapshot
 from codigo.app.services.run_registry import (
     RunComparison,
@@ -53,6 +56,7 @@ from codigo.app.services.run_registry import (
     get_run_artifacts,
     list_runs,
 )
+from codigo.app.services.run_visualization import build_run_visualization
 
 
 router = APIRouter()
@@ -69,6 +73,13 @@ async def health(request: Request) -> dict[str, Any]:
         "dataset_uploads_dir": _dataset_uploads_dir(request).as_posix(),
         "memory_dir": _memory_dir(request).as_posix(),
     }
+
+
+@router.get("/llm/status", response_model=LLMStatusResponse)
+async def read_llm_status() -> LLMStatusResponse:
+    """Comprueba disponibilidad de Ollama para ejecuciones agenticas."""
+
+    return LLMStatusResponse.model_validate(get_default_llm_status().__dict__)
 
 
 @router.get("/datasets/adapters", response_model=list[DatasetAdapterInfo])
@@ -202,6 +213,8 @@ async def create_run(
         human_gate.execution_allowed,
         human_gate.blocking_reason,
     )
+    if api_request.use_llm:
+        _ensure_llm_execution_is_available()
     _ensure_run_id_is_available(api_request.run_id, _runs_dir(request))
     if api_request.background:
         _ensure_run_job_id_is_available(api_request.run_id, _run_job_store(request))
@@ -299,6 +312,26 @@ async def read_run_artifacts(run_id: str, request: Request) -> list[dict[str, An
         return get_run_artifacts(run_id, runs_dir)
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/visualization", response_model=RunVisualizationData)
+async def read_run_visualization(
+    run_id: str,
+    request: Request,
+    max_points: int = Query(default=900, ge=50, le=2500),
+) -> RunVisualizationData:
+    """Devuelve metricas y proyeccion 2D compacta para una run persistida."""
+
+    try:
+        return build_run_visualization(
+            run_id,
+            _runs_dir(request),
+            max_points=max_points,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/report", response_class=PlainTextResponse)
@@ -414,11 +447,6 @@ def _ensure_api_execution_is_allowed(
             status_code=409,
             detail="requested stages are blocked by dataset run policy",
         )
-    if api_request.use_llm:
-        raise HTTPException(
-            status_code=400,
-            detail="API execution with use_llm=true is not enabled yet",
-        )
     if api_request.use_memory or (
         api_request.requested_stages is not None
         and "memory" in api_request.requested_stages
@@ -426,6 +454,23 @@ def _ensure_api_execution_is_allowed(
         raise HTTPException(
             status_code=400,
             detail="API execution with memory is not enabled yet",
+        )
+
+
+def _ensure_llm_execution_is_available() -> None:
+    llm_status = get_default_llm_status()
+    if not llm_status.available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=llm_status.detail or "Ollama is not available",
+        )
+    if not llm_status.model_available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                llm_status.detail
+                or f"Ollama model is not available: {llm_status.model}"
+            ),
         )
 
 

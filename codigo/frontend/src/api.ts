@@ -5,12 +5,14 @@ import type {
   DatasetDescribeRequest,
   DatasetDescribeResponse,
   HealthResponse,
+  LLMStatusResponse,
   ApiRunJobStatus,
   AgentRuntimeEvent,
   ArtifactRef,
   RunComparison,
   RunFilters,
   RunIndexEntry,
+  RunVisualizationData,
   RunSnapshot,
   AgentMemoryTarget,
   MemoryCollectionSummary,
@@ -35,6 +37,10 @@ export class ApiClientError extends Error {
 
 export async function getHealth(): Promise<HealthResponse> {
   return apiRequest<HealthResponse>("/health");
+}
+
+export async function getLLMStatus(): Promise<LLMStatusResponse> {
+  return apiRequest<LLMStatusResponse>("/llm/status");
 }
 
 export async function listRuns(filters: Partial<RunFilters> = {}): Promise<RunIndexEntry[]> {
@@ -62,6 +68,16 @@ export async function getRunArtifacts(runId: string): Promise<ArtifactRef[]> {
 
 export async function getRunReport(runId: string): Promise<string> {
   return apiTextRequest(`/runs/${encodeURIComponent(runId)}/report`);
+}
+
+export async function getRunVisualization(
+  runId: string,
+  maxPoints = 900,
+): Promise<RunVisualizationData> {
+  const query = new URLSearchParams({ max_points: String(maxPoints) });
+  return apiRequest<RunVisualizationData>(
+    `/runs/${encodeURIComponent(runId)}/visualization?${query.toString()}`,
+  );
 }
 
 export async function compareRuns(runIds: string[]): Promise<RunComparison> {

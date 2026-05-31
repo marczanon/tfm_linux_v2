@@ -1542,3 +1542,58 @@ razones se muestran como advertencia sin bloquear la ejecucion. En modo
 explicita, manteniendo ademas la validacion del backend como fuente de verdad.
 Este incremento no introduce un sistema multiusuario de aprobaciones, sino una
 puerta local y trazable coherente con el alcance de Fase 5.
+
+El septimo avance consolida el frontend como herramienta operativa completa. La
+interfaz queda organizada en una vista `Pipeline`, que agrupa seleccion de
+dataset, preflight, revision humana, ejecucion en segundo plano, seguimiento de
+job, registro de runs, detalle, metricas, informe, artefactos y comparacion, y
+una vista `Agentes`, que agrupa observabilidad runtime, jerarquia de agentes,
+timeline, memoria recuperada y memoria persistida. Para reforzar la trazabilidad
+durante la operacion se incorpora una banda de contexto fija con `dataset\_id`,
+`run\_id`, modo de ejecucion, politica de dataset, numero de fases, estado del
+plan y estado del job. Esta consolidacion no introduce nuevos endpoints ni
+runners, sino que integra visualmente los contratos y servicios ya validados en
+los hitos anteriores.
+
+Como ampliacion visual de la aplicacion, se ha incorporado una lectura humana
+determinista de los eventos agenticos. Junto al `payload` JSON de cada evento,
+la interfaz genera una frase que resume el agente responsable, la fase, la
+confianza, la siguiente accion propuesta y los campos clave del JSON. Esta
+traduccion no pretende revelar cadena de pensamiento privada, sino convertir la
+telemetria estructurada en una explicacion operativa comprensible.
+
+Tambien se ha anadido una pestana `Visualizacion` para analizar resultados de
+runs persistidas. El backend expone `GET /runs/\{run\_id\}/visualization`, que
+lee los artefactos `windows\_features.csv` y `predictions.csv`, une ambos por
+`window\_id`, escala las features numericas y calcula una proyeccion PCA en dos
+dimensiones. La interfaz muestra barras de metricas y un diagrama de dispersion
+con ventanas normales, anomalias detectadas y una frontera visual aproximada. Se
+declara explicitamente que esta frontera es una ayuda grafica en la proyeccion
+2D, no la frontera exacta del modelo en el espacio original de caracteristicas.
+
+El siguiente ajuste conecta la aplicacion web con los agentes Qwen/Ollama reales.
+El contrato `PipelineRunRequest` ya contenia el campo `use\_llm`, pero la API lo
+mantenia bloqueado por seguridad durante la primera ejecucion controlada. En
+Fase 5 se sustituye ese bloqueo por una comprobacion explicita de disponibilidad:
+`GET /llm/status` consulta Ollama local, informa del modelo configurado y verifica
+que `qwen3.5:4b` este instalado. Si la interfaz activa `Agentes LLM`, `POST
+/runs` con `use\_llm=true` construye un conjunto de agentes con
+`OllamaJSONClient` e inyecta ese cliente en supervisor, limpiador,
+estructurador, modelador, evaluador y redactor. La ejecucion conserva los
+contratos JSON/Pydantic y los fallbacks deterministas ante respuestas invalidas,
+por lo que el LLM participa en la decision sin adquirir capacidad de ejecutar
+codigo ni modificar directamente los datos.
+
+Finalmente, se ha refactorizado la interfaz de Fase 5 desde una pantalla
+tecnica acumulativa hacia un dashboard local de operacion. La aplicacion se
+estructura con un shell principal, navegacion lateral, cabecera de estado,
+resumen de salud y areas de trabajo separadas para pipeline, agentes y
+visualizacion. Dentro de `Pipeline`, la configuracion de la run, el preflight,
+la ejecucion y el historial de runs se presentan como bloques diferenciados,
+mientras que rutas largas, parametros avanzados y detalles tecnicos quedan en
+paneles plegables. Este cambio no altera endpoints ni contratos del backend:
+reorganiza visualmente las mismas capacidades para mejorar jerarquia,
+legibilidad y mantenibilidad de la aplicacion local.
+Como ultimo pulido de interfaz, se evita renderizar rutas locales de ficheros en
+la pagina web y el panel de nueva ejecucion deja de comportarse como un bloque
+pegajoso durante el desplazamiento vertical.

@@ -19,6 +19,7 @@ from codigo.app.schemas.state import (
     StateMessage,
 )
 from codigo.app.services.run_persistence import save_run_snapshot
+from codigo.app.services.llm import LLMProviderStatus
 
 
 class APIRunsTests(unittest.TestCase):
@@ -44,6 +45,22 @@ class APIRunsTests(unittest.TestCase):
         adapter_ids = {item["adapter_id"] for item in response.json()}
         self.assertIn("cwru_bearing", adapter_ids)
         self.assertIn("nasa_ims_bearing", adapter_ids)
+
+    def test_llm_status_returns_configured_ollama_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_app(runs_dir=Path(tmp) / "runs")
+
+            with patch(
+                "codigo.app.api.routes.get_default_llm_status",
+                return_value=_available_llm_status(),
+            ):
+                response = _get(app, "/llm/status")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["provider"], "ollama")
+        self.assertEqual(payload["model"], "qwen3.5:4b")
+        self.assertTrue(payload["model_available"])
 
     def test_describe_dataset_returns_descriptor_for_allowed_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -369,6 +386,84 @@ class APIRunsTests(unittest.TestCase):
         self.assertFalse(payload["approved"])
         self.assertEqual(payload["snapshot"]["run_id"], "api-execute-cwru")
 
+    def test_post_runs_execute_allows_llm_when_ollama_model_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            raw_dir = base / "raw" / "cwru"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "97.mat").touch()
+            app = create_app(runs_dir=runs_dir, allowed_raw_roots=[base / "raw"])
+
+            def fake_run_dataset_pipeline(pipeline_request, *, runs_dir, **kwargs):
+                self.assertTrue(pipeline_request.use_llm)
+                state = _state(base, pipeline_request.run_id, f1_score=0.91)
+                snapshot = save_run_snapshot(state, runs_dir)
+                return SimpleNamespace(
+                    state=state.to_langgraph_state(),
+                    snapshot=snapshot,
+                )
+
+            with (
+                patch(
+                    "codigo.app.api.routes.get_default_llm_status",
+                    return_value=_available_llm_status(),
+                ),
+                patch(
+                    "codigo.app.api.routes.run_dataset_pipeline",
+                    side_effect=fake_run_dataset_pipeline,
+                ),
+            ):
+                response = _post(
+                    app,
+                    "/runs",
+                    json={
+                        "run_id": "api-execute-cwru-llm",
+                        "dataset_id": "cwru_bearing",
+                        "adapter_id": "cwru_bearing",
+                        "raw_path": raw_dir.as_posix(),
+                        "dry_run": False,
+                        "use_llm": True,
+                    },
+                )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["use_llm"])
+        self.assertEqual(payload["snapshot"]["run_id"], "api-execute-cwru-llm")
+
+    def test_post_runs_execute_rejects_llm_when_ollama_model_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "raw" / "cwru"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "97.mat").touch()
+            app = create_app(runs_dir=base / "runs", allowed_raw_roots=[base / "raw"])
+
+            with (
+                patch(
+                    "codigo.app.api.routes.get_default_llm_status",
+                    return_value=_missing_llm_status(),
+                ),
+                patch("codigo.app.api.routes.run_dataset_pipeline") as runner,
+            ):
+                response = _post(
+                    app,
+                    "/runs",
+                    json={
+                        "run_id": "api-execute-cwru-llm-missing",
+                        "dataset_id": "cwru_bearing",
+                        "adapter_id": "cwru_bearing",
+                        "raw_path": raw_dir.as_posix(),
+                        "dry_run": False,
+                        "use_llm": True,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("model not found", response.json()["detail"])
+        runner.assert_not_called()
+
     def test_post_runs_passive_human_review_returns_non_blocking_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -652,6 +747,33 @@ def _wait_for_job(app, job_id: str, expected_status: str) -> dict:
             return payload
         time.sleep(0.01)
     return _get(app, f"/run-jobs/{job_id}").json()
+
+
+def _available_llm_status() -> LLMProviderStatus:
+    return LLMProviderStatus(
+        provider="ollama",
+        model="qwen3.5:4b",
+        host="http://127.0.0.1:11434",
+        timeout_seconds=2.0,
+        think=False,
+        available=True,
+        model_available=True,
+        models=["qwen3.5:4b"],
+    )
+
+
+def _missing_llm_status() -> LLMProviderStatus:
+    return LLMProviderStatus(
+        provider="ollama",
+        model="qwen3.5:4b",
+        host="http://127.0.0.1:11434",
+        timeout_seconds=2.0,
+        think=False,
+        available=True,
+        model_available=False,
+        models=[],
+        detail="model not found in Ollama: qwen3.5:4b",
+    )
 
 
 def _state(

@@ -83,6 +83,36 @@ recoger una aprobacion simple y bloquear la ejecucion en modo `required` hasta
 que exista aprobacion explicita. En modo `passive`, las razones se muestran
 como aviso no bloqueante.
 
+Tras el cierre del frontend operativo, la aplicacion queda estructurada como un
+dashboard local con dos vistas: `Pipeline` para operar ejecuciones y consultar
+runs, y `Agentes` para observar telemetria runtime y memoria. Se anade una banda
+de contexto fija que mantiene visibles `dataset_id`, `run_id`, modo, politica,
+fases, estado del plan y estado del job durante todo el flujo.
+
+Tras la ampliacion de visualizaciones, la vista `Agentes` muestra una lectura
+humana del JSON de cada evento y se anade la pestaña `Visualizacion`. Esta
+pestaña consume `GET /runs/{run_id}/visualization` para mostrar barras de
+metricas y una proyeccion PCA 2D de ventanas/features, con anomalias detectadas
+y frontera visual aproximada.
+
+Tras la activacion Ollama/Qwen, el backend expone `GET /llm/status` y el
+frontend muestra el estado del modelo `qwen3.5:4b`. La opcion `Agentes LLM`
+deja de ser un modo bloqueado por API: si Ollama esta disponible y el modelo
+existe, `POST /runs` con `use_llm=true` ejecuta el pipeline inyectando agentes
+LLM reales; si no, la UI y la API bloquean antes de lanzar la run.
+
+Tras el rediseño UX del dashboard, la pantalla principal deja de concentrar
+todas las piezas al mismo nivel visual. La app usa un shell con sidebar,
+cabecera operacional y resumen de salud; `Pipeline` separa configuracion,
+preflight, ejecucion y registro de runs; `Agentes` y `Visualizacion` quedan
+como areas de trabajo independientes. Los detalles tecnicos largos permanecen
+disponibles, pero se agrupan en paneles plegables para no interferir con el
+flujo principal de operacion.
+
+Como pulido final de esta iteracion, la interfaz deja de renderizar rutas
+locales de ficheros y el panel `Nueva run` deja de seguir el scroll de la vista
+`Pipeline`.
+
 ## Verificacion
 
 Comandos ejecutados:
@@ -92,6 +122,7 @@ npm install
 npm run build
 curl -sS http://127.0.0.1:5173/
 curl -sS http://127.0.0.1:5173/api/health
+curl -sS http://127.0.0.1:5173/api/llm/status
 curl -sS -X POST http://127.0.0.1:5173/api/runs ...
 ```
 
@@ -118,5 +149,5 @@ frontend.
 
 ## Siguiente paso
 
-Consolidar el frontend operativo completo y documentar los comandos locales de
-arranque backend/frontend.
+Documentar los comandos locales de arranque backend/frontend y las pruebas de
+humo del empaquetado local de desarrollo.

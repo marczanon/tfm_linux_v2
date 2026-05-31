@@ -104,6 +104,49 @@ export interface RunComparison {
   metrics: MetricComparison[];
 }
 
+export interface VisualizationMetric {
+  name: string;
+  label: string;
+  value: number | null;
+  higher_is_better: boolean;
+}
+
+export interface ProjectionPoint {
+  window_id: string;
+  x: number;
+  y: number;
+  split: string | null;
+  label: string | null;
+  target: number | null;
+  fault_type: string | null;
+  anomaly_score: number | null;
+  threshold: number | null;
+  predicted_anomaly: number | null;
+}
+
+export interface ProjectionBoundary {
+  kind: "ellipse_approximation";
+  center_x: number;
+  center_y: number;
+  radius_x: number;
+  radius_y: number;
+  threshold: number | null;
+  note: string;
+}
+
+export interface RunVisualizationData {
+  run_id: string;
+  dataset: string;
+  metrics: VisualizationMetric[];
+  projection_available: boolean;
+  projection_points: ProjectionPoint[];
+  projection_boundary: ProjectionBoundary | null;
+  n_points_total: number;
+  n_points_sampled: number;
+  source_paths: Record<string, string>;
+  warnings: string[];
+}
+
 export type AgentRuntimeEventKind =
   | "job_status"
   | "supervisor_decision"
@@ -238,6 +281,18 @@ export interface PipelineRunRequest {
   use_memory: boolean;
   use_llm: boolean;
   allow_synthetic_labels: boolean;
+}
+
+export interface LLMStatusResponse {
+  provider: string;
+  model: string;
+  host: string;
+  timeout_seconds: number;
+  think: boolean | null;
+  available: boolean;
+  model_available: boolean;
+  models: string[];
+  detail: string | null;
 }
 
 export interface ApiRunRequest extends PipelineRunRequest {

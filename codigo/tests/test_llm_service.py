@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from codigo.app.services.llm import (
+    DEFAULT_OLLAMA_CHAT_MODEL,
     LLMCallError,
     OllamaJSONClient,
     get_default_json_llm_client,
@@ -37,6 +38,13 @@ class LLMServiceTests(unittest.TestCase):
 
         self.assertIsInstance(client, OllamaJSONClient)
         self.assertFalse(client.think)
+
+    def test_default_ollama_client_uses_project_qwen_model(self):
+        with patch.dict("os.environ", {"TFM_LLM_PROVIDER": "ollama"}, clear=True):
+            client = get_default_json_llm_client()
+
+        self.assertIsInstance(client, OllamaJSONClient)
+        self.assertEqual(client.model, DEFAULT_OLLAMA_CHAT_MODEL)
 
     def test_default_ollama_client_allows_thinking_override(self):
         with patch.dict(

@@ -396,6 +396,66 @@ Criterio de aceptacion:
 - puede consultar memoria local;
 - no necesita ejecutar scripts manualmente para el flujo principal.
 
+Avance 2026-05-29:
+
+- el frontend queda organizado como dashboard operativo con vistas `Pipeline` y
+  `Agentes`;
+- `Pipeline` integra selector de adaptador, ruta raw, preflight, Human Review,
+  ejecucion background, job, registro de runs, filtros, detalle, metricas,
+  informe, artefactos y comparacion;
+- `Agentes` integra observabilidad runtime, jerarquia de agentes, timeline,
+  memoria recuperada y memoria persistida consultable;
+- se anade una banda de contexto fija con `dataset_id`, `run_id`, modo,
+  politica, fases, estado del plan y estado del job;
+- no se crean endpoints ni contratos nuevos: la UI consume la API ya
+  consolidada en hitos anteriores.
+
+Verificacion:
+
+- el frontend compila con la banda de contexto operativo;
+- la suite backend relevante sigue pasando;
+- la memoria academica se recompila tras documentar el cierre del hito.
+
+Ampliacion visual 2026-05-29:
+
+- `GET /runs/{run_id}/visualization` devuelve metricas, proyeccion PCA 2D de
+  features, anomalias detectadas y frontera visual aproximada;
+- el frontend incorpora la pestaña `Visualizacion` con barras de metricas y
+  scatter 2D;
+- la pestaña `Agentes` incorpora una lectura humana determinista del JSON de
+  cada evento antes del payload tecnico;
+- la visualizacion reutiliza artefactos persistidos y no recalcula modelos ni
+  lee ficheros directamente desde el navegador.
+
+Ampliacion LLM/Ollama 2026-05-31:
+
+- el modelo de chat por defecto pasa a ser `qwen3.5:4b`, el Qwen usado en las
+  pruebas agenticas de fases anteriores;
+- `GET /llm/status` expone disponibilidad de Ollama, modelo configurado, host y
+  catalogo local;
+- la API elimina el bloqueo fijo de `use_llm=true` y lo sustituye por una
+  comprobacion previa de Ollama/modelo antes de ejecutar;
+- `run_dataset_pipeline(...)` construye agentes Ollama cuando
+  `PipelineRunRequest.use_llm=true`;
+- el frontend muestra estado LLM y permite que `Agentes LLM` active llamadas
+  reales a Ollama desde la ejecucion web;
+- `use_memory=true` sigue bloqueado en ejecucion API para no mezclar este
+  avance con retrieval/embeddings durante la run web.
+
+Rediseño UX 2026-05-31:
+
+- la interfaz se reorganiza como una aplicacion SaaS/MLOps local con
+  `AppShell`, sidebar estable, cabecera operacional y resumen de salud;
+- la vista `Pipeline` se separa en configuracion, preflight, ejecucion y
+  registro de runs para que el flujo sea configurar, planificar, ejecutar y
+  revisar resultados;
+- los detalles tecnicos secundarios, como rutas canonicas, `adapter_id`,
+  `policy_id` y fases manuales, quedan en paneles plegables;
+- las vistas `Agentes` y `Visualizacion` se mantienen como areas de trabajo
+  independientes dentro de la misma navegacion;
+- no se anaden endpoints, runners ni contratos nuevos: el rediseño reutiliza la
+  API existente y solo mejora jerarquia, mantenibilidad y legibilidad visual.
+
 ## Hito 8: Empaquetado local de desarrollo
 
 Objetivo: facilitar que backend y frontend se levanten de forma reproducible.
@@ -490,6 +550,10 @@ codigo/docs/40_runs_detalle_fase5.md
 codigo/docs/41_observabilidad_agentica_fase5.md
 codigo/docs/42_memoria_persistida_frontend_fase5.md
 codigo/docs/43_human_review_ui_fase5.md
+codigo/docs/44_frontend_operativo_fase5.md
+codigo/docs/45_visualizaciones_frontend_fase5.md
+codigo/docs/46_ollama_qwen_frontend_fase5.md
+codigo/docs/47_rediseño_dashboard_frontend_fase5.md
 codigo/frontend/README.md
 ```
 
@@ -506,5 +570,6 @@ curl -sS -X POST http://127.0.0.1:5173/api/runs ...
 curl -sS http://127.0.0.1:5173/api/runs/hito3-cwru-bg-20260529-01/artifacts
 ```
 
-El siguiente paso logico pasa a ser consolidar el Hito 7 como flujo frontend
-operativo completo y preparar el empaquetado local de desarrollo del Hito 8.
+El siguiente paso logico pasa a ser preparar el empaquetado local de desarrollo
+del Hito 8, documentando comandos de arranque backend/frontend y pruebas de
+humo reproducibles.

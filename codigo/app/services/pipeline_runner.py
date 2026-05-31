@@ -43,6 +43,7 @@ from codigo.app.services.dataset_adapters import (
     get_dataset_adapter,
     infer_dataset_adapter,
 )
+from codigo.app.services.llm_agents import build_ollama_pipeline_agents
 from codigo.app.services.nasa_ims_temporal_policy import (
     NASA_IMS_TEMPORAL_POLICY_V1,
     apply_nasa_ims_temporal_policy_to_result,
@@ -364,9 +365,12 @@ def _agents_for_plan(
     plan: DatasetPipelinePlan,
     agents: PipelineAgents | None,
 ) -> PipelineAgents | None:
+    configured_agents = agents
+    if configured_agents is None and plan.request.use_llm:
+        configured_agents = build_ollama_pipeline_agents()
     if plan.request.execution_mode != "diagnostic":
-        return agents
-    base = agents or PipelineAgents()
+        return configured_agents
+    base = configured_agents or PipelineAgents()
 
     def supervisor(state: TFMStateModel) -> SupervisorDecision:
         if state.current_stage == _stage_after_diagnostic_cutoff(plan):

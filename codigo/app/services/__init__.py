@@ -1,10 +1,13 @@
 """Servicios compartidos de la aplicacion."""
 
 from codigo.app.services.llm import (
+    DEFAULT_OLLAMA_CHAT_MODEL,
     JSONLLMClient,
     LLMCallError,
     LLMMessage,
+    LLMProviderStatus,
     OllamaJSONClient,
+    get_default_llm_status,
     get_default_json_llm_client,
     parse_json_object,
 )
@@ -126,6 +129,7 @@ __all__ = [
     "DEFAULT_EXPERIMENTS_DIR",
     "DEFAULT_MODEL_PLAN_ID",
     "DEFAULT_MEMORY_DIR",
+    "DEFAULT_OLLAMA_CHAT_MODEL",
     "DEFAULT_OLLAMA_EMBEDDING_MODEL",
     "DEFAULT_PLAN_ID",
     "DEFAULT_WINDOW_PLAN_ID",
@@ -142,6 +146,7 @@ __all__ = [
     "JSONLLMClient",
     "LLMCallError",
     "LLMMessage",
+    "LLMProviderStatus",
     "LocalHashEmbeddingModel",
     "LocalJsonVectorMemoryStore",
     "MetricComparison",
@@ -172,6 +177,7 @@ __all__ = [
     "get_dataset_adapter",
     "get_run",
     "get_run_artifacts",
+    "get_default_llm_status",
     "get_default_json_llm_client",
     "get_default_embedding_provider",
     "generate_degradation_diagnostics",

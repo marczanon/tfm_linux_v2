@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 
+DEFAULT_OLLAMA_CHAT_MODEL = "qwen3.5:4b"
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+
+
 class LLMCallError(RuntimeError):
     """Error controlado durante una llamada LLM."""
 
@@ -36,11 +40,26 @@ class JSONLLMClient(Protocol):
 
 
 @dataclass(frozen=True)
+class LLMProviderStatus:
+    """Estado observable del proveedor LLM local."""
+
+    provider: str
+    model: str
+    host: str
+    timeout_seconds: float
+    think: bool | None
+    available: bool
+    model_available: bool
+    models: list[str]
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
 class OllamaJSONClient:
     """Cliente local para Ollama usando `/api/chat` y modo JSON."""
 
     model: str
-    host: str = "http://127.0.0.1:11434"
+    host: str = DEFAULT_OLLAMA_HOST
     timeout_seconds: float = 60.0
     think: bool | None = False
 
@@ -93,11 +112,8 @@ def get_default_json_llm_client() -> JSONLLMClient:
     if provider != "ollama":
         raise LLMCallError(f"unsupported TFM_LLM_PROVIDER: {provider}")
 
-    model = os.getenv("TFM_LLM_MODEL") or os.getenv("OLLAMA_MODEL")
-    if not model:
-        raise LLMCallError("TFM_LLM_MODEL or OLLAMA_MODEL must be set")
-
-    host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    model = _default_ollama_model()
+    host = _default_ollama_host()
     timeout = float(os.getenv("TFM_LLM_TIMEOUT_SECONDS", "60"))
     think = _ollama_think_from_env()
     return OllamaJSONClient(
@@ -105,6 +121,64 @@ def get_default_json_llm_client() -> JSONLLMClient:
         host=host,
         timeout_seconds=timeout,
         think=think,
+    )
+
+
+def get_default_llm_status(
+    *,
+    timeout_seconds: float = 2.0,
+) -> LLMProviderStatus:
+    """Comprueba si Ollama y el modelo de chat configurado estan disponibles."""
+
+    provider = os.getenv("TFM_LLM_PROVIDER", "ollama").strip().lower()
+    model = _default_ollama_model()
+    host = _default_ollama_host()
+    think = _ollama_think_from_env()
+    if provider != "ollama":
+        return LLMProviderStatus(
+            provider=provider,
+            model=model,
+            host=host,
+            timeout_seconds=timeout_seconds,
+            think=think,
+            available=False,
+            model_available=False,
+            models=[],
+            detail=f"unsupported TFM_LLM_PROVIDER: {provider}",
+        )
+
+    request = urllib.request.Request(
+        f"{host.rstrip('/')}/api/tags",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return LLMProviderStatus(
+            provider=provider,
+            model=model,
+            host=host,
+            timeout_seconds=timeout_seconds,
+            think=think,
+            available=False,
+            model_available=False,
+            models=[],
+            detail=f"ollama status check failed: {exc}",
+        )
+
+    models = _model_names_from_tags_response(raw_response)
+    return LLMProviderStatus(
+        provider=provider,
+        model=model,
+        host=host,
+        timeout_seconds=timeout_seconds,
+        think=think,
+        available=True,
+        model_available=model in models,
+        models=models,
+        detail=None if model in models else f"model not found in Ollama: {model}",
     )
 
 
@@ -129,6 +203,18 @@ def parse_json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
+def _default_ollama_model() -> str:
+    return (
+        os.getenv("TFM_LLM_MODEL")
+        or os.getenv("OLLAMA_MODEL")
+        or DEFAULT_OLLAMA_CHAT_MODEL
+    )
+
+
+def _default_ollama_host() -> str:
+    return os.getenv("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
+
+
 def _ollama_think_from_env() -> bool | None:
     raw_value = os.getenv("TFM_LLM_THINK")
     if raw_value is None:
@@ -144,3 +230,19 @@ def _ollama_think_from_env() -> bool | None:
     raise LLMCallError(
         "TFM_LLM_THINK must be true, false, auto, omit or none"
     )
+
+
+def _model_names_from_tags_response(raw_response: Any) -> list[str]:
+    if not isinstance(raw_response, dict):
+        return []
+    raw_models = raw_response.get("models", [])
+    if not isinstance(raw_models, list):
+        return []
+    names: list[str] = []
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("model")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return sorted(set(names))
