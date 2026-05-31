@@ -91,7 +91,7 @@ Documentos iniciales:
 - `35_protocolo_reutilizacion_anti_duplicacion.md`: protocolo transversal para
   buscar capacidades existentes antes de crear codigo, contratos, scripts,
   endpoints o tests nuevos.
-- `36_hoja_ruta_fase_5_aplicacion.md`: hoja de ruta activa para construir la
+- `36_hoja_ruta_fase_5_aplicacion.md`: hoja de ruta de Fase 5 para construir la
   aplicacion local backend/frontend, con seleccion o ingesta de datasets,
   ejecucion de runs, seguimiento de jobs, visualizacion de artefactos y memoria
   local.
@@ -128,3 +128,29 @@ Documentos iniciales:
 - `47_rediseño_dashboard_frontend_fase5.md`: refactor UX/UI del frontend hacia
   un dashboard SaaS/MLOps local con shell, navegacion, paneles operativos y
   detalles tecnicos plegables sin cambiar contratos backend.
+- `48_hoja_ruta_fase_6_dockerizacion.md`: hoja de ruta activa de Fase 6 para
+  dockerizacion, reproducibilidad local, pruebas de humo y preparacion de demo
+  final, manteniendo la metodologia de reutilizacion y contratos estrictos.
+- `49_fase6_supuestos_entorno.md`: primer hito de Fase 6; fija inventario,
+  puertos, variables de entorno, volumenes persistentes y decision de mantener
+  Ollama externo al compose inicial.
+- `50_fase6_configuracion_reproducible.md`: segundo hito de Fase 6; crea la
+  plantilla de entorno de Docker, documenta `codigo/docker/` y hace configurable
+  el proxy Vite de desarrollo sin cambiar el modo local.
+- `51_fase6_imagen_backend.md`: tercer hito de Fase 6; define la imagen Docker
+  backend FastAPI, `.dockerignore`, comandos de build/run y verificacion
+  correcta de `GET /health`, adaptadores y estado LLM desde contenedor.
+- `52_fase6_imagen_frontend.md`: cuarto hito de Fase 6; define la imagen Docker
+  frontend con build React/Vite, Nginx, proxy `/api` hacia backend y
+  verificacion de HTML, healthcheck y endpoints API a traves del contenedor.
+- `53_fase6_compose_local.md`: quinto hito de Fase 6; crea el compose local
+  backend/frontend, monta volumenes persistentes, mantiene Ollama externo y
+  valida el stack con puertos alternativos para no interferir con el desarrollo
+  local.
+- `54_cierre_operativo_fase6.md`: cierre operativo de Fase 6 en el Hito 5; deja
+  Docker como minimo reproducible backend/frontend y difiere smoke tests y demo
+  final hasta el siguiente bloque de mejoras funcionales de la aplicacion.
+- `55_recap_mejoras_fase7.md`: recap de capacidades actuales y propuestas para
+  preparar Fase 7, separando mejoras imprescindibles de auditabilidad, mejoras
+  importantes de producto e ideas agenticas avanzadas compatibles con la
+  metodologia anti-duplicacion.

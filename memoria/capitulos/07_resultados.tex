@@ -294,6 +294,34 @@ Este punto refuerza la aportacion central del TFM: el sistema no solo registra
 metricas finales, sino tambien por que un agente cambio una configuracion, que
 efecto esperaba y si la evidencia posterior respalda ese razonamiento.
 
+\subsection{Resultado operativo de Fase 5}
+
+El resultado principal de Fase 5 es cualitativo y arquitectonico: el sistema
+pasa de ser un conjunto de scripts, servicios y endpoints a una aplicacion web
+local capaz de operar el pipeline completo. Desde la interfaz se puede
+configurar una run, planificarla, detectar bloqueos metodologicos, ejecutarla
+en segundo plano, seguir el job, abrir el snapshot, revisar metricas, informe y
+artefactos, comparar ejecuciones, observar eventos agenticos, consultar memoria
+persistida y visualizar una proyeccion PCA cuando existen artefactos
+compatibles.
+
+La activacion de `use\_llm=true` deja de ser un modo bloqueado y pasa a estar
+condicionada por una comprobacion explicita de Ollama y del modelo
+`qwen3.5:4b`. Esto confirma que la aplicacion web puede invocar agentes Qwen
+reales sin relajar los contratos JSON/Pydantic ni permitir ejecucion de codigo
+generado. Al mismo tiempo, la memoria se mantiene visible y consultable desde
+la interfaz, pero su activacion como retrieval durante ejecuciones web queda
+fuera del cierre de Fase 5 para no mezclar dos cambios metodologicos
+independientes.
+
+El rediseño final del frontend mejora tambien la interpretabilidad operacional:
+se separan configuracion, preflight, ejecucion, historico, agentes, memoria y
+visualizacion; se ocultan rutas locales de ficheros en la pagina web; y los
+detalles tecnicos quedan disponibles sin dominar la lectura principal. Por
+tanto, Fase 5 aporta una capa de producto local que hace defendible el sistema
+ante una demo, aunque todavia no resuelve empaquetado, despliegue ni
+multiusuario.
+
 \section{Limitaciones observadas}
 
 Los resultados sobre CWRU deben interpretarse como validacion del pipeline y del

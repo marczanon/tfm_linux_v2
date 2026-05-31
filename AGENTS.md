@@ -9,6 +9,7 @@ Este repositorio corresponde a un TFM sobre una aplicacion multiagente para proc
 Documento de referencia principal:
 
 - `Documento TFM_ Arquitectura y Hoja de Ruta.pdf`
+- `codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md`
 - `codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`
 - `codigo/docs/32_hoja_ruta_fase_4.md`
 - `codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md`
@@ -16,10 +17,11 @@ Documento de referencia principal:
 - `codigo/docs/20_hoja_ruta_fase_2.md`
 - `codigo/docs/19_estado_actual_mvp.md`
 
-`HOJA_RUTA_TFM.md` queda como referencia historica de la Fase 1. A partir del
-cierre operativo de la Fase 4, la guia operativa para nuevas sesiones es
-`codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`, usando Fase 4, Fase 3 y Fase 2
-como contexto historico.
+`HOJA_RUTA_TFM.md` queda como referencia historica de la Fase 1. Tras el cierre
+operativo de la Fase 6 en el Hito 5, la guia inmediata para nuevas sesiones es
+`codigo/docs/54_cierre_operativo_fase6.md`, usando
+`codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md`, Fase 5, Fase 4, Fase 3 y
+Fase 2 como contexto historico.
 
 La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los agentes toman decisiones y generan configuraciones estructuradas. Los ejecutores Python deterministas realizan las transformaciones reales sobre los datos.
 
@@ -30,13 +32,18 @@ La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los 
 - La memoria LaTeX vive en `memoria/`.
 - Los recursos academicos, PDFs, referencias y diagramas viven en `recursos/`.
 - La memoria debe actualizarse en paralelo al desarrollo.
-- Antes de implementar una fase, revisar
-  `codigo/docs/36_hoja_ruta_fase_5_aplicacion.md` y
+- Antes de implementar una nueva mejora, revisar
+  `codigo/docs/54_cierre_operativo_fase6.md`,
+  `codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md` y
   `codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md`; usar
+  `codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`,
   `codigo/docs/32_hoja_ruta_fase_4.md`, `codigo/docs/26_hoja_ruta_fase_3.md`
   y `codigo/docs/20_hoja_ruta_fase_2.md` como contexto historico.
-- En Fase 5, frontend local queda dentro de alcance; Docker, SLURM y despliegue
-  cloud siguen fuera de alcance salvo decision explicita.
+- La Fase 6 queda cerrada operativamente con Docker minimo reproducible
+  backend/frontend. El siguiente bloque vuelve al pulido funcional de la
+  aplicacion; los cambios relevantes se trasladaran a Docker mediante rebuild y
+  validacion manual. SLURM, despliegue cloud y autenticacion multiusuario siguen
+  fuera de alcance salvo decision explicita.
 - No permitir que un agente escriba y ejecute codigo arbitrario para transformar datos.
 - Las decisiones de agentes deben pasar por esquemas Pydantic o contratos JSON estrictos.
 - Los ejecutores deben ser funciones o modulos Python reproducibles y testeables.
@@ -120,8 +127,9 @@ recursos/diagramas/
 ## Orden recomendado de desarrollo
 
 Este orden historico corresponde a la Fase 1 y se conserva como contexto del
-MVP ya construido. Para trabajo nuevo, seguir la Fase 4 definida en
-`codigo/docs/32_hoja_ruta_fase_4.md`.
+MVP ya construido. Para trabajo nuevo, seguir el cierre operativo de Fase 6 en
+`codigo/docs/54_cierre_operativo_fase6.md` y la metodologia de reutilizacion en
+`codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md`.
 
 1. Crear estructura de directorios.
 2. Crear esqueleto LaTeX de la memoria.
@@ -273,7 +281,8 @@ No abordar dentro de la Fase 2:
 ## Nota operativa
 
 Antes de empezar cualquier cambio de codigo, leer este archivo y
-`codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`, usando
-`codigo/docs/32_hoja_ruta_fase_4.md` como referencia de cierre de la fase
-anterior. El proyecto debe avanzar paso a paso, manteniendo reproducibilidad,
-trazabilidad y separacion limpia entre aplicacion y memoria academica.
+`codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md`, usando
+`codigo/docs/36_hoja_ruta_fase_5_aplicacion.md` como referencia de cierre de la
+fase anterior. El proyecto debe avanzar paso a paso, manteniendo
+reproducibilidad, trazabilidad y separacion limpia entre aplicacion y memoria
+academica.

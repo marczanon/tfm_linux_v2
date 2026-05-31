@@ -1597,3 +1597,83 @@ legibilidad y mantenibilidad de la aplicacion local.
 Como ultimo pulido de interfaz, se evita renderizar rutas locales de ficheros en
 la pagina web y el panel de nueva ejecucion deja de comportarse como un bloque
 pegajoso durante el desplazamiento vertical.
+
+Con estos elementos, la Fase 5 queda cerrada como aplicacion local avanzada y
+defendible. El sistema ya no depende solo de scripts para demostrar el flujo:
+permite operar la API desde una interfaz web, ejecutar runs controladas,
+seguir jobs, consultar resultados, observar agentes, revisar memoria y analizar
+visualizaciones. Las limitaciones que permanecen son deliberadas: no se ha
+introducido autenticacion multiusuario, cola persistida, despliegue cloud ni
+empaquetado Docker. La siguiente fase se centra precisamente en la
+dockerizacion, la reproducibilidad local y la preparacion de una demo final
+repetible, manteniendo la misma metodologia de reutilizacion, contratos
+estrictos y separacion entre razonamiento generativo y ejecucion determinista.
+
+El primer paso de la Fase 6 no consiste aun en crear imagenes, sino en fijar los
+supuestos de entorno. Se documentan los puertos canonicos del sistema local
+(`8010` para FastAPI, `5173` para Vite y `11434` para Ollama), las variables de
+entorno necesarias para Qwen y embeddings, y los directorios que deberan
+montarse como volumenes persistentes (`codigo/data`, `codigo/reports`,
+`codigo/models` y `codigo/experiments`). Tambien se decide que Ollama quedara
+externo al primer `docker-compose`, de forma que los modelos locales no se
+descarguen ni empaqueten dentro de las imagenes iniciales.
+
+El segundo paso prepara la configuracion reproducible sin crear todavia
+contenedores. Se añade una plantilla `.env.example` en `codigo/docker/` con las
+variables de backend, frontend, LLM, embeddings y volumenes previstos, y se
+documenta el uso esperado de la carpeta Docker. Ademas, el proxy de desarrollo
+de Vite se hace configurable mediante `VITE\_DEV\_PROXY\_TARGET`, conservando
+`http://127.0.0.1:8010` como valor por defecto para el desarrollo local.
+
+El tercer paso define la primera imagen Docker del backend. Se añade un
+`.dockerignore` para excluir caches, dependencias frontend, datasets, reports,
+modelos, experimentos y recursos academicos del contexto de build, y se crea un
+`backend.Dockerfile` basado en `python:3.11-slim`. La imagen instala
+`requirements.txt`, copia unicamente el paquete `codigo.app`, crea los
+directorios base que despues se montaran como volumenes y arranca la API con
+Uvicorn en el puerto `8010`. La verificacion estatica del paquete Python se
+ejecuta correctamente. Tras activar Docker Desktop, la imagen
+`tfm-backend:fase6-hito3` se construye y se valida con un contenedor publicado
+en `8015:8010` para no interferir con la API local ya activa en `8010`. Los
+endpoints `GET /health`, `GET /datasets/adapters` y `GET /llm/status` responden
+desde el contenedor; este ultimo confirma la comunicacion con Ollama externo a
+traves de `host.docker.internal:11434` y disponibilidad del modelo
+`qwen3.5:4b`.
+
+El cuarto paso empaqueta el frontend como una imagen estatica reproducible. Se
+opta por no ejecutar Vite en modo desarrollo dentro de Docker: la imagen usa
+`node:22-alpine` para instalar dependencias con `npm ci` y generar el build
+React/Vite, y una segunda etapa `nginx:1.27-alpine` para servir los artefactos
+compilados. La variable `VITE\_API\_BASE\_URL` mantiene `/api` como frontera
+publica del navegador, mientras que una plantilla Nginx redirige ese prefijo a
+`TFM\_BACKEND\_URL`, que en compose apuntara al servicio `backend` y en pruebas
+manuales puede apuntar al backend local mediante
+`host.docker.internal:8010`. La verificacion confirma que `npm run build` pasa
+en local, que la imagen `tfm-frontend:fase6-hito4` se construye correctamente y
+que un contenedor publicado en `5174:5173` sirve el HTML del dashboard,
+responde a `/healthz` y comunica con la API mediante `/api/health` y
+`/api/datasets/adapters`. El healthcheck Docker queda en estado `healthy`.
+
+El quinto paso integra ambas imagenes en un `docker-compose.yml` local. El
+servicio `backend` construye la imagen FastAPI, monta `codigo/data`,
+`codigo/reports`, `codigo/models` y `codigo/experiments` como bind mounts y
+conserva Ollama como dependencia externa mediante
+`host.docker.internal:11434`. El servicio `frontend` construye la imagen web,
+espera a que el backend este saludable y redirige su proxy `/api` al servicio
+interno `backend:8010`. Los puertos publicados en el host quedan
+parametrizados, de modo que la validacion se ejecuta en `8016` y `5175` sin
+interferir con la API local ya activa en `8010`. La comprobacion de compose
+confirma que ambos servicios quedan `healthy`, que el backend responde a
+`/health` y `/llm/status`, que el frontend sirve el HTML compilado y que el
+proxy Nginx devuelve correctamente `/api/health` y
+`/api/datasets/adapters`.
+
+Con este resultado, la Fase 6 queda cerrada operativamente en el Hito 5. La
+decision es no automatizar todavia las pruebas de humo ni preparar la demo
+final cerrada, porque el siguiente bloque de trabajo volvera a la aplicacion
+para pulir funcionalidad, ampliar capacidades, revisar fronteras y mejorar la
+experiencia de usuario. Docker queda como base reproducible minima: a partir de
+ahora, cada cambio relevante de backend, frontend, dependencias o variables se
+desarrollara primero en local y se trasladara despues al stack dockerizado
+mediante reconstruccion y validacion manual. Esta decision evita fijar una
+secuencia de pruebas sobre una superficie que todavia se espera que evolucione.

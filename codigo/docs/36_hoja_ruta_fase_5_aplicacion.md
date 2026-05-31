@@ -460,6 +460,15 @@ Rediseño UX 2026-05-31:
 
 Objetivo: facilitar que backend y frontend se levanten de forma reproducible.
 
+Decision de cierre 2026-05-31:
+
+Este hito se traslada a la Fase 6. Tras completar el frontend avanzado, la
+integracion API, la observabilidad, la memoria consultable, la visualizacion y
+la activacion controlada de Qwen/Ollama, la Fase 5 se cierra como aplicacion
+local funcional. El empaquetado reproducible, Docker y pruebas de humo del
+entorno completo se abordaran en una fase especifica para no mezclar pulido de
+producto con infraestructura de despliegue.
+
 Trabajo previsto:
 
 - documentar comandos de arranque backend/frontend;
@@ -479,6 +488,13 @@ Criterio de aceptacion:
 ## Hito 9: Demo end-to-end de Fase 5
 
 Objetivo: cerrar la fase con una ejecucion demostrable de aplicacion completa.
+
+Decision de cierre 2026-05-31:
+
+La demo queda planteada como evidencia de cierre y como punto de entrada de
+Fase 6. Las pruebas manuales realizadas sobre el frontend indican que el flujo
+principal opera correctamente; la siguiente fase debera convertir esa evidencia
+en una prueba de humo reproducible del entorno local.
 
 Demo candidata:
 
@@ -570,6 +586,31 @@ curl -sS -X POST http://127.0.0.1:5173/api/runs ...
 curl -sS http://127.0.0.1:5173/api/runs/hito3-cwru-bg-20260529-01/artifacts
 ```
 
-El siguiente paso logico pasa a ser preparar el empaquetado local de desarrollo
-del Hito 8, documentando comandos de arranque backend/frontend y pruebas de
-humo reproducibles.
+## Cierre operativo de Fase 5
+
+Estado: cerrada como aplicacion local avanzada.
+
+Capacidades consolidadas:
+
+- backend FastAPI con contratos canonicos de ejecucion, runs, jobs, memoria,
+  LLM y visualizacion;
+- frontend React/Vite organizado como dashboard local de operacion;
+- configuracion de run, preflight, ejecucion background, seguimiento de job,
+  historial, detalle, metricas, informe, artefactos y comparacion;
+- vistas independientes de agentes, memoria persistida y visualizacion PCA;
+- Human Review local y trazable;
+- integracion real con Ollama/Qwen mediante `use_llm=true` y `GET /llm/status`;
+- rutas locales ocultas en la UI, manteniendo los contratos internos del
+  backend.
+
+Limitaciones aceptadas para el cierre:
+
+- no hay empaquetado Docker ni `docker-compose` todavia;
+- los jobs siguen siendo locales y en memoria;
+- la memoria se consulta desde UI, pero `use_memory=true` no queda activado en
+  ejecucion web;
+- no hay autenticacion multiusuario, despliegue cloud ni SLURM;
+- las pruebas visuales end-to-end automatizadas quedan para una fase posterior.
+
+El siguiente paso logico pasa a ser la Fase 6:
+`codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md`.

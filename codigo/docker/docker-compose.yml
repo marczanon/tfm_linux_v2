@@ -1,0 +1,48 @@
+name: tfm-fase6
+
+services:
+  backend:
+    image: tfm-backend:fase6
+    build:
+      context: ../..
+      dockerfile: codigo/docker/backend.Dockerfile
+    env_file:
+      - .env.example
+    environment:
+      TFM_API_HOST: 0.0.0.0
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${TFM_API_PORT:-8010}:8010"
+    volumes:
+      - type: bind
+        source: ${TFM_HOST_DATA_DIR:-../data}
+        target: /workspace/codigo/data
+      - type: bind
+        source: ${TFM_HOST_REPORTS_DIR:-../reports}
+        target: /workspace/codigo/reports
+      - type: bind
+        source: ${TFM_HOST_MODELS_DIR:-../models}
+        target: /workspace/codigo/models
+      - type: bind
+        source: ${TFM_HOST_EXPERIMENTS_DIR:-../experiments}
+        target: /workspace/codigo/experiments
+
+  frontend:
+    image: tfm-frontend:fase6
+    build:
+      context: ../..
+      dockerfile: codigo/docker/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    env_file:
+      - .env.example
+    environment:
+      TFM_BACKEND_URL: http://backend:8010
+      TFM_FRONTEND_PORT: 5173
+    ports:
+      - "${TFM_FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      backend:
+        condition: service_healthy

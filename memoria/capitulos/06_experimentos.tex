@@ -640,6 +640,35 @@ experimental es que la politica temporal desbloquea una ejecucion completa y
 auditable, aunque las metricas siguen siendo proxy metodologicas y requieren un
 protocolo mas robusto antes de usarse como resultado principal.
 
+\section{Validacion operativa de la aplicacion local}
+
+La Fase 5 no introduce un nuevo benchmark numerico, sino una validacion
+operativa de la aplicacion que envuelve el pipeline. El criterio experimental
+pasa a ser comprobar que el flujo completo puede ejecutarse desde una interfaz
+web local sin duplicar la logica de planificacion ni leer artefactos
+directamente desde el navegador.
+
+La validacion se organizo alrededor de los siguientes puntos:
+
+\begin{itemize}
+  \item compilacion del frontend React/Vite mediante `npm run build`;
+  \item comprobacion de `GET /health` a traves del proxy local del frontend;
+  \item comprobacion de `GET /llm/status` para verificar disponibilidad de
+        Ollama y del modelo `qwen3.5:4b`;
+  \item preflight de CWRU mediante `POST /runs` con `dry\_run=true`;
+  \item ejecucion en segundo plano con polling de job local;
+  \item consulta de snapshot, metricas, informe, artefactos, memoria,
+        observabilidad agentica y visualizacion;
+  \item preflight de NASA IMS conservando los bloqueos o advertencias
+        metodologicas declaradas por la politica de dataset.
+\end{itemize}
+
+Esta validacion no sustituye las metricas de los experimentos anteriores. Su
+valor es demostrar que la arquitectura completa puede operarse como una
+aplicacion local, manteniendo FastAPI como frontera canonica, los snapshots
+persistidos como fuente de verdad y los ejecutores deterministas como unica
+capa que transforma datos.
+
 \section{Experimentos posteriores}
 
 Experimentos previstos:

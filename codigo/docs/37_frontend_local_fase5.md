@@ -149,5 +149,6 @@ frontend.
 
 ## Siguiente paso
 
-Documentar los comandos locales de arranque backend/frontend y las pruebas de
-humo del empaquetado local de desarrollo.
+Fase 5 queda cerrada como aplicacion local avanzada. El siguiente bloque de
+trabajo pasa a `codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md`, centrado en
+Docker, reproducibilidad del entorno local y pruebas de humo de la demo final.

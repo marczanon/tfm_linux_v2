@@ -1,0 +1,27 @@
+# Git y cache local
+.git/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Entornos y configuracion local
+.env
+.venv/
+venv/
+env/
+
+# Frontend generado o pesado
+codigo/frontend/node_modules/
+codigo/frontend/dist/
+
+# Datos, artefactos y modelos se montan como volumenes
+codigo/data/
+codigo/reports/
+codigo/models/
+codigo/experiments/
+
+# Salidas academicas y recursos fuera del backend
+memoria/
+recursos/

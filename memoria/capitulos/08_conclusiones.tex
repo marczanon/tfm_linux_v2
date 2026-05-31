@@ -45,6 +45,13 @@ orientacion permite que el sistema aprenda gradualmente de ejecuciones reales,
 sin forzar errores artificiales y manteniendo la separacion entre contexto
 recuperado, decision agentica y validacion determinista.
 
+La sexta aportacion corresponde a la Fase 5: una aplicacion web local para
+operar el pipeline multiagente. La interfaz permite planificar, ejecutar,
+monitorizar, comparar, observar agentes, consultar memoria y visualizar
+resultados sin duplicar la logica del backend ni leer ficheros directamente
+desde el navegador. Esta capa convierte la arquitectura en una herramienta
+demostrable y no solo en un conjunto de scripts reproducibles.
+
 \section{Limitaciones}
 
 Las metricas de CWRU no deben interpretarse como garantia de rendimiento en
@@ -59,6 +66,15 @@ los agentes. Esta decision es intencionada: se evita pedir a un LLM local que
 invente conocimiento de dominio, pero obliga a mantener diagnosticos,
 contratos, registros de modelos y revisiones humanas bien documentados.
 
+Con el cierre operativo de la Fase 6 ya existen imagenes Docker iniciales para
+backend y frontend, ademas de un `docker-compose` minimo que captura puertos,
+volumenes y variables principales del stack local. Las pruebas de humo
+automatizadas y la secuencia de demo final se difieren hasta estabilizar el
+siguiente bloque funcional de la aplicacion, y Ollama se mantiene como
+dependencia externa documentada. Ademas, los jobs de la API siguen siendo
+locales y en memoria, lo que es suficiente para la demo local pero no para una
+plataforma productiva.
+
 \section{Trabajo futuro}
 
 Las lineas principales son:
@@ -71,12 +87,18 @@ Las lineas principales son:
         persistencia y evaluacion comparable;
   \item ampliar la experimentacion multi-dataset con planes acotados y
         comparacion frente a politicas deterministas;
-  \item construir en Fase 5 una aplicacion local backend/frontend que permita
-        seleccionar o recibir datasets, lanzar runs controladas, seguir jobs,
-        visualizar resultados y consultar memoria agentica local;
-  \item evolucionar Human Review desde la puerta API inicial hacia una experiencia
-        visual de aprobacion, manteniendo las pruebas automatizadas con
-        intervencion humana apagada por defecto;
-  \item preparar Docker, SLURM y checkpoints persistentes cuando el flujo local
-        y la politica de ejecucion esten suficientemente estabilizados.
+  \item pulir la aplicacion web y backend tras disponer ya de un minimo Docker
+        reproducible, ampliando funcionalidad, usabilidad y fronteras de
+        consulta sin duplicar contratos;
+  \item convertir las comprobaciones manuales de Docker en pruebas de humo
+        automatizadas cuando la superficie funcional de la aplicacion este mas
+        estabilizada;
+  \item preparar una demo final repetible que levante la aplicacion, verifique
+        Ollama/Qwen, ejecute CWRU desde la interfaz y muestre el bloqueo o la
+        politica declarada de NASA IMS;
+  \item evolucionar Human Review y memoria desde vistas locales hacia flujos mas
+        robustos, manteniendo las pruebas automatizadas con intervencion humana
+        apagada por defecto;
+  \item preparar SLURM, checkpoints persistentes o despliegue cloud solo cuando
+        el empaquetado local y la politica de ejecucion esten estabilizados.
 \end{itemize}
