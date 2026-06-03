@@ -39,6 +39,23 @@ class NasaIMSTemporalPolicyTests(unittest.TestCase):
             ["train", "test", "test"],
         )
         self.assertTrue(all(_metadata(row)["official_nasa_labels"] is False for row in rows))
+        self.assertTrue(all(_metadata(row)["official_window_labels"] is False for row in rows))
+        self.assertEqual(
+            {_metadata(row)["label_source"] for row in rows},
+            {"temporal_proxy"},
+        )
+        self.assertEqual(
+            {_metadata(row)["label_granularity"] for row in rows},
+            {"proxy_temporal"},
+        )
+        self.assertEqual(
+            {_metadata(row)["failure_event_time"] for row in rows},
+            {"2004-02-12T10:52:40.024000"},
+        )
+        self.assertEqual(
+            {_metadata(row)["failure_mode"] for row in rows},
+            {"bearing_1_outer_race"},
+        )
         self.assertTrue(
             all(
                 _metadata(row)["dataset_policy_id"] == NASA_IMS_TEMPORAL_POLICY_V1

@@ -99,6 +99,9 @@ class DatasetSchemaTests(unittest.TestCase):
             adapter_id="cwru_bearing",
             label_availability="file_level",
             task_type="binary_anomaly",
+            supervision_profile="binary_fault_classification",
+            label_granularity="file",
+            label_source="official",
             sampling_rate_hz=None,
             channel_names=["DE_time", "FE_time", "BA_time", "RPM"],
             has_multiple_conditions=True,
@@ -116,6 +119,9 @@ class DatasetSchemaTests(unittest.TestCase):
             adapter_id="nasa_ims_bearing",
             label_availability="partial",
             task_type="run_to_failure",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="event",
+            label_source="none",
             sampling_rate_hz=None,
             channel_names=["channel_1", "channel_2"],
             has_multiple_conditions=True,
@@ -125,7 +131,13 @@ class DatasetSchemaTests(unittest.TestCase):
         )
 
         self.assertEqual(cwru.adapter_id, "cwru_bearing")
+        self.assertEqual(cwru.supervision_profile, "binary_fault_classification")
+        self.assertEqual(cwru.label_granularity, "file")
+        self.assertEqual(cwru.label_source, "official")
         self.assertTrue(nasa.has_run_to_failure)
+        self.assertEqual(nasa.supervision_profile, "run_to_failure_degradation")
+        self.assertEqual(nasa.label_granularity, "event")
+        self.assertEqual(nasa.label_source, "none")
 
     def test_dataset_descriptor_rejects_invalid_ids_and_duplicate_channels(self):
         payload = {
@@ -138,6 +150,9 @@ class DatasetSchemaTests(unittest.TestCase):
             "adapter_id": "nasa_ims_bearing",
             "label_availability": "partial",
             "task_type": "run_to_failure",
+            "supervision_profile": "run_to_failure_degradation",
+            "label_granularity": "event",
+            "label_source": "none",
             "sampling_rate_hz": None,
             "channel_names": ["x", "x"],
             "has_multiple_conditions": True,

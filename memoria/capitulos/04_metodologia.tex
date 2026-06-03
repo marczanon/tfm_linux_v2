@@ -30,6 +30,33 @@ datos .mat crudos
 \end{minipage}
 \end{center}
 
+\section{Principio rector agentico}
+
+El objeto central de investigacion de este TFM no es solo construir un pipeline
+clasico de deteccion de anomalias, sino estudiar hasta donde puede llegar una
+arquitectura multiagente basada en LLM locales, especialmente la familia Qwen,
+en un contexto industrial de monitorizacion de activos. Por tanto, los agentes
+mantienen el protagonismo metodologico: formulan hipotesis, seleccionan
+configuraciones, interpretan evidencias, proponen alternativas, debaten
+resultados, redactan conclusiones y dejan trazabilidad de sus decisiones.
+
+Los componentes deterministas no sustituyen ese papel. Su funcion es dar a los
+agentes un entorno industrialmente defendible: contratos Pydantic, herramientas
+de observacion, calculo reproducible de metricas, ejecucion segura de
+transformaciones y persistencia auditable de artefactos. En otras palabras, la
+parte determinista actua como instrumentacion, guardarrail y brazo ejecutor,
+mientras que la linea de investigacion evalua si los agentes pequenos pueden
+tomar decisiones utiles, consistentes y trazables sobre esa evidencia.
+
+La eleccion de modelos LLM locales y relativamente pequenos es deliberada. No
+se plantea como una solucion comodamente sobredimensionada, sino como una
+hipotesis de viabilidad para entornos industriales reales, donde el coste, la
+latencia, la privacidad, la conectividad y la posibilidad de despliegue local
+son restricciones relevantes. Si el sistema llega a sus limites, esos limites
+formaran parte del resultado de investigacion; hasta entonces, la metodologia
+debe intentar llevar la linea agentica tan lejos como sea razonablemente
+posible sin abandonar seguridad, reproducibilidad ni trazabilidad.
+
 \section{Generalización multi-dataset}
 
 Tras consolidar el MVP sobre CWRU, la siguiente extensión metodológica consiste

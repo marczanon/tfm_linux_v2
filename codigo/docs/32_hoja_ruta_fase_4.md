@@ -334,8 +334,9 @@ Estado inicial implementado:
   o etiquetas sinteticas/controladas;
 - con `nasa_ims_temporal_v1`, el manifiesto NASA IMS se deriva a
   `manifest_temporal_policy_v1.csv`;
-- las etiquetas quedan marcadas como `temporal_proxy_v1` y
-  `official_nasa_labels=false`;
+- las etiquetas quedan marcadas como `label_source=temporal_proxy`,
+  `label_policy_id=nasa_ims_temporal_v1`, `official_nasa_labels=false` y
+  `official_window_labels=false`;
 - la estructuracion respeta `split_hint` desde `metadata_json` cuando todos los
   registros lo declaran;
 - la ejecucion

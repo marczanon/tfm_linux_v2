@@ -90,6 +90,97 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertIn("nasa_ims_bearing", limitations)
         self.assertNotIn("CWRU", limitations)
 
+    def test_deterministic_evaluator_uses_temporal_degradation_metrics(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-evaluator-temporal-test",
+            run_id="run-evaluator-nasa-temporal-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="proxy_temporal",
+            label_source="temporal_proxy",
+        ).model_dump(mode="json")
+        state_dict["metrics"] = MetricsReport(
+            recall=0.42,
+            f1_score=0.50,
+            false_positive_rate=0.40,
+            extra={
+                "metric_families": "binary_classification, run_to_failure_degradation",
+                "degradation_available": True,
+                "degradation_detected_before_failure_rate": 1.0,
+                "degradation_mean_lead_time_to_failure": 300.0,
+                "degradation_mean_false_alarm_rate_nominal": 0.0,
+                "degradation_mean_score_trend_spearman": 0.9,
+            },
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+
+        decision = decide_evaluation_action(state)
+
+        self.assertTrue(decision.evaluation.approved)
+        self.assertIsNone(decision.min_recall_required)
+        self.assertIsNone(decision.max_false_positive_rate)
+        self.assertIn("run-to-failure", decision.evaluation.summary)
+        self.assertIn("no son oficiales", " ".join(decision.evaluation.limitations))
+
+    def test_llm_temporal_evaluator_cannot_use_binary_threshold_fields(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-evaluator-temporal-test",
+            run_id="run-evaluator-nasa-temporal-invalid-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="proxy_temporal",
+            label_source="temporal_proxy",
+        ).model_dump(mode="json")
+        state_dict["metrics"] = MetricsReport(
+            extra={
+                "degradation_available": True,
+                "degradation_detected_before_failure_rate": 1.0,
+                "degradation_mean_lead_time_to_failure": 100.0,
+                "degradation_mean_false_alarm_rate_nominal": 0.0,
+                "degradation_mean_score_trend_spearman": 0.7,
+            },
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        client = FakeLLMClient(
+            {
+                "agent_name": "evaluator",
+                "decision_id": "run-evaluator-nasa-temporal-invalid-001:evaluator:001",
+                "rationale": "Incorrectly keeps binary threshold fields.",
+                "confidence": 0.92,
+                "evaluation": {
+                    "approved": True,
+                    "summary": "Approved with temporal metrics.",
+                    "next_action": "continue",
+                    "limitations": ["Temporal proxy labels."],
+                },
+                "min_recall_required": 0.9,
+                "max_false_positive_rate": 0.1,
+            }
+        )
+
+        decision = decide_evaluation_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 1)
+        self.assertTrue(decision.evaluation.approved)
+        self.assertIsNone(decision.min_recall_required)
+        self.assertIn("Fallback after LLM failure", decision.rationale)
+
     def test_llm_evaluation_decision_is_used_when_valid(self):
         state_dict = create_initial_cwru_state(
             thread_id="cwru-evaluator-test",

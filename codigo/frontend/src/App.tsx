@@ -29,9 +29,11 @@ import {
   getHealth,
   getLLMStatus,
   getRun,
+  getRunAuditReport,
   getRunArtifacts,
   getRunJob,
   getRunReport,
+  getRunReportDebate,
   getRunVisualization,
   getMemoryRecord,
   listDatasetAdapters,
@@ -49,6 +51,7 @@ import type {
   DatasetCapabilityRule,
   DatasetAdapterInfo,
   DatasetDescribeResponse,
+  HealthState,
   HealthResponse,
   HumanApproval,
   HumanReviewMode,
@@ -65,6 +68,7 @@ import type {
   RunIndexEntry,
   RunVisualizationData,
   RunSnapshot,
+  TemporalRunSeries,
   VisualizationMetric,
 } from "./types";
 import type { ReactNode } from "react";
@@ -96,8 +100,8 @@ const DATASET_REQUEST_DEFAULTS: Record<
     allowSyntheticLabels: false,
   },
   nasa_ims_bearing: {
-    rawPath: "codigo/data/raw/nasa_ims_bearing",
-    executionMode: "diagnostic",
+    rawPath: "codigo/data/raw/nasa_ims_bearing/preextracted_synthetic_qwen",
+    executionMode: "full",
     datasetPolicyId: "nasa_ims_temporal_v1",
     allowSyntheticLabels: false,
   },
@@ -184,6 +188,12 @@ const AGENT_PROFILES = [
     role: "Informe",
     node: "report_writer",
   },
+  {
+    id: "report_verifier",
+    label: "Verificador",
+    role: "Auditoria",
+    node: "report_verifier",
+  },
 ] as const;
 
 export default function App() {
@@ -197,6 +207,8 @@ export default function App() {
   const [selectedSnapshot, setSelectedSnapshot] = useState<RunSnapshot | null>(null);
   const [selectedArtifacts, setSelectedArtifacts] = useState<ArtifactRef[]>([]);
   const [selectedReport, setSelectedReport] = useState<string | null>(null);
+  const [selectedAuditReport, setSelectedAuditReport] = useState<string | null>(null);
+  const [selectedReportDebate, setSelectedReportDebate] = useState<string | null>(null);
   const [selectedVisualization, setSelectedVisualization] =
     useState<RunVisualizationData | null>(null);
   const [selectedCompareRunIds, setSelectedCompareRunIds] = useState<string[]>([]);
@@ -450,10 +462,22 @@ export default function App() {
     setLoadingVisualization(true);
     setError(null);
     try {
-      const [snapshot, artifacts, report, visualization] = await Promise.all([
+      const [snapshot, artifacts, report, auditReport, reportDebate, visualization] = await Promise.all([
         getRun(runId),
         getRunArtifacts(runId),
         getRunReport(runId).catch((caught) => {
+          if (caught instanceof ApiClientError && caught.status === 404) {
+            return null;
+          }
+          throw caught;
+        }),
+        getRunAuditReport(runId).catch((caught) => {
+          if (caught instanceof ApiClientError && caught.status === 404) {
+            return null;
+          }
+          throw caught;
+        }),
+        getRunReportDebate(runId).catch((caught) => {
           if (caught instanceof ApiClientError && caught.status === 404) {
             return null;
           }
@@ -470,6 +494,8 @@ export default function App() {
       setSelectedSnapshot(snapshot);
       setSelectedArtifacts(artifacts);
       setSelectedReport(report);
+      setSelectedAuditReport(auditReport);
+      setSelectedReportDebate(reportDebate);
       setSelectedVisualization(visualization);
     } catch (caught) {
       setError(errorText(caught));
@@ -704,8 +730,10 @@ export default function App() {
           selectedAdapter={selectedAdapter}
           selectedAdapterId={selectedAdapterId}
           selectedArtifacts={selectedArtifacts}
+          selectedAuditReport={selectedAuditReport}
           selectedCompareRunIds={selectedCompareRunIds}
           selectedReport={selectedReport}
+          selectedReportDebate={selectedReportDebate}
           selectedRunEntry={selectedRunEntry}
           selectedRunId={selectedRunId}
           selectedSnapshot={selectedSnapshot}
@@ -902,8 +930,10 @@ function PipelineDashboard({
   selectedAdapter,
   selectedAdapterId,
   selectedArtifacts,
+  selectedAuditReport,
   selectedCompareRunIds,
   selectedReport,
+  selectedReportDebate,
   selectedRunEntry,
   selectedRunId,
   selectedSnapshot,
@@ -946,8 +976,10 @@ function PipelineDashboard({
   selectedAdapter: DatasetAdapterInfo;
   selectedAdapterId: string;
   selectedArtifacts: ArtifactRef[];
+  selectedAuditReport: string | null;
   selectedCompareRunIds: string[];
   selectedReport: string | null;
+  selectedReportDebate: string | null;
   selectedRunEntry: RunIndexEntry | null;
   selectedRunId: string | null;
   selectedSnapshot: RunSnapshot | null;
@@ -1012,8 +1044,10 @@ function PipelineDashboard({
         loading={loadingRunDetail}
         comparingRuns={comparingRuns}
         selectedArtifacts={selectedArtifacts}
+        selectedAuditReport={selectedAuditReport}
         selectedCompareRunIds={selectedCompareRunIds}
         selectedReport={selectedReport}
+        selectedReportDebate={selectedReportDebate}
         selectedRunEntry={selectedRunEntry}
         selectedRunId={selectedRunId}
         selectedSnapshot={selectedSnapshot}
@@ -1311,8 +1345,10 @@ function RunHistoryPanel({
   loading,
   runs,
   selectedArtifacts,
+  selectedAuditReport,
   selectedCompareRunIds,
   selectedReport,
+  selectedReportDebate,
   selectedRunEntry,
   selectedRunId,
   selectedSnapshot,
@@ -1329,8 +1365,10 @@ function RunHistoryPanel({
   loading: boolean;
   runs: RunIndexEntry[];
   selectedArtifacts: ArtifactRef[];
+  selectedAuditReport: string | null;
   selectedCompareRunIds: string[];
   selectedReport: string | null;
+  selectedReportDebate: string | null;
   selectedRunEntry: RunIndexEntry | null;
   selectedRunId: string | null;
   selectedSnapshot: RunSnapshot | null;
@@ -1379,6 +1417,8 @@ function RunHistoryPanel({
         snapshot={selectedSnapshot}
         artifacts={selectedArtifacts}
         report={selectedReport}
+        auditReport={selectedAuditReport}
+        reportDebate={selectedReportDebate}
         loading={loading}
       />
     </section>
@@ -1638,6 +1678,7 @@ function AgentObservabilityView({
   const selectedEvents = eventsForAgent(events, selectedAgentId);
   const selectedEvent =
     selectedEvents.length > 0 ? selectedEvents[selectedEvents.length - 1] : null;
+  const conversationMessages = agentConversationMessages(events);
 
   return (
     <section className="agent-workspace">
@@ -1699,15 +1740,18 @@ function AgentObservabilityView({
         />
       </section>
 
-      <section className="panel timeline-panel">
+      <section className="panel conversation-panel">
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Comunicacion</p>
-            <h2>Timeline</h2>
+            <h2>Conversacion</h2>
           </div>
           <MessageSquare size={20} />
         </div>
-        <RuntimeTimeline events={events} onSelectAgent={onSelectAgent} />
+        <AgentConversation
+          messages={conversationMessages}
+          onSelectAgent={onSelectAgent}
+        />
       </section>
     </section>
   );
@@ -1821,6 +1865,69 @@ function AgentEventTranslation({ event }: { event: AgentRuntimeEvent }) {
         <strong>{agentEventPlainText(event)}</strong>
       </div>
     </section>
+  );
+}
+
+interface AgentConversationMessage {
+  id: string;
+  sequence: number;
+  agentId: string;
+  agentLabel: string;
+  role: string;
+  title: string;
+  text: string;
+  createdAt: string;
+  stage: string | null;
+  status: "normal" | "success" | "warning" | "error";
+  badges: string[];
+}
+
+function AgentConversation({
+  messages,
+  onSelectAgent,
+}: {
+  messages: AgentConversationMessage[];
+  onSelectAgent: (agentId: string) => void;
+}) {
+  if (messages.length === 0) {
+    return (
+      <p className="empty-state">
+        Sin conversacion agentica todavia
+      </p>
+    );
+  }
+
+  return (
+    <div className="agent-chat" aria-label="Conversacion agentica">
+      {messages.map((message) => (
+        <button
+          className={`chat-message ${message.status}`}
+          key={message.id}
+          type="button"
+          onClick={() => onSelectAgent(message.agentId)}
+        >
+          <span className="chat-avatar">{agentInitials(message.agentLabel)}</span>
+          <span className="chat-bubble">
+            <span className="chat-meta">
+              <strong>{message.agentLabel}</strong>
+              <em>{formatEventTime(message.createdAt)}</em>
+            </span>
+            <span className="chat-role">{message.role}</span>
+            <span className="chat-title">{message.title}</span>
+            <span className="chat-text">{message.text}</span>
+            {message.badges.length > 0 ? (
+              <span className="chat-chip-row">
+                {message.badges.map((badge) => (
+                  <span className="chat-chip" key={`${message.id}-${badge}`}>
+                    {badge}
+                  </span>
+                ))}
+              </span>
+            ) : null}
+          </span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -2039,6 +2146,14 @@ function PlanView({
             <div>
               <dt>tarea</dt>
               <dd>{descriptor.task_type}</dd>
+            </div>
+            <div>
+              <dt>perfil</dt>
+              <dd>{descriptor.supervision_profile}</dd>
+            </div>
+            <div>
+              <dt>labels</dt>
+              <dd>{descriptor.label_source}/{descriptor.label_granularity}</dd>
             </div>
             <div>
               <dt>canales</dt>
@@ -2296,7 +2411,7 @@ function RunsTable({
               <td>
                 <StatusPill
                   ok={run.approved === true}
-                  label={run.current_stage}
+                  label={runStatusLabel(run.current_stage, run.approved)}
                   muted={run.approved === null}
                 />
               </td>
@@ -2321,6 +2436,8 @@ function ComparisonView({
   loading: boolean;
   onCompare: () => void;
 }) {
+  const hasDegradation =
+    comparison !== null && (comparison.degradation_metrics ?? []).length > 0;
   return (
     <section className="registry-section">
       <div className="section-heading">
@@ -2339,20 +2456,88 @@ function ComparisonView({
         </button>
       </div>
       {comparison ? (
-        <div className="comparison-grid">
-          {comparison.metrics.map((metric) => (
-            <div className="comparison-card" key={metric.metric}>
-              <span>{metricLabel(metric.metric)}</span>
-              <strong>{metric.best_run_id ?? "-"}</strong>
+        <>
+          {hasDegradation ? (
+            <div className="comparison-focus">
+              <div>
+                <span>Perfil principal</span>
+                <strong>Degradacion run-to-failure</strong>
+              </div>
               <small>
-                mejor {formatMetric(metric.best_value)} | peor{" "}
-                {formatMetric(metric.worst_value)} | dif. {formatMetric(metric.spread)}
+                Prioriza primera alerta, lead time, falsas alarmas nominales y
+                tendencia del score. Las metricas binarias quedan como apoyo.
               </small>
             </div>
-          ))}
-        </div>
+          ) : null}
+          {hasDegradation ? (
+            <div className="comparison-grid comparison-grid-wide">
+              {(comparison.degradation_metrics ?? []).map((metric) => (
+                <ComparisonMetricCard metric={metric} key={metric.metric} />
+              ))}
+            </div>
+          ) : null}
+          <div className="comparison-grid">
+            {comparison.metrics.map((metric) => (
+              <ComparisonMetricCard metric={metric} key={metric.metric} />
+            ))}
+          </div>
+          <ComparisonRowsTable rows={comparison.rows} />
+        </>
       ) : null}
     </section>
+  );
+}
+
+function ComparisonMetricCard({ metric }: { metric: RunComparison["metrics"][number] }) {
+  return (
+    <div className="comparison-card">
+      <span>{metricLabel(metric.metric)}</span>
+      <strong>{metric.best_run_id ?? "-"}</strong>
+      <small>
+        mejor {formatComparisonMetric(metric.metric, metric.best_value)} | peor{" "}
+        {formatComparisonMetric(metric.metric, metric.worst_value)} | dif.{" "}
+        {formatComparisonMetric(metric.metric, metric.spread)}
+      </small>
+    </div>
+  );
+}
+
+function ComparisonRowsTable({ rows }: { rows: RunComparison["rows"] }) {
+  if (rows.length === 0) {
+    return null;
+  }
+  return (
+    <div className="comparison-table-wrap">
+      <table className="comparison-table">
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Modelo</th>
+            <th>Perfil</th>
+            <th>Lead</th>
+            <th>FAR nominal</th>
+            <th>Tendencia</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.run_id}>
+              <td>{row.run_id}</td>
+              <td>{row.model_name ?? "-"}</td>
+              <td>
+                <span className="comparison-profile">
+                  {row.supervision_profile ?? "-"}
+                </span>
+                {row.label_source ? <small>{row.label_source}</small> : null}
+              </td>
+              <td>{formatSeconds(row.degradation_mean_lead_time_to_failure)}</td>
+              <td>{formatMetric(row.degradation_mean_false_alarm_rate_nominal)}</td>
+              <td>{formatMetric(row.degradation_mean_score_trend_spearman)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -2430,6 +2615,31 @@ function VisualizationView({
         )}
       </section>
 
+      <section className="panel temporal-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Degradacion</p>
+            <h2>Serie temporal</h2>
+          </div>
+          <Activity size={20} />
+        </div>
+        {loading ? (
+          <p className="empty-state compact-empty">Preparando serie temporal</p>
+        ) : data?.temporal_series?.available && data.temporal_series.runs.length ? (
+          <TemporalSeriesChart run={data.temporal_series.runs[0]} />
+        ) : (
+          <p className="empty-state compact-empty">
+            {data?.temporal_series?.warnings[0] ??
+              "Sin metadatos temporales en predicciones"}
+          </p>
+        )}
+        {data?.temporal_series?.available && data.temporal_series.n_runs_total > 1 ? (
+          <p className="projection-note">
+            Mostrando la primera trayectoria de {data.temporal_series.n_runs_total} runs.
+          </p>
+        ) : null}
+      </section>
+
       <section className="panel projection-panel">
         <div className="panel-heading">
           <div>
@@ -2452,6 +2662,13 @@ function VisualizationView({
         )}
         {data?.projection_boundary ? (
           <p className="projection-note">{data.projection_boundary.note}</p>
+        ) : null}
+        {data?.warnings.length ? (
+          <ul className="projection-warnings">
+            {data.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
         ) : null}
       </section>
     </section>
@@ -2486,6 +2703,178 @@ function MetricBars({ metrics }: { metrics: VisualizationMetric[] }) {
   );
 }
 
+function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
+  if (run.points.length === 0) {
+    return <p className="empty-state compact-empty">Sin puntos temporales</p>;
+  }
+
+  const width = 760;
+  const height = 330;
+  const padding = 38;
+  const xValues = [
+    ...run.points.map((point) => point.x),
+    ...(run.first_alert_x !== null ? [run.first_alert_x] : []),
+    ...(run.failure_x !== null ? [run.failure_x] : []),
+  ];
+  const yValues = [
+    ...run.points.map((point) => point.anomaly_score),
+    ...(run.threshold !== null ? [run.threshold] : []),
+  ];
+  const xScale = scaleFor(xValues, padding, width - padding);
+  const yScale = scaleFor(yValues, height - padding, padding);
+  const path = run.points
+    .map((point, index) => {
+      const command = index === 0 ? "M" : "L";
+      return `${command} ${xScale(point.x).toFixed(2)} ${yScale(point.anomaly_score).toFixed(2)}`;
+    })
+    .join(" ");
+  const thresholdY = run.threshold === null ? null : yScale(run.threshold);
+
+  return (
+    <div className="temporal-wrap">
+      <dl className="temporal-summary">
+        <div>
+          <dt>run</dt>
+          <dd>{run.run_id}</dd>
+        </div>
+        <div>
+          <dt>estado actual</dt>
+          <dd>
+            <TemporalHealthBadge state={run.current_health_state} />
+          </dd>
+        </div>
+        <div>
+          <dt>salud</dt>
+          <dd>{formatMetric(run.current_health_index)}</dd>
+        </div>
+        <div>
+          <dt>riesgo</dt>
+          <dd>{formatMetric(run.current_risk_index)}</dd>
+        </div>
+        <div>
+          <dt>eje</dt>
+          <dd>{temporalAxisLabel(run.x_axis)}</dd>
+        </div>
+        <div>
+          <dt>primer aviso</dt>
+          <dd>{formatMetric(run.first_alert_x)}</dd>
+        </div>
+        <div>
+          <dt>lead time</dt>
+          <dd>{formatSeconds(run.first_alert_time_to_failure_seconds)}</dd>
+        </div>
+        <div>
+          <dt>alertas</dt>
+          <dd>{run.alert_points}</dd>
+        </div>
+      </dl>
+      <p className="temporal-state-note">{run.current_state_reason}</p>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Serie temporal de degradacion"
+      >
+        <rect className="temporal-bg" x="0" y="0" width={width} height={height} rx="8" />
+        <line className="temporal-axis" x1={padding} x2={width - padding} y1={height - padding} y2={height - padding} />
+        <line className="temporal-axis" x1={padding} x2={padding} y1={padding} y2={height - padding} />
+        {thresholdY !== null ? (
+          <line
+            className="temporal-threshold"
+            x1={padding}
+            x2={width - padding}
+            y1={thresholdY}
+            y2={thresholdY}
+          />
+        ) : null}
+        {run.failure_x !== null ? (
+          <line
+            className="temporal-failure"
+            x1={xScale(run.failure_x)}
+            x2={xScale(run.failure_x)}
+            y1={padding}
+            y2={height - padding}
+          />
+        ) : null}
+        <path className="temporal-line" d={path} />
+        {run.first_alert_x !== null ? (
+          <circle
+            className="temporal-first-alert"
+            cx={xScale(run.first_alert_x)}
+            cy={yScale(scoreAtX(run, run.first_alert_x))}
+            r="6"
+          >
+            <title>
+              {`Primer aviso | x ${formatMetric(run.first_alert_x)} | lead ${formatSeconds(run.first_alert_time_to_failure_seconds)}`}
+            </title>
+          </circle>
+        ) : null}
+        {run.points.map((point) => (
+          <circle
+            className={`temporal-point ${point.health_state}`}
+            cx={xScale(point.x)}
+            cy={yScale(point.anomaly_score)}
+            key={point.window_id}
+            r={point.health_state === "critical" ? 4.2 : point.health_state === "warning" ? 3.7 : 2.5}
+          >
+            <title>
+              {`${point.window_id} | ${healthStateLabel(point.health_state)} | salud ${formatMetric(point.health_index)} | score ${formatMetric(point.anomaly_score)} | x ${formatMetric(point.x)}`}
+            </title>
+          </circle>
+        ))}
+      </svg>
+      <div className="temporal-legend">
+        <span><i className="legend-score" /> score</span>
+        <span><i className="legend-threshold" /> umbral</span>
+        <span><i className="legend-first-alert" /> primer aviso</span>
+        <span><i className="legend-failure" /> fallo</span>
+        <span><i className="legend-health-warning" /> warning</span>
+        <span><i className="legend-health-critical" /> critico</span>
+      </div>
+    </div>
+  );
+}
+
+function TemporalHealthBadge({ state }: { state: HealthState }) {
+  return <span className={`temporal-health-badge ${state}`}>{healthStateLabel(state)}</span>;
+}
+
+function scoreAtX(run: TemporalRunSeries, x: number): number {
+  let closest = run.points[0];
+  for (const point of run.points) {
+    if (Math.abs(point.x - x) < Math.abs(closest.x - x)) {
+      closest = point;
+    }
+  }
+  return closest.anomaly_score;
+}
+
+function temporalAxisLabel(axis: TemporalRunSeries["x_axis"]): string {
+  if (axis === "relative_life") {
+    return "vida relativa";
+  }
+  if (axis === "time_since_start_seconds") {
+    return "segundos desde inicio";
+  }
+  return "indice de ventana";
+}
+
+function healthStateLabel(state: HealthState): string {
+  const labels: Record<HealthState, string> = {
+    nominal: "nominal",
+    watch: "vigilancia",
+    warning: "alerta",
+    critical: "critico",
+  };
+  return labels[state];
+}
+
+function formatSeconds(value: number | null): string {
+  if (value === null) {
+    return "-";
+  }
+  return `${formatMetric(value)} s`;
+}
+
 function ProjectionScatter({
   points,
   boundary,
@@ -2510,6 +2899,7 @@ function ProjectionScatter({
   ];
   const xScale = scaleFor(xs, padding, width - padding);
   const yScale = scaleFor(ys, height - padding, padding);
+  const hasPredictions = points.some((point) => point.predicted_anomaly !== null);
 
   return (
     <div className="scatter-wrap">
@@ -2544,9 +2934,16 @@ function ProjectionScatter({
         })}
       </svg>
       <div className="scatter-legend">
-        <span><i className="legend-normal" /> normal/prediccion 0</span>
-        <span><i className="legend-anomaly" /> anomalia detectada</span>
-        <span><i className="legend-boundary" /> frontera aproximada</span>
+        <span>
+          <i className="legend-normal" />
+          {hasPredictions ? "normal/prediccion 0" : "ventanas proyectadas"}
+        </span>
+        {hasPredictions ? (
+          <>
+            <span><i className="legend-anomaly" /> anomalia detectada</span>
+            <span><i className="legend-boundary" /> frontera aproximada</span>
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -2595,12 +2992,16 @@ function RunDetailView({
   snapshot,
   artifacts,
   report,
+  auditReport,
+  reportDebate,
   loading,
 }: {
   entry: RunIndexEntry | null;
   snapshot: RunSnapshot | null;
   artifacts: ArtifactRef[];
   report: string | null;
+  auditReport: string | null;
+  reportDebate: string | null;
   loading: boolean;
 }) {
   if (loading) {
@@ -2619,7 +3020,7 @@ function RunDetailView({
         </div>
         <StatusPill
           ok={snapshot.approved === true}
-          label={snapshot.current_stage}
+          label={runStatusLabel(snapshot.current_stage, snapshot.approved)}
           muted={snapshot.approved === null}
         />
       </div>
@@ -2642,26 +3043,21 @@ function RunDetailView({
         </div>
       </dl>
 
-      <section className="registry-section">
+      <FinalReportPanel report={report} snapshot={snapshot} />
+
+      <ExecutionAuditPanel auditReport={auditReport} />
+
+      <ReportDebatePanel reportDebate={reportDebate} />
+
+      <section className="registry-section evidence-section">
         <div className="section-heading">
           <div>
-            <h3>Artefactos</h3>
-            <p>{artifacts.length} generados</p>
+            <h3>Evidencia tecnica</h3>
+            <p>{artifacts.length} artefactos</p>
           </div>
           <Package size={18} />
         </div>
         <ArtifactList artifacts={artifacts} />
-      </section>
-
-      <section className="registry-section">
-        <div className="section-heading">
-          <div>
-            <h3>Informe</h3>
-            <p>{report ? "Informe generado" : "Sin informe disponible"}</p>
-          </div>
-          <FileText size={18} />
-        </div>
-        <ReportPreview report={report} />
       </section>
     </section>
   );
@@ -2704,11 +3100,323 @@ function ArtifactList({ artifacts }: { artifacts: ArtifactRef[] }) {
   );
 }
 
+function FinalReportPanel({
+  report,
+  snapshot,
+}: {
+  report: string | null;
+  snapshot: RunSnapshot;
+}) {
+  return (
+    <section className="registry-section final-report-section">
+      <div className="section-heading">
+        <div>
+          <h3>Informe final</h3>
+          <p>{report ? "Cierre analitico generado" : "Pendiente de generacion"}</p>
+        </div>
+        <div className="report-heading-actions">
+          <StatusPill
+            ok={report !== null && snapshot.approved === true}
+            label={report ? "generado" : "pendiente"}
+            muted={report === null}
+          />
+          <FileText size={18} />
+        </div>
+      </div>
+      <ReportPreview report={report} />
+    </section>
+  );
+}
+
+function ExecutionAuditPanel({ auditReport }: { auditReport: string | null }) {
+  return (
+    <section className="registry-section audit-report-section">
+      <div className="section-heading">
+        <div>
+          <h3>Auditoria de ejecucion</h3>
+          <p>{auditReport ? "Resumen operativo de la run" : "Auditoria no disponible"}</p>
+        </div>
+        <div className="report-heading-actions audit-heading-actions">
+          <StatusPill
+            ok={auditReport !== null}
+            label={auditReport ? "disponible" : "pendiente"}
+            muted={auditReport === null}
+          />
+          <FileSearch size={18} />
+        </div>
+      </div>
+      <MarkdownDocumentPreview
+        document={auditReport}
+        emptyText="Sin auditoria de ejecucion disponible"
+        kicker="Auditoria humana"
+      />
+    </section>
+  );
+}
+
+function ReportDebatePanel({ reportDebate }: { reportDebate: string | null }) {
+  return (
+    <section className="registry-section report-debate-section">
+      <div className="section-heading">
+        <div>
+          <h3>Debate del informe</h3>
+          <p>{reportDebate ? "Conversacion auditada entre agentes" : "Debate no disponible"}</p>
+        </div>
+        <div className="report-heading-actions debate-heading-actions">
+          <StatusPill
+            ok={reportDebate !== null}
+            label={reportDebate ? "disponible" : "pendiente"}
+            muted={reportDebate === null}
+          />
+          <MessageSquare size={18} />
+        </div>
+      </div>
+      <MarkdownDocumentPreview
+        document={reportDebate}
+        emptyText="Sin debate controlado disponible"
+        kicker="Debate agentico"
+      />
+    </section>
+  );
+}
+
 function ReportPreview({ report }: { report: string | null }) {
-  if (report === null) {
-    return <p className="empty-state compact-empty">Sin informe disponible</p>;
+  return (
+    <MarkdownDocumentPreview
+      document={report}
+      emptyText="Sin informe disponible"
+      kicker="Documento de cierre"
+    />
+  );
+}
+
+function MarkdownDocumentPreview({
+  document,
+  emptyText,
+  kicker,
+}: {
+  document: string | null;
+  emptyText: string;
+  kicker: string;
+}) {
+  if (document === null) {
+    return (
+      <div className="report-document empty-report-document">
+        <p className="empty-state compact-empty">{emptyText}</p>
+      </div>
+    );
   }
-  return <pre className="report-preview">{report}</pre>;
+  return <ReportDocument report={document} kicker={kicker} />;
+}
+
+function ReportDocument({ report, kicker }: { report: string; kicker: string }) {
+  const document = useMemo(() => parseReportDocument(report, kicker), [report, kicker]);
+
+  return (
+    <article className="report-document">
+      <header className="report-document-header">
+        <p>{document.kicker}</p>
+        <h4>{document.title}</h4>
+        {document.meta.length > 0 ? (
+          <dl className="report-meta-grid">
+            {document.meta.map((item) => (
+              <div key={item.label}>
+                <dt>{item.label}</dt>
+                <dd>{item.value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+      </header>
+
+      <div className="report-section-stack">
+        {document.sections.map((section) => (
+          <section className="report-document-section" key={section.title}>
+            <h5>{section.title}</h5>
+            <ReportBlocks lines={section.lines} />
+          </section>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function ReportBlocks({ lines }: { lines: string[] }) {
+  const blocks = reportBlocks(lines);
+  if (blocks.length === 0) {
+    return <p className="empty-state compact-empty">Sin contenido visible</p>;
+  }
+
+  return (
+    <>
+      {blocks.map((block, index) => {
+        if (block.kind === "list") {
+          return (
+            <ul className="report-list" key={`list-${index}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${item}-${itemIndex}`}>{inlineReportText(item)}</li>
+              ))}
+            </ul>
+          );
+        }
+        if (block.kind === "subheading") {
+          return <h6 key={`heading-${index}`}>{block.text}</h6>;
+        }
+        return <p key={`paragraph-${index}`}>{inlineReportText(block.text)}</p>;
+      })}
+    </>
+  );
+}
+
+interface ParsedReportDocument {
+  kicker: string;
+  title: string;
+  meta: Array<{ label: string; value: string }>;
+  sections: Array<{ title: string; lines: string[] }>;
+}
+
+type ReportBlock =
+  | { kind: "paragraph"; text: string }
+  | { kind: "subheading"; text: string }
+  | { kind: "list"; items: string[] };
+
+function parseReportDocument(report: string, fallbackKicker: string): ParsedReportDocument {
+  const rawLines = report.split(/\r?\n/);
+  const titleLine = rawLines.find((line) => line.trim().startsWith("# "));
+  const title = titleLine
+    ? stripMarkdown(titleLine.replace(/^#\s+/, ""))
+    : "Informe tecnico de deteccion de anomalias";
+  const sections: Array<{ title: string; lines: string[] }> = [];
+  const introLines: string[] = [];
+  let currentSection: { title: string; lines: string[] } | null = null;
+
+  for (const rawLine of sanitizedReportLines(rawLines)) {
+    const line = rawLine.trimEnd();
+    if (line.startsWith("# ")) {
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      currentSection = {
+        title: stripMarkdown(line.replace(/^##\s+/, "")),
+        lines: [],
+      };
+      sections.push(currentSection);
+      continue;
+    }
+    if (currentSection) {
+      currentSection.lines.push(line);
+    } else {
+      introLines.push(line);
+    }
+  }
+
+  return {
+    kicker: fallbackKicker,
+    title,
+    meta: reportMeta(introLines),
+    sections,
+  };
+}
+
+function sanitizedReportLines(lines: string[]): string[] {
+  const visible: string[] = [];
+  let skippingTechnicalSources = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const normalized = stripMarkdown(line).replace(/:$/, "").toLowerCase();
+    if (normalized === "fuentes" || normalized === "referencias de evidencia") {
+      skippingTechnicalSources = true;
+      continue;
+    }
+    if (skippingTechnicalSources) {
+      if (line === "") {
+        skippingTechnicalSources = false;
+      }
+      continue;
+    }
+    if (containsLocalPath(line)) {
+      continue;
+    }
+    visible.push(rawLine);
+  }
+
+  return visible;
+}
+
+function reportMeta(lines: string[]): Array<{ label: string; value: string }> {
+  const allowedLabels = new Map([
+    ["Run ID", "Run"],
+    ["Dataset", "Dataset"],
+    ["Objetivo", "Objetivo"],
+  ]);
+
+  return lines
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.replace(/^-\s+/, ""))
+    .map((line) => {
+      const separator = line.indexOf(":");
+      if (separator < 0) {
+        return null;
+      }
+      const rawLabel = stripMarkdown(line.slice(0, separator));
+      const label = allowedLabels.get(rawLabel);
+      if (!label) {
+        return null;
+      }
+      const value = stripMarkdown(line.slice(separator + 1));
+      return value ? { label, value } : null;
+    })
+    .filter((item): item is { label: string; value: string } => item !== null);
+}
+
+function reportBlocks(lines: string[]): ReportBlock[] {
+  const blocks: ReportBlock[] = [];
+  let pendingList: string[] = [];
+
+  function flushList() {
+    if (pendingList.length > 0) {
+      blocks.push({ kind: "list", items: pendingList });
+      pendingList = [];
+    }
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushList();
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      pendingList.push(line.replace(/^-\s+/, ""));
+      continue;
+    }
+    flushList();
+    if (line.endsWith(":") && line.length < 72) {
+      blocks.push({ kind: "subheading", text: stripMarkdown(line.replace(/:$/, "")) });
+    } else {
+      blocks.push({ kind: "paragraph", text: stripMarkdown(line) });
+    }
+  }
+  flushList();
+  return blocks;
+}
+
+function inlineReportText(value: string): string {
+  return stripMarkdown(value);
+}
+
+function stripMarkdown(value: string): string {
+  return value
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .trim();
+}
+
+function containsLocalPath(value: string): boolean {
+  return /(^|[\s`("'[])(codigo\/|\/home\/|\.{1,2}\/|[A-Za-z]:\\)/.test(value);
 }
 
 function StatusItem({
@@ -2745,6 +3453,13 @@ function StatusPill({
       {label}
     </span>
   );
+}
+
+function runStatusLabel(currentStage: string, approved: boolean | null): string {
+  if (currentStage === "completed" && approved === null) {
+    return "diagnostico";
+  }
+  return currentStage;
 }
 
 function isActiveJob(job: ApiRunJobStatus): boolean {
@@ -2856,8 +3571,21 @@ function metricLabel(metric: string): string {
     recall: "Recall",
     f1_score: "F1",
     false_positive_rate: "FPR",
+    degradation_detected_before_failure_rate: "Deteccion antes de fallo",
+    degradation_mean_lead_time_to_failure: "Lead time medio",
+    degradation_mean_false_alarm_rate_nominal: "FAR nominal medio",
+    degradation_mean_score_trend_spearman: "Tendencia score",
+    degradation_missed_runs: "Fallos perdidos",
+    degradation_mean_initial_final_separation: "Separacion inicio-final",
   };
   return labels[metric] ?? metric;
+}
+
+function formatComparisonMetric(metric: string, value: number | null): string {
+  if (metric.includes("lead_time")) {
+    return formatSeconds(value);
+  }
+  return formatMetric(value);
 }
 
 function eventsForAgent(
@@ -2867,12 +3595,45 @@ function eventsForAgent(
   return events.filter((event) => eventOwnerId(event) === agentId);
 }
 
+function agentConversationMessages(events: AgentRuntimeEvent[]): AgentConversationMessage[] {
+  return events
+    .filter(isConversationEvent)
+    .map((event) => {
+      const agentId = eventOwnerId(event);
+      const status = conversationStatus(event);
+      return {
+        id: event.event_id,
+        sequence: event.sequence,
+        agentId,
+        agentLabel: agentLabel(agentId),
+        role: conversationRole(agentId),
+        title: event.title,
+        text: conversationText(event),
+        createdAt: event.created_at,
+        stage: event.stage,
+        status,
+        badges: conversationBadges(event),
+      };
+    });
+}
+
+function isConversationEvent(event: AgentRuntimeEvent): boolean {
+  if (!["supervisor_decision", "agent_decision", "error"].includes(event.kind)) {
+    return false;
+  }
+  const owner = eventOwnerId(event);
+  return AGENT_PROFILES.some((agent) => agent.id === owner);
+}
+
 function eventOwnerId(event: AgentRuntimeEvent): string {
   if (event.agent_name) {
     return event.agent_name;
   }
   if (event.source === "supervisor") {
     return "supervisor";
+  }
+  if (event.node === "report_verifier") {
+    return "report_verifier";
   }
   if (event.node?.includes("modeling")) {
     return "modeler";
@@ -2890,6 +3651,229 @@ function eventOwnerId(event: AgentRuntimeEvent): string {
     return "report_writer";
   }
   return "supervisor";
+}
+
+function conversationRole(agentId: string): string {
+  return AGENT_PROFILES.find((agent) => agent.id === agentId)?.role ?? "Agente";
+}
+
+function conversationStatus(event: AgentRuntimeEvent): AgentConversationMessage["status"] {
+  if (event.kind === "error") {
+    return "error";
+  }
+  const verificationStatus = stringFromPayload(event.payload, "verification_status");
+  if (verificationStatus === "approved") {
+    return "success";
+  }
+  if (verificationStatus === "needs_revision" || verificationStatus === "blocked") {
+    return "warning";
+  }
+  const evaluation = recordFromPayload(event.payload, "evaluation");
+  const approved = evaluation?.approved;
+  if (approved === true) {
+    return "success";
+  }
+  if (approved === false) {
+    return "warning";
+  }
+  return "normal";
+}
+
+function conversationText(event: AgentRuntimeEvent): string {
+  if (event.kind === "error") {
+    return event.summary;
+  }
+  const agentId = eventOwnerId(event);
+  if (agentId === "supervisor") {
+    return supervisorConversationText(event);
+  }
+  if (agentId === "cleaner") {
+    const config = recordFromPayload(event.payload, "cleaning_config");
+    const strategy = stringValue(config?.strategy_id);
+    return strategy
+      ? `Propone la estrategia de limpieza ${strategy}.`
+      : conciseEventSummary(event);
+  }
+  if (agentId === "structurer") {
+    const config = recordFromPayload(event.payload, "structuring_config");
+    const windowSize = stringValue(config?.window_size);
+    const featureSet = stringValue(config?.feature_set) ?? stringValue(config?.feature_mode);
+    const parts = [
+      windowSize ? `ventanas de ${windowSize}` : null,
+      featureSet ? `features ${featureSet}` : null,
+    ].filter((item): item is string => item !== null);
+    return parts.length > 0
+      ? `Organiza la serie temporal con ${parts.join(" y ")}.`
+      : conciseEventSummary(event);
+  }
+  if (agentId === "modeler") {
+    const config = recordFromPayload(event.payload, "modeling_config");
+    const modelName = stringValue(config?.model_name);
+    const threshold = stringValue(config?.threshold_quantile);
+    if (modelName && threshold) {
+      return `Selecciona ${modelName} con umbral cuantilico ${threshold}.`;
+    }
+    return modelName ? `Selecciona ${modelName} para el modelado.` : conciseEventSummary(event);
+  }
+  if (agentId === "evaluator") {
+    const evaluation = recordFromPayload(event.payload, "evaluation");
+    const summary = stringValue(evaluation?.summary);
+    const approved = evaluation?.approved;
+    if (summary) {
+      return approved === false ? `No aprueba la run: ${summary}` : summary;
+    }
+    return conciseEventSummary(event);
+  }
+  if (agentId === "report_writer") {
+    const revisionRound = stringValue(event.payload.revision_round);
+    const changes = stringArrayFromPayload(event.payload, "changes_summary");
+    if (revisionRound) {
+      return changes.length > 0
+        ? `Revisa el informe en la ronda ${revisionRound}: ${joinShortList(changes)}.`
+        : `Revisa el informe en la ronda ${revisionRound}.`;
+    }
+    return "Prepara el informe final con las secciones y evidencias seleccionadas.";
+  }
+  if (agentId === "report_verifier") {
+    const status = stringFromPayload(event.payload, "verification_status");
+    const summary = stringFromPayload(event.payload, "human_summary") ?? event.summary;
+    const corrections = stringArrayFromPayload(event.payload, "required_corrections");
+    const statusText = status ? `Veredicto: ${verificationStatusLabel(status)}.` : "";
+    const correctionText =
+      corrections.length > 0 ? ` Pide corregir: ${joinShortList(corrections)}.` : "";
+    return `${statusText} ${summary}${correctionText}`.trim();
+  }
+  return conciseEventSummary(event);
+}
+
+function supervisorConversationText(event: AgentRuntimeEvent): string {
+  const stopReason = stringFromNestedPayload(event.payload, "decision", "stop_reason");
+  if (stopReason) {
+    return `Cierra la ejecucion: ${stopReason}.`;
+  }
+  const next = event.next_node ?? event.next_stage;
+  if (next) {
+    return `Decide continuar hacia ${readableFlowLabel(next)}.`;
+  }
+  return conciseEventSummary(event);
+}
+
+function conversationBadges(event: AgentRuntimeEvent): string[] {
+  const badges: string[] = [];
+  if (event.stage) {
+    badges.push(STAGE_LABELS[event.stage as PipelineRunStage] ?? readableFlowLabel(event.stage));
+  }
+  if (event.confidence !== null) {
+    badges.push(confidenceText(event.confidence));
+  }
+  if (event.memory_record_ids.length > 0) {
+    badges.push(`${event.memory_record_ids.length} memoria`);
+  }
+  const verificationStatus = stringFromPayload(event.payload, "verification_status");
+  if (verificationStatus) {
+    badges.push(verificationStatusLabel(verificationStatus));
+  }
+  const next = event.next_node ?? event.next_stage;
+  if (eventOwnerId(event) === "supervisor" && next) {
+    badges.push(`sigue: ${readableFlowLabel(next)}`);
+  }
+  return badges.slice(0, 4);
+}
+
+function conciseEventSummary(event: AgentRuntimeEvent): string {
+  return event.summary.length > 220 ? `${event.summary.slice(0, 217)}...` : event.summary;
+}
+
+function readableFlowLabel(value: string): string {
+  const labels: Record<string, string> = {
+    manifest_executor: "manifest",
+    profiler_executor: "perfilado",
+    cleaner_agent: "limpiador",
+    cleaning_executor: "ejecutor de limpieza",
+    structuring_agent: "estructurador",
+    structuring_executor: "ejecutor de estructuracion",
+    modeling_agent: "modelador",
+    modeling_executor: "ejecutor de modelado",
+    evaluation_executor: "ejecutor de evaluacion",
+    evaluation_agent: "evaluador",
+    report_writer: "redactor",
+    report_verifier: "verificador",
+  };
+  return labels[value] ?? value.replace(/_/g, " ");
+}
+
+function verificationStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    approved: "aprobado",
+    needs_revision: "requiere revision",
+    blocked: "bloqueado",
+  };
+  return labels[status] ?? status;
+}
+
+function agentInitials(label: string): string {
+  return label
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
+function recordFromPayload(
+  payload: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null {
+  const value = payload[key];
+  return isRecord(value) ? value : null;
+}
+
+function stringFromPayload(
+  payload: Record<string, unknown>,
+  key: string,
+): string | null {
+  return stringValue(payload[key]);
+}
+
+function stringFromNestedPayload(
+  payload: Record<string, unknown>,
+  key: string,
+  nestedKey: string,
+): string | null {
+  return stringValue(recordFromPayload(payload, key)?.[nestedKey]);
+}
+
+function stringArrayFromPayload(
+  payload: Record<string, unknown>,
+  key: string,
+): string[] {
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => stringValue(item))
+    .filter((item): item is string => item !== null);
+}
+
+function stringValue(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function joinShortList(values: string[]): string {
+  const visible = values.slice(0, 2);
+  const suffix = values.length > visible.length ? ` y ${values.length - visible.length} mas` : "";
+  return `${visible.join("; ")}${suffix}`;
 }
 
 function memoryTargetForAgent(agentId: string): AgentMemoryTarget {
@@ -2968,9 +3952,15 @@ function payloadPlainText(payload: Record<string, unknown>): string {
     ["strategy_id", "estrategia"],
     ["decision_id", "decision"],
     ["status", "estado"],
+    ["verification_status", "verificacion"],
+    ["debate_round", "ronda"],
+    ["human_summary", "resumen"],
     ["message", "mensaje"],
     ["n_records", "recuerdos"],
     ["n_artifacts", "artefactos"],
+    ["n_unsupported_claims", "claims sin soporte"],
+    ["n_misleading_claims", "claims confusos"],
+    ["n_missing_limitations", "limitaciones ausentes"],
     ["threshold", "umbral"],
   ];
   const fragments = candidates
@@ -2978,6 +3968,18 @@ function payloadPlainText(payload: Record<string, unknown>): string {
       payload[key] === undefined ? null : `${label}: ${String(payload[key])}`,
     )
     .filter((item): item is string => item !== null);
+  for (const key of ["required_corrections", "changes_summary"]) {
+    const value = payload[key];
+    if (Array.isArray(value) && value.length > 0) {
+      fragments.push(`${key === "required_corrections" ? "correcciones" : "cambios"}: ${value.length}`);
+    }
+  }
+  for (const key of ["accepted_issue_ids", "rejected_issue_ids"]) {
+    const value = payload[key];
+    if (Array.isArray(value) && value.length > 0) {
+      fragments.push(`${key === "accepted_issue_ids" ? "incidencias aceptadas" : "incidencias rechazadas"}: ${value.length}`);
+    }
+  }
   return fragments.length > 0
     ? `Campos clave: ${fragments.join(", ")}.`
     : "El JSON adjunto contiene el detalle tecnico completo.";

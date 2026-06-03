@@ -1677,3 +1677,509 @@ ahora, cada cambio relevante de backend, frontend, dependencias o variables se
 desarrollara primero en local y se trasladara despues al stack dockerizado
 mediante reconstruccion y validacion manual. Esta decision evita fijar una
 secuencia de pruebas sobre una superficie que todavia se espera que evolucione.
+
+\section{Fase 7: evidence pack e informe agentico}
+
+Tras cerrar la base dockerizada minima, la Fase 7 vuelve al nucleo funcional del
+TFM: agentes de IA, deteccion autonoma de anomalias y reporte auditable para
+analistas humanos. El primer hito se centra en dos necesidades: conservar una
+evidencia estructurada de cada ejecucion y hacer que el agente redactor tenga
+un papel narrativo real en el informe final, sin romper la separacion entre
+razonamiento generativo y ejecucion determinista.
+
+En esta fase se fija ademas un criterio de implementacion para evitar que la
+instrumentacion determinista oculte el objetivo investigador. Los agentes
+Qwen/LLM conservan el protagonismo como decisores e interpretes del sistema:
+el supervisor coordina, el limpiador y estructurador formulan configuraciones,
+el modelador plantea hipotesis, el evaluador juzga resultados, el redactor y el
+verificador producen y revisan conclusiones. Los ejecutores, herramientas y
+visualizaciones deterministas son el soporte que permite que esas decisiones
+sean seguras, reproducibles y auditables. Por ello, cada nueva metrica, vista o
+herramienta de Fase 7 debe entenderse como una ampliacion del campo de evidencia
+de los agentes, no como una sustitucion de la investigacion agentica.
+
+La decision de trabajar con LLM locales relativamente pequenos, como Qwen sobre
+Ollama, se conserva como hipotesis metodologica. Su lentitud en una maquina
+local no invalida la linea: permite estudiar que ocurre cuando se intenta
+acercar un sistema agentico auditable a restricciones industriales de coste,
+privacidad, despliegue local y latencia. Si la arquitectura alcanza limites
+practicos, esos limites se documentaran como resultado experimental; mientras
+tanto, la implementacion seguira intentando llevar la participacion agentica tan
+lejos como permitan los contratos estrictos y los guardarrailes de seguridad.
+
+La persistencia local de runs se ha ampliado en \texttt{run\_persistence.py}.
+Cada snapshot nuevo puede generar ahora dos artefactos adicionales:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/runs/<run_id>/evidence_pack.json
+codigo/reports/runs/<run_id>/evidence_pack.md
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El primer fichero es el paquete de evidencia auditable. Incluye identificacion
+de la run, contexto experimental, configuraciones, metricas, evaluacion,
+revision humana si existe, decisiones agenticas normalizadas, errores y
+artefactos con estado de existencia y checksum SHA-256 cuando el fichero esta
+disponible. El segundo fichero es una vista Markdown resumida para inspeccion
+humana rapida. Esta vista no sustituye al informe tecnico final, sino que
+ayuda a auditar de donde salen las conclusiones.
+
+Tambien se ha ampliado \texttt{pipeline\_runner.py} para registrar, antes de la
+ejecucion, la solicitud exacta y el plan preflight aplicado:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/<dataset>/<run_id>/evidence/pipeline_request.json
+codigo/reports/<dataset>/<run_id>/evidence/pipeline_plan.json
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Estos ficheros son artefactos de tipo \texttt{config} y permiten revisar que se
+pidio, que politica de dataset se aplico, que fases eran efectivas y si habia
+bloqueos metodologicos antes de transformar datos.
+
+En paralelo, el contrato \texttt{ReportSection} se ha extendido con campos de
+contenido humano: cuerpo narrativo, hallazgos principales, recomendaciones y
+referencias de evidencia. El agente \texttt{report\_writer} sigue devolviendo
+un \texttt{ReportDecision} validado por Pydantic, pero ahora puede redactar las
+secciones del informe en castellano tecnico. El JSON sigue siendo un contrato
+interno de seguridad y validacion; el documento final para el analista se
+materializa como Markdown mediante el ejecutor determinista
+\texttt{reporting.py}.
+
+La verificacion del hito se ha realizado con las pruebas de agente redactor,
+ejecutor de reporting, persistencia de runs y runner comun. La bateria
+ejecutada cubre la redaccion narrativa validada, el renderizado del informe,
+la creacion de evidence pack y la inclusion de request/plan como artefactos de
+evidencia. Con ello, el sistema queda mejor preparado para una defensa
+auditable del TFM: no solo produce metricas, sino que conserva la ruta entre
+peticion, plan, decisiones agenticas, artefactos y conclusiones humanas.
+
+La interfaz web se ha ajustado para reflejar esta nueva jerarquia. En el
+detalle de una run, el informe ya no aparece como un bloque tecnico al final de
+la lista de artefactos, sino como la seccion principal de cierre analitico. El
+Markdown servido por la API se transforma en una vista de documento con titulo,
+metadatos clave, secciones, parrafos, hallazgos y recomendaciones. La evidencia
+tecnica queda debajo, separada visualmente, como soporte auditable del informe.
+Ademas, la previsualizacion de la UI filtra rutas locales y bloques de fuentes
+tecnicas para mantener la decision de no exponer rutas de fichero en la pagina
+web, sin alterar el artefacto Markdown persistido en disco.
+
+Como segundo hito de Fase 7 se ha separado explicitamente el informe final del
+agente redactor de una nueva auditoria de ejecucion. Esta auditoria se genera
+de forma determinista a partir del \textit{evidence pack} y se persiste como:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+codigo/reports/runs/<run_id>/execution_audit.md
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El objetivo de este documento es que un evaluador humano pueda entender, de un
+vistazo y con lenguaje claro, que ocurrio durante toda la run. La auditoria
+incluye lectura rapida, solicitud y plan aplicado, cronologia de agentes,
+resultado tecnico, metricas, artefactos, checksums abreviados, errores,
+bloqueos y consideraciones de revision humana. La API expone este documento
+mediante `GET /runs/\{run\_id\}/audit-report`, manteniendo separado el endpoint
+del informe final `GET /runs/\{run\_id\}/report`.
+
+En frontend, el detalle de run queda organizado en tres niveles: primero el
+informe final de conclusiones generado por `report\_writer`, despues la
+auditoria de ejecucion como explicacion operativa del proceso, y finalmente la
+evidencia tecnica como lista de artefactos. Esta separacion evita que el
+analista confunda el documento narrativo de conclusiones con la traza
+determinista de lo que ha ocurrido durante la ejecucion.
+
+El tercer hito introduce una primera capa de verificacion agentica del informe
+final. Se ha creado el agente \texttt{report\_verifier}, cuya funcion no es
+exigir una redaccion literal ni imponer un estilo concreto, sino detectar
+afirmaciones factuales o metodologicas que no esten respaldadas por la
+evidencia disponible. El agente recibe el informe Markdown y un catalogo
+cerrado de evidencias derivado del estado de la run: dataset, modo de
+etiquetas, configuraciones, metricas, evaluacion, limitaciones, artefactos y
+politicas metodologicas relevantes. Con esa informacion devuelve una decision
+Pydantic \texttt{ReportVerificationDecision} con estado de verificacion,
+incidencias, severidad, referencias de evidencia y correcciones requeridas.
+
+La verificacion mantiene una tolerancia explicita sobre orden, enfasis y
+formulacion del texto. Lo que se penaliza son afirmaciones no soportadas, como
+presentar una ejecucion local como validacion industrial, declarar etiquetas
+oficiales en NASA IMS cuando solo existe politica proxy o sintetica, omitir que
+una run no fue aprobada o esconder limitaciones persistidas por el evaluador.
+Si el LLM no esta disponible, un fallback determinista detecta solo riesgos
+evidentes para no convertir esta capa en un script rigido de comparacion
+literal.
+
+Tras generarse \texttt{final\_report.md}, el grafo invoca el verificador y
+persiste dos artefactos bajo el directorio de evidencias del informe:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+<directorio_del_informe>/evidence/report_verification.json
+<directorio_del_informe>/evidence/report_verification.md
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+El primer fichero conserva la decision estructurada y el segundo ofrece una
+lectura humana de incidencias y correcciones. La auditoria de ejecucion incorpora
+ademas un bloque especifico de verificacion del informe.
+
+El cuarto hito implementa ya ese debate controlado entre
+\texttt{report\_writer} y \texttt{report\_verifier}. Se ha anadido el contrato
+\texttt{ReportRevisionDecision} para que el redactor responda a las incidencias
+del verificador sin conversacion libre, indicando que problemas acepta o rechaza,
+que cambios aplica y que evidencias conserva. En paralelo, los contratos
+\texttt{ReportDebateTurn} y \texttt{ReportDebateRecord} registran una vista
+ordenada del intercambio: borrador inicial, verificacion, revision, nueva
+verificacion y cierre del debate.
+
+La version implementada mantiene una sola ronda de revision. Si el informe
+inicial es aceptado, el debate termina como
+\texttt{approved\_without\_revision}. Si el verificador solicita cambios, el
+redactor genera una version revisada y el verificador la evalua de nuevo. Si
+tras esa ronda quedan incidencias, el resultado pasa a
+\texttt{needs\_human\_review} o \texttt{blocked}, evitando aprobar
+silenciosamente un informe con afirmaciones no soportadas.
+
+El coordinador del debate se ha aislado en \texttt{report\_debate.py}. Este
+servicio no toma decisiones agenticas nuevas; solo compone los turnos y
+persiste los artefactos humanos y estructurados:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+<directorio_del_informe>/evidence/report_debate.json
+<directorio_del_informe>/evidence/report_debate.md
+<directorio_del_informe>/evidence/final_report_initial.md
+<directorio_del_informe>/evidence/final_report_revision_001.md
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La API expone el debate mediante
+\texttt{GET /runs/\{run\_id\}/report-debate}. La interfaz web carga ese
+Markdown y lo muestra como seccion propia despues del informe final y la
+auditoria de ejecucion. Tambien se ha anadido \texttt{report\_verifier} a la
+vista de agentes y se han mejorado las traducciones humanas de eventos para que
+campos como estado de verificacion, ronda, resumen, correcciones y cambios sean
+legibles sin abrir el JSON completo.
+
+Sobre esa base se ha incorporado una conversacion agentica en la pestana de
+agentes. Esta vista toma los eventos runtime de supervisor y agentes, descarta
+ruido de job y ejecutores, y los presenta como mensajes ordenados con nombre,
+rol, accion resumida, fase y pequenos indicadores de confianza, memoria o
+veredicto. Cada mensaje permite seleccionar el agente correspondiente para ver
+el detalle tecnico cuando sea necesario. Asi, el evaluador humano puede seguir
+de un vistazo el hilo real de trabajo: supervisor, limpiador, estructurador,
+modelador, evaluador, redactor y verificador.
+
+La validacion posterior con una run completa ha permitido refinar la tolerancia
+del verificador. En particular, se ha evitado que frases de acotacion como
+``no equivale a validacion industrial final'' se interpreten como afirmaciones
+industriales no soportadas. Tambien se ha saneado la caida a fallback cuando el
+LLM devuelve un JSON con nombres de campo no canonicos: el sistema normaliza
+alias frecuentes antes de validar con Pydantic y, si aun asi debe usar el
+verificador determinista, no expone errores de validacion crudos en la interfaz.
+
+El siguiente avance inicia la expansion controlada de herramientas para los
+agentes. Se han definido contratos Pydantic de especificacion, solicitud y
+observacion de herramienta, que permiten declarar herramientas elegibles por los
+LLM sin que estas sustituyan su decision. La
+primera herramienta es \texttt{evidence\_lookup}, de solo lectura, orientada a
+consultar evidencia de una ejecucion: contexto del proyecto, configuraciones,
+metricas, evaluacion, artefactos, errores y politica del dataset. Su salida es
+una observacion estructurada con referencias citables como
+\texttt{metric:recall}, \texttt{evaluation:approved} o
+\texttt{artifact:evaluation\_metrics}. La herramienta no modifica datos ni
+artefactos; solo amplia el espacio de observacion disponible para futuras
+decisiones agenticas. Ademas, el verificador del informe reutiliza el mismo
+catalogo cerrado de evidencias, reduciendo duplicacion y preparando una frontera
+comun para herramientas posteriores.
+
+La segunda herramienta del catalogo es \texttt{threshold\_analysis}. Esta
+herramienta lee el artefacto de predicciones registrado en el estado y calcula
+un diagnostico de sensibilidad: metricas por cuantiles de score, matriz de
+confusion, resumen de distribucion de scores y ventanas cercanas al umbral
+actual. Su salida incluye un guardarrail explicito: el analisis no selecciona
+un umbral ni sustituye la comparacion entre modelos. Para reforzar esta idea,
+la decision del modelador se ha ampliado con una estrategia declarada
+(\texttt{ModelingDecisionStrategy}), donde el agente debe explicitar si su
+hipotesis es seleccion de familia de modelo, calibracion de umbral, ajuste entre
+features y modelo, riesgo de particion, conservacion de baseline o falta de
+evidencia. Cuando la estrategia declarada es calibracion de umbral, el contrato
+exige mantener al menos una alternativa de otra familia de modelo en
+\texttt{comparison\_candidates}. Asi el umbral se trata como una evidencia de
+diagnostico, no como la unica via de mejora del agente.
+
+Como tercera ampliacion del espacio de modelado se ha incorporado One-Class
+SVM, expuesto en la aplicacion como \texttt{one\_class\_svm}. Este modelo
+mantiene la frontera metodologica no supervisada del pipeline: se entrena solo
+con ventanas normales del split \texttt{train} y produce un
+\texttt{anomaly\_score} comparable con el resto de detectores, donde valores
+mas altos indican mayor anomalia. La implementacion
+usa \texttt{StandardScaler} y \texttt{sklearn.svm.OneClassSVM}, valida
+hiperparametros como \texttt{kernel}, \texttt{nu}, \texttt{gamma},
+\texttt{tol}, \texttt{shrinking} y \texttt{max\_iter}, y persiste el modelo,
+las predicciones y el resumen de modelado igual que las familias anteriores.
+El agente modelador puede ahora comparar \texttt{isolation\_forest},
+\texttt{pca\_reconstruction\_error} y \texttt{one\_class\_svm}. En cambio,
+XGBoost se ha dejado fuera de esta etapa porque representa un baseline
+supervisado que solo debe introducirse cuando exista un dataset y una politica
+de etiquetas adecuados.
+
+Como ajuste intermedio antes de continuar ampliando el modelador, se ha
+estabilizado la ejecucion NASA IMS desde la aplicacion. El formulario web usa
+ahora por defecto la muestra preextraida local, el modo \texttt{full} y la
+politica \texttt{nasa\_ims\_temporal\_v1}, de modo que el preflight permite
+modelado, evaluacion y reporte sin presentar las etiquetas proxy como
+oficiales. Ademas, el endpoint de visualizacion puede construir una proyeccion
+PCA diagnostica cuando existen features persistidas pero aun no hay
+predicciones. En ese caso los puntos se muestran sin puntuacion de anomalia ni
+frontera, con una advertencia explicita para distinguir una run diagnostica de
+una run evaluada. La validacion local de NASA IMS confirma que completa el
+flujo, genera informe, metricas, predicciones y visualizacion; las metricas no
+se aprueban por \texttt{FPR}=1.0, lo que se conserva como limitacion
+metodologica en lugar de ocultarlo como fallo tecnico.
+
+El siguiente paso de Fase 7 introduce perfiles explicitos de supervision para
+separar datasets binarios con etiquetas directas de secuencias
+run-to-failure. Las referencias revisadas sobre NASA IMS, la libreria de
+metricas pronosticas de NASA, XJTU-SY y PRONOSTIA/IEEE PHM 2012 justifican que
+los ensayos de degradacion se modelen como trayectorias temporales hasta fallo,
+no como clasificacion binaria por ventana salvo que exista una politica proxy
+declarada \cite{nasa_ims_datagov,nasa_prognostics_metrics_library,xjtu_sy_bearing_dataset,ieee_phm_2012_pronostia_challenge}.
+Por ello se han anadido \texttt{supervision\_profile},
+\texttt{label\_source} y \texttt{label\_granularity} a
+\texttt{DatasetDescriptor} y \texttt{ProjectContext}. La declaracion inicial
+queda fijada asi:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+CWRU:
+  supervision_profile = binary_fault_classification
+  label_source = official
+  label_granularity = file
+
+NASA IMS:
+  supervision_profile = run_to_failure_degradation
+  label_source = none | temporal_proxy | synthetic
+  label_granularity = event | proxy_temporal | file
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+En NASA IMS, el valor \texttt{temporal\_proxy} solo aparece cuando se usa la
+politica \texttt{nasa\_ims\_temporal\_v1}. La aplicacion web muestra estos
+campos en el preflight para que el usuario vea antes de lanzar una run que tipo
+de evidencia y supervision se esta usando.
+
+El segundo paso del mismo hito extiende el manifiesto comun sin crear otro
+formato paralelo. La lectura y escritura CSV de \texttt{CommonManifestRecord}
+se ha centralizado en \texttt{common\_manifest.py}, eliminando duplicacion entre
+adaptadores, politica temporal NASA IMS y benchmarks sinteticos. El manifiesto
+NASA IMS base conserva ahora los timestamps por snapshot y anade en
+\texttt{metadata\_json} los metadatos run-to-failure generales:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+failure_event_time
+failure_mode
+end_of_life_policy
+official_window_labels = false
+label_source = none
+label_granularity = event
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Cuando se aplica \texttt{nasa\_ims\_temporal\_v1}, esos metadatos se preservan
+y solo se declara una nueva capa de supervision proxy:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+label_source = temporal_proxy
+label_granularity = proxy_temporal
+label_policy_id = nasa_ims_temporal_v1
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Asi, el pipeline dispone de informacion temporal/fallo suficiente para las
+siguientes fases, pero sigue sin presentar etiquetas por ventana como oficiales.
+
+El tercer paso propaga esa informacion hasta el nivel de ventana. En lugar de
+crear un estructurador especifico para NASA IMS, se ha extendido la cadena
+existente. El ejecutor \texttt{cleaning.py} conserva en cada fichero limpio:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+source_path
+condition_id
+asset_id
+run_id
+timestamp_start
+timestamp_end
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Despues, \texttt{structuring.py} transforma esos campos en columnas por ventana
+dentro de \texttt{windows\_features.csv}. Las nuevas columnas son:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\begin{verbatim}
+run_id
+asset_id
+condition_id
+timestamp_start
+timestamp_end
+time_since_start_seconds
+time_to_failure_seconds
+relative_life
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La vida relativa solo se calcula cuando el run tiene timestamps y evento de
+fallo declarado. Para evitar fugas, \texttt{modeling.py} y
+\texttt{run\_visualization.py} tratan estas columnas como metadatos y no como
+features numericas de entrenamiento o proyeccion. El ejecutor de modelado las
+preserva en \texttt{predictions.csv}, preparando el siguiente paso de evaluacion
+temporal de degradacion.
+
+El cuarto paso incorpora esa evaluacion temporal sin crear un evaluador paralelo.
+Se ha extendido \texttt{evaluation.py}, que sigue siendo el propietario canonico
+de las metricas de prediccion, para que detecte de forma generica si
+\texttt{predictions.csv} contiene \texttt{relative\_life},
+\texttt{anomaly\_score} y \texttt{predicted\_anomaly}. Cuando esos campos
+estan disponibles, el artefacto \texttt{metrics.json} declara dos familias:
+\texttt{binary\_classification} y \texttt{run\_to\_failure\_degradation}. La
+primera mantiene las metricas previas de precision, recall, F1, ROC-AUC,
+PR-AUC, FPR y matriz de confusion; la segunda calcula metricas por trayectoria,
+incluyendo primera alerta, tiempo hasta deteccion, \texttt{lead\_time} hasta
+fallo, falsas alarmas en tramo nominal, persistencia de alertas, correlacion
+Spearman del score con la vida relativa, pendiente, separacion inicial-final,
+monotonicidad y fallos no detectados.
+
+Esta separacion evita presentar una politica proxy temporal como si fuera una
+etiqueta oficial por ventana. Si el origen de etiqueta no viaja dentro del CSV
+de predicciones, el evaluador deja una advertencia en el contexto binario y el
+resumen Markdown muestra una seccion diferenciada de degradacion. A su vez, el
+grafo copia al estado solo un resumen plano de esta familia en
+\texttt{MetricsReport.extra}, manteniendo compatible el contrato existente y
+permitiendo que los agentes posteriores razonen sobre \texttt{lead\_time},
+falsas alarmas nominales y tendencia sin mezclar estructuras anidadas en el
+estado global.
+
+El quinto paso traslada esta informacion a la aplicacion visual sin crear un
+endpoint paralelo. El contrato \texttt{RunVisualizationData} se ha extendido con
+un bloque opcional \texttt{temporal\_series}, formado por
+\texttt{TemporalSeriesData}, \texttt{TemporalRunSeries} y
+\texttt{TemporalSeriesPoint}. El servicio \texttt{run\_visualization.py}
+construye dicho bloque directamente desde \texttt{predictions.csv}; selecciona
+como eje temporal, por prioridad, \texttt{relative\_life},
+\texttt{time\_since\_start\_seconds} o \texttt{window\_index}. Para cada
+trayectoria conserva el score de anomalia, el umbral, la primera alerta, el
+tiempo restante hasta fallo cuando existe, un marcador de fallo estimado y una
+muestra compacta de puntos para no saturar la API.
+
+La interfaz web mantiene la misma pestana de visualizacion, pero anade una vista
+principal de degradacion antes de la proyeccion PCA. Esta vista dibuja la curva
+del \texttt{anomaly\_score}, la linea de umbral, el primer aviso y el fallo
+estimado si los metadatos lo permiten. Si las predicciones no contienen
+metadatos temporales suficientes, el backend devuelve
+\texttt{temporal\_series.available = false} con advertencias legibles y la PCA
+sigue funcionando como vista secundaria. De esta forma, NASA IMS y futuros
+datasets run-to-failure pueden inspeccionarse como trayectorias temporales sin
+perder compatibilidad con las runs binarias de CWRU.
+
+El sexto paso hace que los agentes posteriores sean conscientes del perfil de
+supervision. En \texttt{modeler.py}, el contexto entregado al LLM y al fallback
+incluye el perfil de supervision, la fuente de etiquetas y su granularidad.
+Para el perfil de degradacion temporal, el
+fallback selecciona \texttt{pca\_reconstruction\_error} como indicador temporal
+interpretable y declara que la hipotesis se evaluara por tendencia, primera
+alerta y falsas alarmas nominales, no por F1 como objetivo principal. Ademas,
+se rechaza una decision cuyo \texttt{strategy\_type} principal sea
+\texttt{threshold\_calibration} en este perfil, manteniendo el umbral como
+elemento auxiliar para disparar alertas.
+
+En \texttt{evaluator.py}, la politica binaria previa se conserva para CWRU y
+perfiles equivalentes: recall y tasa de falsos positivos siguen siendo los
+umbrales deterministas. En cambio, cuando el contexto declara
+\texttt{run\_to\_failure\_degradation}, la aprobacion se calcula con metricas
+temporales: deteccion antes del fallo, falsas alarmas en tramo nominal y
+tendencia Spearman del score. En ese caso, \texttt{min\_recall\_required} y
+\texttt{max\_false\_positive\_rate} quedan a \texttt{null} en la decision del
+agente para no presentar el criterio binario como vinculante. La ausencia de
+etiquetas oficiales por ventana no invalida por si sola la run si existen
+metricas temporales, aunque se conserva como limitacion metodologica.
+
+Por ultimo, \texttt{report\_writer.py} y \texttt{report\_verifier.py} incorporan
+la misma frontera. El redactor presenta lead time, falsas alarmas nominales y
+tendencia como metricas principales en informes run-to-failure, dejando F1 solo
+como apoyo si procede de una politica proxy. El verificador bloquea cualquier
+afirmacion que atribuya etiquetas oficiales o \textit{ground truth} oficial
+cuando \texttt{label\_source} no es \texttt{official}. La herramienta
+\texttt{evidence\_lookup} expone referencias cerradas para
+\texttt{supervision\_profile}, \texttt{label\_source},
+\texttt{label\_granularity} y \texttt{metric\_extra:*}, de forma que los
+agentes puedan citar evidencia temporal sin inventar campos.
+
+La comprobacion posterior se realizo con la run
+\texttt{fase7-paso7-nasa-common-long-v2}, generada sobre una secuencia
+NASA-like local de 24 snapshots mediante el runner comun y la politica
+\texttt{nasa\_ims\_temporal\_v1}. La ejecucion produjo 168 ventanas con
+\texttt{label\_source=temporal\_proxy} y
+\texttt{label\_granularity=proxy\_temporal} preservados hasta
+\texttt{predictions.csv}; \texttt{metrics.json} declaro la familia
+\texttt{run\_to\_failure\_degradation}, el informe fue aprobado por el
+verificador y la visualizacion temporal quedo disponible. Durante esta
+validacion se ajusto el verificador para no bloquear frases negadas como
+``las etiquetas no son oficiales'', manteniendo el bloqueo para afirmaciones
+positivas de oficialidad sin evidencia.
+
+El siguiente refinamiento convierte esa evaluacion temporal en una herramienta
+comparativa dentro de la aplicacion. La ruta existente \texttt{GET
+/runs/compare}, implementada sobre \texttt{run\_registry.py}, se ha extendido
+para que cada fila de comparacion incluya el perfil de supervision, la fuente y
+granularidad de etiquetas, el modelo usado y las familias metricas disponibles.
+Cuando una run contiene metricas \texttt{run\_to\_failure\_degradation}, la
+respuesta anade un bloque especifico con comparaciones de deteccion antes de
+fallo, \texttt{lead\_time} medio, falsa alarma nominal media, tendencia Spearman
+del score, fallos perdidos y separacion inicial-final si esta disponible. La
+interfaz web muestra este bloque antes de las metricas binarias, de forma que el
+analista compare modelos temporales por comportamiento de degradacion y no por
+F1 como criterio principal. Esta decision mantiene la compatibilidad con CWRU y
+prepara el panel de investigacion para comparar familias como
+\texttt{pca\_reconstruction\_error}, \texttt{isolation\_forest} y
+\texttt{one\_class\_svm} sobre el mismo protocolo run-to-failure.
+
+A partir de esa comparacion se ha incorporado una capa de monitorizacion de
+estado de salud. La serie temporal ya no se limita a mostrar el score bruto:
+\texttt{run\_visualization.py} deriva para cada ventana un
+\texttt{risk\_index}, un \texttt{health\_index}, un
+\texttt{health\_state} y una razon textual del estado. Si existe umbral, el
+riesgo se calcula a partir de la relacion entre \texttt{anomaly\_score} y
+\texttt{threshold}; si no existe, se usa una normalizacion interna del score
+como aproximacion diagnostica. Los estados resultantes son
+\texttt{nominal}, \texttt{watch}, \texttt{warning} y \texttt{critical}. La
+trayectoria completa conserva tambien el estado actual, el riesgo y salud
+actuales, el numero de puntos en alerta y el tiempo restante hasta fallo solo
+cuando este aparece como metadato de un replay historico. De esta forma, la
+aplicacion se aproxima a una monitorizacion industrial de activos sin afirmar
+una prediccion RUL real cuando el modelo aun no la produce.

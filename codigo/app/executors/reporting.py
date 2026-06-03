@@ -84,7 +84,9 @@ def _render_report(state: TFMStateModel, decision: ReportDecision) -> str:
 def _render_section(state: TFMStateModel, section: ReportSection) -> list[str]:
     title_key = section.title.strip().lower()
     lines = [f"## {section.title}", ""]
-    if "resumen" in title_key:
+    if section.body:
+        lines.extend(_paragraph_lines(section.body))
+    elif "resumen" in title_key:
         lines.extend(_summary_lines(state))
     elif "contexto" in title_key or "datos" in title_key:
         lines.extend(_context_lines(state))
@@ -99,14 +101,36 @@ def _render_section(state: TFMStateModel, section: ReportSection) -> list[str]:
     else:
         lines.append("Seccion solicitada por el agente redactor.")
 
+    if section.key_findings:
+        lines.extend(["", "Hallazgos principales:"])
+        lines.extend([f"- {item}" for item in section.key_findings])
+    if section.recommendations:
+        lines.extend(["", "Recomendaciones:"])
+        lines.extend([f"- {item}" for item in section.recommendations])
     if section.include_metrics and "metrica" not in title_key:
         lines.extend(["", *(_metrics_lines(state))])
+    elif section.include_metrics and section.body:
+        lines.extend(["", "Detalle de metricas:", *(_metrics_lines(state))])
     if section.include_artifacts and "artefact" not in title_key:
         lines.extend(["", *(_artifact_lines(state))])
+    elif section.include_artifacts and section.body:
+        lines.extend(["", "Inventario de artefactos:", *(_artifact_lines(state))])
+    if section.evidence_refs:
+        lines.extend(["", "Referencias de evidencia:", *[f"- {ref}" for ref in section.evidence_refs]])
     if section.source_paths:
         lines.extend(["", "Fuentes:", *[f"- `{path}`" for path in section.source_paths]])
     lines.append("")
     return lines
+
+
+def _paragraph_lines(body: str) -> list[str]:
+    paragraphs = [paragraph.strip() for paragraph in body.split("\n\n") if paragraph.strip()]
+    if not paragraphs:
+        return []
+    lines: list[str] = []
+    for paragraph in paragraphs:
+        lines.extend([paragraph, ""])
+    return lines[:-1]
 
 
 def _summary_lines(state: TFMStateModel) -> list[str]:
@@ -135,9 +159,9 @@ def _context_lines(state: TFMStateModel) -> list[str]:
 
 def _configuration_lines(state: TFMStateModel) -> list[str]:
     return [
-        f"- Limpieza: `{_dump_or_none(state.cleaning_config)}`",
-        f"- Estructuracion: `{_dump_or_none(state.structuring_config)}`",
-        f"- Modelado: `{_dump_or_none(state.modeling_config)}`",
+        f"- Limpieza: `{_config_summary(state.cleaning_config)}`",
+        f"- Estructuracion: `{_config_summary(state.structuring_config)}`",
+        f"- Modelado: `{_config_summary(state.modeling_config)}`",
     ]
 
 
@@ -177,9 +201,29 @@ def _format_metric(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
 
 
-def _dump_or_none(value: object) -> str:
+def _config_summary(value: object) -> str:
     if value is None:
         return "n/a"
-    if hasattr(value, "model_dump_json"):
-        return value.model_dump_json()
+    if hasattr(value, "model_dump"):
+        payload = value.model_dump(mode="json")
+        parts = [
+            f"{key}={payload[key]}"
+            for key in sorted(payload)
+            if payload[key] is not None and key in _CONFIG_KEYS
+        ]
+        return ", ".join(parts) or value.__class__.__name__
     return str(value)
+
+
+_CONFIG_KEYS = {
+    "strategy_id",
+    "normalization",
+    "selected_channel",
+    "window_size",
+    "overlap",
+    "main_channel",
+    "target_sample_rate_hz",
+    "label_mode",
+    "model_name",
+    "random_state",
+}

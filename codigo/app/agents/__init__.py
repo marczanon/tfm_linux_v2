@@ -21,6 +21,14 @@ from codigo.app.agents.report_writer import (
     decide_report_action,
     decide_report_action_deterministic,
     decide_report_action_with_llm,
+    decide_report_revision_action,
+    decide_report_revision_action_deterministic,
+    decide_report_revision_action_with_llm,
+)
+from codigo.app.agents.report_verifier import (
+    decide_report_verification_action,
+    decide_report_verification_action_deterministic,
+    decide_report_verification_action_with_llm,
 )
 from codigo.app.agents.structurer import (
     build_structurer_memory_query,
@@ -50,6 +58,12 @@ __all__ = [
     "decide_report_action",
     "decide_report_action_deterministic",
     "decide_report_action_with_llm",
+    "decide_report_revision_action",
+    "decide_report_revision_action_deterministic",
+    "decide_report_revision_action_with_llm",
+    "decide_report_verification_action",
+    "decide_report_verification_action_deterministic",
+    "decide_report_verification_action_with_llm",
     "decide_structuring_action",
     "decide_structuring_action_deterministic",
     "decide_structuring_action_with_llm",

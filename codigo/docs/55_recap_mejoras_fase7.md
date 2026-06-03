@@ -17,6 +17,96 @@ Este documento no es todavia la hoja de ruta de Fase 7. Su funcion es:
   proyecto;
 - conservar la regla de no duplicar runners, contratos, memoria ni ejecutores.
 
+Actualizacion de avance:
+
+- Hito 1 iniciado e implementado en
+  `codigo/docs/56_fase7_hito1_evidence_pack_reporte_agentico.md`.
+- Se prioriza auditabilidad minima: evidence pack por snapshot, request/plan
+  como evidencia y `report_writer` con redaccion narrativa validada.
+- El informe final se ha encajado despues en el frontend como documento
+  principal de cierre de run; ver
+  `codigo/docs/57_fase7_hito1_frontend_informe_final.md`.
+- Hito 2 implementado: informe determinista de auditoria de ejecucion separado
+  del informe agentico final; ver
+  `codigo/docs/58_fase7_hito2_informe_auditoria_ejecucion.md`.
+- Hito 3 implementado: primer `report_verifier` agentico con tolerancia de
+  estilo, deteccion de afirmaciones no soportadas y artefactos de verificacion;
+  ver `codigo/docs/59_fase7_hito3_verificador_agentico_informe.md`.
+- Investigacion previa del siguiente bloque: debate controlado entre
+  `report_writer` y `report_verifier`, con contratos, artefactos, auditoria y
+  encaje UI propuestos en
+  `codigo/docs/60_fase7_investigacion_debate_controlado_informe.md`.
+- Hito 4 implementado: debate controlado minimo entre `report_writer` y
+  `report_verifier`, con `ReportRevisionDecision`, `ReportDebateRecord`,
+  artefactos JSON/Markdown, endpoint y panel frontend. Ver
+  `codigo/docs/61_fase7_hito4_debate_controlado_informe.md`.
+- Hito 5.1 iniciado: catalogo minimo de herramientas agenticas con contratos
+  `AgentToolSpec`, `AgentToolRequest`, `AgentToolObservation` y primera
+  herramienta read-only `evidence_lookup`. Ver
+  `codigo/docs/62_fase7_hito5_catalogo_herramientas_agenticas.md`.
+- Hito 5.2 implementado: segunda herramienta read-only `threshold_analysis` y
+  ampliacion de `ModelingDecision` con `ModelingDecisionStrategy` para declarar
+  hipotesis de modelado y evitar que la calibracion de umbral sustituya la
+  comparacion entre familias de modelo. Ver
+  `codigo/docs/63_fase7_hito5_threshold_analysis_modeler_strategy.md`.
+- Hito 5.3 implementado: `one_class_svm` queda soportado por el ejecutor
+  determinista y por el `modeler`, con hiperparametros acotados y sin anadir
+  dependencias nuevas. XGBoost queda diferido para datasets supervisados con
+  politica de etiquetas explicita. Ver
+  `codigo/docs/64_fase7_hito5_one_class_svm_modeler.md`.
+- Hito 6 intermedio implementado: se estabiliza NASA IMS en la aplicacion,
+  cambiando el default UI a `full` con `nasa_ims_temporal_v1` sobre la muestra
+  preextraida y permitiendo visualizacion PCA diagnostica cuando una run tiene
+  features pero aun no tiene predicciones. Ver
+  `codigo/docs/65_fase7_hito6_nasa_ims_visualizacion.md`.
+- Hito 7 disenado: se define la hoja de ruta para separar dos perfiles de
+  supervision, `binary_fault_classification` y
+  `run_to_failure_degradation`, con metricas, visualizaciones y contratos
+  generales para NASA IMS y futuros datasets industriales sin eliminar CWRU.
+  Ver
+  `codigo/docs/66_fase7_perfiles_supervision_binary_run_to_failure.md`.
+- Hito 7, paso 1 implementado: `DatasetDescriptor`, `ProjectContext`, los
+  adaptadores, el runner comun y el preflight de la UI declaran ahora
+  `supervision_profile`, `label_source` y `label_granularity` sin cambiar la
+  semantica existente de CWRU.
+- Hito 7, paso 2 implementado: el manifiesto comun NASA IMS transporta ya
+  metadatos temporales/fallo (`failure_event_time`, `failure_mode`,
+  `end_of_life_policy`, `official_window_labels=false`) y la lectura/escritura
+  CSV se centraliza en `common_manifest.py` para evitar duplicacion entre
+  adaptadores, politica temporal y benchmarks sinteticos.
+- Hito 7, paso 3 implementado: la limpieza preserva campos temporales ligeros
+  en los `.npz`, la estructuracion escribe ventanas con `run_id`, timestamps,
+  `time_since_start_seconds`, `time_to_failure_seconds` y `relative_life`, y
+  modelado/visualizacion los excluyen como features para evitar fugas.
+- Hito 7, paso 4 implementado: `evaluation.py` anade una familia opcional
+  `run_to_failure_degradation` con deteccion antes de fallo, lead time,
+  falsas alarmas nominales, persistencia y tendencia del score, manteniendo las
+  metricas binarias como apoyo cuando proceden de una politica proxy.
+- Hito 7, paso 5 implementado: `GET /runs/{run_id}/visualization` y la pestana
+  Visualizacion soportan `temporal_series` para curvas de degradacion antes de
+  la proyeccion PCA, sin hacer que el frontend lea ficheros internos.
+- Hito 7, paso 6 implementado: `modeler`, `evaluator`, `report_writer`,
+  `report_verifier` y `evidence_lookup` entienden `supervision_profile`,
+  `label_source` y `label_granularity`; NASA se interpreta como trayectoria
+  temporal y no como benchmark binario oficial.
+- Hito 7, paso 7 comprobado: la run
+  `fase7-paso7-nasa-common-long-v2` ejecuta 24 snapshots NASA-like mediante el
+  runner comun con `nasa_ims_temporal_v1`, genera 168 ventanas/predicciones,
+  metricas temporales, informe y debate/verificacion aprobados. Durante la
+  comprobacion se corrigio la propagacion de `label_source`/`label_granularity`
+  hasta predicciones y un falso positivo del verificador ante frases negadas
+  como "no son oficiales".
+- Hito 8.1 iniciado e implementado: `GET /runs/compare` y la vista de
+  comparacion del frontend distinguen ahora metricas binarias auxiliares y
+  metricas principales `run_to_failure_degradation`, con lead time, falsas
+  alarmas nominales, tendencia, deteccion antes de fallo y fallos perdidos. Ver
+  `codigo/docs/67_fase7_hito8_comparativa_run_to_failure.md`.
+- Hito 8.2 implementado: `temporal_series` incorpora `health_index`,
+  `risk_index`, `health_state` y razones de estado por ventana y por
+  trayectoria, permitiendo monitorizar activos como `nominal`, `watch`,
+  `warning` o `critical` sin introducir RUL no soportado. Ver
+  `codigo/docs/68_fase7_hito8_monitorizacion_estado_salud.md`.
+
 ## Metodologia que debe mantenerse
 
 Capacidad buscada:
@@ -25,6 +115,31 @@ Capacidad buscada:
 Evolucionar la aplicacion multiagente hacia una herramienta auditable de
 deteccion autonoma de anomalias con informe tecnico para analistas humanos.
 ```
+
+Principio rector:
+
+```text
+Los agentes Qwen/LLM son el sujeto principal de investigacion y decision de la
+app. Los ejecutores, metricas, herramientas y visualizaciones deterministas son
+el soporte seguro, reproducible y auditable que permite llevar esa linea
+agentica hasta el maximo viable en un contexto industrial.
+```
+
+Implicaciones para el resto de Fase 7:
+
+- una mejora no debe desplazar a los agentes a un papel decorativo;
+- cuando se anadan vistas, metricas o herramientas, deben alimentar mejores
+  decisiones agenticas o auditar mejor esas decisiones;
+- Qwen/Ollama sigue siendo la linea de investigacion principal aunque localmente
+  sea lento;
+- el uso de LLM pequenos se interpreta como una hipotesis industrial: comprobar
+  si pueden ser suficientemente utiles bajo restricciones reales de coste,
+  latencia, privacidad y despliegue local;
+- los fallbacks deterministas son guardarrailes y mecanismos de continuidad,
+  no el resultado final que se intenta demostrar;
+- si la linea agentica alcanza limites practicos, esos limites se documentaran
+  como resultado experimental, no como motivo para abandonar la hipotesis antes
+  de probarla.
 
 Inventario previo revisado:
 
@@ -63,6 +178,8 @@ Reglas de trabajo:
 
 - antes de crear cualquier modulo, endpoint, agente, script o test, buscar
   propietario canonico;
+- preservar el protagonismo de los agentes como decisores e interpretes del
+  sistema;
 - si existe contrato Pydantic, extenderlo con compatibilidad;
 - si existe servicio canonico, reutilizarlo o adaptarlo;
 - los agentes no escriben ni ejecutan codigo arbitrario;
@@ -171,10 +288,17 @@ Los ejecutores son deterministicos y son los unicos que transforman datos:
 El modelado soporta actualmente:
 
 - Isolation Forest;
-- PCA reconstruction error.
+- PCA reconstruction error;
+- One-Class SVM.
 
 La evaluacion calcula metricas como precision, recall, F1, ROC-AUC, PR-AUC,
-FPR y matriz de confusion cuando existen etiquetas binarias validas.
+FPR y matriz de confusion cuando existen etiquetas binarias validas. Desde el
+Hito 7 tambien calcula una familia opcional de metricas temporales de
+degradacion cuando `predictions.csv` conserva `relative_life`,
+`time_to_failure_seconds`, `time_since_start_seconds`, `run_id`,
+`anomaly_score` y `predicted_anomaly`. Esta rama no sustituye la evaluacion
+binaria: la separa explicitamente como `run_to_failure_degradation` y deja
+advertencias si `label_source` no viaja dentro del artefacto de predicciones.
 
 ### API
 
@@ -420,6 +544,20 @@ Propietarios probables:
 
 El informe debe pasar de "resumen tecnico" a "informe de analista".
 
+Decision de diseno importante: esta responsabilidad debe recaer en el agente
+`report_writer`. El evidence pack no es el informe final; es la base
+determinista y verificable sobre la que el agente redacta. El resultado visible
+para el usuario debe ser un documento Markdown/PDF ordenado, legible y escrito
+con lenguaje industrial, no un JSON ni una lista cruda de campos internos.
+
+Estado actual: `report_writer.py` ya existe y puede decidir la estructura del
+informe, pero `reporting.py` genera el contenido de forma mayoritariamente
+determinista y todavia demasiado tecnica. En Fase 7 debe evolucionar hacia un
+redactor agentico real: el agente decide enfasis, interpretacion, conclusiones,
+limitaciones, recomendaciones y orden narrativo, mientras que un componente
+determinista valida fuentes, formatea el documento y evita afirmaciones sin
+evidencia.
+
 Debe incluir:
 
 - resumen ejecutivo;
@@ -434,10 +572,38 @@ Debe incluir:
 - memoria usada y cautelas;
 - anexo tecnico con parametros y artefactos.
 
+El agente `report_writer` deberia poder decidir:
+
+- que mensajes son importantes para un analista;
+- que metricas requieren explicacion;
+- que limitaciones condicionan la interpretacion;
+- que anomalias o resultados merecen destacarse;
+- que acciones de revision humana recomienda;
+- que nivel de confianza comunica;
+- que anexos tecnicos se dejan fuera del cuerpo principal.
+
+El componente determinista de soporte deberia:
+
+- proporcionar un evidence pack cerrado;
+- validar que todas las metricas citadas existen;
+- validar que todos los artefactos citados existen;
+- impedir rutas o fuentes no permitidas;
+- renderizar el Markdown final;
+- anadir un anexo tecnico trazable;
+- guardar el informe como artefacto principal de la run.
+
+La frontera correcta no es "JSON frente a informe humano". Internamente puede
+seguir existiendo un contrato Pydantic para validar la salida del agente, pero
+ese contrato debe contener contenido redactado en lenguaje natural, referencias
+de evidencia y decisiones editoriales. El JSON es un mecanismo interno de
+seguridad; el entregable para el analista es el informe.
+
 Propietarios probables:
 
 - extender `report_writer`;
 - extender `reporting.py`;
+- extender `ReportDecision` y `ReportSection` con cuerpo redactado,
+  referencias de evidencia y recomendaciones;
 - exponer secciones en UI con lectura mas profesional.
 
 ### 7. Politica clara de memoria en ejecucion API/UI
@@ -591,6 +757,27 @@ Para vibracion industrial conviene mejorar features:
 
 Estas features deben implementarse en ejecutores deterministicos.
 
+Estado 2026-06-01: el bloque temporal ya cubre evaluacion y visualizacion.
+`evaluation.py` genera `degradation_metrics` con primera alerta, lead time,
+falsas alarmas nominales, tendencia del score, separacion inicial-final,
+persistencia y fallos perdidos por run. `GET /runs/{run_id}/visualization`
+devuelve ahora `temporal_series` cuando `predictions.csv` conserva metadatos
+run-to-failure, y la pestana Visualizacion muestra una curva de score temporal
+antes del PCA con umbral, primer aviso y fallo estimado. El siguiente paso
+logico pasa a hacer que modeler/evaluator/report_writer/report_verifier razonen
+explicitamente con esta familia de metricas y no solo con F1.
+
+Estado 2026-06-02: los agentes ya son conscientes del perfil. `modeler` recibe
+`supervision_profile`, `label_source` y `label_granularity`; en
+run-to-failure usa un health indicator temporal y evita que el umbral sea la
+estrategia principal. `evaluator` mantiene recall/FPR para perfiles binarios,
+pero para degradacion temporal juzga deteccion antes de fallo, falsas alarmas
+nominales y tendencia del score. `report_writer` redacta esas metricas como
+principales, y `report_verifier` bloquea cualquier afirmacion de etiquetas
+oficiales cuando `label_source` no es `official`. El siguiente paso logico es
+ejecutar una comparativa NASA mas realista sobre una secuencia mas larga y
+revisar la app con artefactos reales.
+
 ### 6. Comparacion de runs mas rica
 
 La comparacion actual es basica.
@@ -696,6 +883,12 @@ Responsabilidades:
 
 No sustituye al evaluador. Es una capa de auditoria.
 
+Estado aplicado: la primera base de este patron queda implementada para el
+informe final como `report_verifier`, y el Hito 4 ya permite devolver el
+control al redactor para una ronda de revision acotada. Ver
+`codigo/docs/59_fase7_hito3_verificador_agentico_informe.md` y
+`codigo/docs/61_fase7_hito4_debate_controlado_informe.md`.
+
 ### 4. Debate controlado entre agentes
 
 Para modelado:
@@ -707,6 +900,13 @@ Para modelado:
 
 El debate debe producir JSON estructurado, alternativas y riesgos. No debe ser
 texto libre largo.
+
+Estado aplicado en informes: el primer caso de debate controlado ya existe
+entre `report_writer` y `report_verifier`. Ademas, la pestana de agentes ya
+incluye una conversacion compacta basada en eventos runtime, con burbujas por
+agente y orden real de trabajo. El siguiente refinamiento seria persistir esa
+misma experiencia conversacional para runs historicas usando `report_debate.json`
+y snapshots.
 
 ### 5. Planificador de experimentos acotado
 
@@ -787,7 +987,9 @@ El redactor podria generar un informe y el verificador revisar:
 - las limitaciones estan presentes;
 - el informe no confunde proxy labels con etiquetas oficiales.
 
-El informe final podria llevar un bloque "verificacion automatica".
+Estado aplicado: el informe final ya genera verificacion automatica y, si
+procede, una revision controlada del redactor. La conversacion resumida queda
+persistida como `report_debate.json` y `report_debate.md`.
 
 ### 11. Politica de autonomia por riesgo
 

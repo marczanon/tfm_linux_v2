@@ -68,6 +68,9 @@ class StateSchemaTests(unittest.TestCase):
         self.assertEqual(context.objective, "binary_anomaly_detection")
         self.assertEqual(context.target_sample_rate_hz, 12000)
         self.assertEqual(context.main_channel, "DE_time")
+        self.assertEqual(context.supervision_profile, "binary_fault_classification")
+        self.assertEqual(context.label_granularity, "file")
+        self.assertEqual(context.label_source, "official")
 
 
 if __name__ == "__main__":

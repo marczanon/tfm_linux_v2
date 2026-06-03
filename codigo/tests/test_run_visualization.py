@@ -43,6 +43,43 @@ class RunVisualizationTests(unittest.TestCase):
         metrics = {item["name"]: item["value"] for item in payload["metrics"]}
         self.assertEqual(metrics["f1_score"], 0.91)
 
+    def test_visualization_endpoint_returns_temporal_degradation_series(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            state = _state_with_temporal_artifacts(base, "run-temporal-viz")
+            save_run_snapshot(state, runs_dir)
+            app = create_app(runs_dir=runs_dir)
+
+            response = _get(
+                app,
+                "/runs/run-temporal-viz/visualization",
+                params={"max_points": 50},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        temporal = payload["temporal_series"]
+        self.assertTrue(temporal["available"])
+        self.assertEqual(temporal["x_axis"], "relative_life")
+        self.assertEqual(temporal["n_runs_total"], 1)
+        run = temporal["runs"][0]
+        self.assertEqual(run["run_id"], "bearing_1_test_1")
+        self.assertEqual(run["n_points_total"], 8)
+        self.assertAlmostEqual(run["first_alert_x"], 0.714, places=3)
+        self.assertAlmostEqual(run["first_alert_time_to_failure_seconds"], 300.0)
+        self.assertEqual(run["failure_x"], 1.0)
+        self.assertEqual(run["threshold"], 0.6)
+        self.assertEqual(run["current_health_state"], "critical")
+        self.assertAlmostEqual(run["current_health_index"], 0.0)
+        self.assertEqual(run["alert_points"], 4)
+        self.assertEqual(run["warning_points"], 2)
+        self.assertEqual(run["critical_points"], 2)
+        self.assertTrue(run["points"])
+        self.assertEqual(run["points"][0]["health_state"], "nominal")
+        self.assertGreater(run["points"][0]["health_index"], 80.0)
+        self.assertEqual(run["points"][-1]["health_state"], "critical")
+
     def test_visualization_service_degrades_when_projection_artifacts_are_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -57,11 +94,45 @@ class RunVisualizationTests(unittest.TestCase):
         self.assertTrue(payload.warnings)
         self.assertEqual(payload.metrics[2].name, "f1_score")
 
+    def test_visualization_service_projects_features_without_predictions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            state = _state_with_feature_artifact(base, "run-diagnostic-viz")
+            save_run_snapshot(state, runs_dir)
+
+            payload = build_run_visualization("run-diagnostic-viz", runs_dir)
+
+        self.assertTrue(payload.projection_available)
+        self.assertEqual(payload.projection_boundary, None)
+        self.assertTrue(payload.projection_points)
+        self.assertIn("features", payload.source_paths)
+        self.assertNotIn("predictions", payload.source_paths)
+        self.assertTrue(any("predicciones" in warning for warning in payload.warnings))
+
 
 def _state_with_visual_artifacts(base: Path, run_id: str):
     features_path = base / "features.csv"
     predictions_path = base / "predictions.csv"
     _write_visual_csvs(features_path, predictions_path)
+    state = _state_with_feature_artifact(base, run_id)
+    state.artifacts.extend(
+        [
+            ArtifactRef(
+                name="model_predictions",
+                artifact_type="predictions",
+                path=str(predictions_path),
+                producer="modeling_executor",
+            ),
+        ]
+    )
+    return state
+
+
+def _state_with_temporal_artifacts(base: Path, run_id: str):
+    features_path = base / "temporal_features.csv"
+    predictions_path = base / "temporal_predictions.csv"
+    _write_temporal_csvs(features_path, predictions_path)
     state = _state_without_visual_artifacts(base, run_id)
     state.artifacts.extend(
         [
@@ -78,6 +149,22 @@ def _state_with_visual_artifacts(base: Path, run_id: str):
                 producer="modeling_executor",
             ),
         ]
+    )
+    return state
+
+
+def _state_with_feature_artifact(base: Path, run_id: str):
+    features_path = base / "features.csv"
+    predictions_path = base / "predictions.csv"
+    _write_visual_csvs(features_path, predictions_path)
+    state = _state_without_visual_artifacts(base, run_id)
+    state.artifacts.append(
+        ArtifactRef(
+            name="windows_features",
+            artifact_type="features",
+            path=str(features_path),
+            producer="structuring_executor",
+        )
     )
     return state
 
@@ -124,6 +211,38 @@ def _write_visual_csvs(features_path: Path, predictions_path: Path) -> None:
         )
         prediction_lines.append(
             f"w{index},test,{label},{anomaly},{label},{score:.3f},0.600,{anomaly}"
+        )
+    features_path.write_text("\n".join(features_lines), encoding="utf-8")
+    predictions_path.write_text("\n".join(prediction_lines), encoding="utf-8")
+
+
+def _write_temporal_csvs(features_path: Path, predictions_path: Path) -> None:
+    features_lines = [
+        "window_id,run_id,relative_life,split,label,target,mean,std,rms,energy",
+    ]
+    prediction_lines = [
+        "window_id,run_id,window_index,timestamp_start,timestamp_end,"
+        "time_since_start_seconds,time_to_failure_seconds,relative_life,"
+        "split,label,target,anomaly_score,threshold,predicted_anomaly",
+    ]
+    for index in range(8):
+        relative_life = index / 7
+        predicted = int(index >= 5)
+        label = "degradation" if index >= 3 else "normal"
+        target = int(label != "normal")
+        time_since_start = index * 100.0
+        time_to_failure = 800.0 - time_since_start
+        score = 0.12 + index * 0.13
+        features_lines.append(
+            f"tw{index},bearing_1_test_1,{relative_life:.3f},test,{label},"
+            f"{target},{index * 0.2:.3f},{1.0 + index * 0.04:.3f},"
+            f"{1.1 + index * 0.07:.3f},{8.0 + index * 1.5:.3f}"
+        )
+        prediction_lines.append(
+            f"tw{index},bearing_1_test_1,{index},"
+            f"2004-02-12T10:{index:02d}:00,2004-02-12T10:{index:02d}:01,"
+            f"{time_since_start:.1f},{time_to_failure:.1f},{relative_life:.3f},"
+            f"test,{label},{target},{score:.3f},0.600,{predicted}"
         )
     features_path.write_text("\n".join(features_lines), encoding="utf-8")
     predictions_path.write_text("\n".join(prediction_lines), encoding="utf-8")

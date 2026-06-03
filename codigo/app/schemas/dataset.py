@@ -34,6 +34,13 @@ AssetType = Literal["bearing", "motor", "turbine", "pump", "unknown"]
 LabelAvailability = Literal["file_level", "window_level", "run_level", "none", "partial"]
 TaskType = Literal["binary_anomaly", "multiclass_fault", "run_to_failure", "unknown"]
 CommonDatasetLabel = Literal["normal", "fault", "unknown", "degradation"]
+SupervisionProfile = Literal[
+    "binary_fault_classification",
+    "run_to_failure_degradation",
+    "unlabeled_diagnostic",
+]
+LabelGranularity = Literal["window", "file", "run", "event", "none", "proxy_temporal"]
+LabelSource = Literal["official", "curated", "temporal_proxy", "synthetic", "none"]
 
 
 DATASET_ID_PATTERN = r"^[a-z0-9][a-z0-9_]*$"
@@ -124,6 +131,9 @@ class DatasetDescriptor(StrictBaseModel):
     adapter_id: str = Field(min_length=1, pattern=DATASET_ID_PATTERN)
     label_availability: LabelAvailability
     task_type: TaskType
+    supervision_profile: SupervisionProfile = "binary_fault_classification"
+    label_granularity: LabelGranularity = "file"
+    label_source: LabelSource = "official"
     sampling_rate_hz: float | None = Field(default=None, gt=0.0)
     channel_names: list[str] = Field(default_factory=list)
     has_multiple_conditions: bool

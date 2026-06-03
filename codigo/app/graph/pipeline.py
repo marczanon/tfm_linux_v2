@@ -17,7 +17,14 @@ from codigo.app.agents.evaluator import (
     retrieve_evaluator_memory_context,
 )
 from codigo.app.agents.modeler import decide_modeling_action
-from codigo.app.agents.report_writer import decide_report_action
+from codigo.app.agents.report_writer import (
+    decide_report_action,
+    decide_report_revision_action,
+)
+from codigo.app.agents.report_verifier import (
+    decide_report_verification_action,
+    render_report_verification_markdown,
+)
 from codigo.app.agents.structurer import (
     decide_structuring_action,
     retrieve_structurer_memory_context,
@@ -55,6 +62,8 @@ from codigo.app.schemas.agent_decisions import (
     EvaluationDecision,
     ModelingDecision,
     ReportDecision,
+    ReportRevisionDecision,
+    ReportVerificationDecision,
     StructuringDecision,
     SupervisorDecision,
 )
@@ -80,6 +89,11 @@ from codigo.app.services.run_persistence import (
     save_run_snapshot,
 )
 from codigo.app.services.agent_runtime import AgentRuntimeRecorder
+from codigo.app.services.report_debate import (
+    ReportDebateArtifacts,
+    build_report_debate_record,
+    write_report_debate_artifacts,
+)
 from codigo.app.services.vector_memory import VectorMemoryStore
 
 
@@ -106,6 +120,12 @@ class PipelineAgents:
     modeler: Callable[[TFMStateModel], ModelingDecision] = decide_modeling_action
     evaluator: Callable[[TFMStateModel], EvaluationDecision] = decide_evaluation_action
     report_writer: Callable[[TFMStateModel], ReportDecision] = decide_report_action
+    report_reviser: Callable[..., ReportRevisionDecision] = (
+        decide_report_revision_action
+    )
+    report_verifier: Callable[[TFMStateModel], ReportVerificationDecision] = (
+        decide_report_verification_action
+    )
 
 
 @dataclass(frozen=True)
@@ -547,6 +567,7 @@ def _modeler_node(
         node="modeling_agent",
         title="Modelador selecciona algoritmo",
         payload={
+            "decision_strategy": decision.decision_strategy.model_dump(mode="json"),
             "modeling_config": decision.modeling_config.model_dump(mode="json"),
             "train_split": decision.train_split,
             "validation_split": decision.validation_split,
@@ -739,13 +760,131 @@ def _report_writer_node(
     ]
     updated_model = validate_state(updated)
     result = executors.reporting(state=updated_model, decision=decision)
-    return _apply_result(
+    reported_state = _apply_result(
         updated_model,
         result,
         next_stage="reporting",
         next_node="supervisor",
         runtime_recorder=runtime_recorder,
     )
+    if result.status != "success":
+        return reported_state
+    return _report_debate_step(
+        reported_state,
+        executors,
+        agents,
+        initial_report_decision=decision,
+        runtime_recorder=runtime_recorder,
+    )
+
+
+def _report_debate_step(
+    state: TFMState,
+    executors: PipelineExecutors,
+    agents: PipelineAgents,
+    *,
+    initial_report_decision: ReportDecision,
+    runtime_recorder: AgentRuntimeRecorder | None,
+) -> TFMState:
+    model = validate_state(state)
+    initial_report_markdown = _read_report_markdown(model)
+    initial_verification = agents.report_verifier(model)
+    _emit_report_verification_event(
+        runtime_recorder,
+        model=model,
+        decision=initial_verification,
+        title="Verificador audita borrador",
+        round_index=0,
+    )
+    model = validate_state(
+        _append_agent_message(model, "report_verifier", initial_verification)
+    )
+
+    revision_decision: ReportRevisionDecision | None = None
+    final_report_decision: ReportDecision | ReportRevisionDecision = (
+        initial_report_decision
+    )
+    final_verification = initial_verification
+    revision_markdowns: list[tuple[int, str]] = []
+
+    if initial_verification.verification_status != "approved":
+        revision_decision = agents.report_reviser(
+            model,
+            initial_verification,
+            original_decision=initial_report_decision,
+            revision_round=1,
+        )
+        _emit_decision_event(
+            runtime_recorder,
+            model=model,
+            decision=revision_decision,
+            kind="agent_decision",
+            source="agent",
+            node="report_writer",
+            title="Redactor revisa informe",
+            payload={
+                "revision_round": revision_decision.revision_round,
+                "accepted_issue_ids": revision_decision.accepted_issue_ids,
+                "rejected_issue_ids": revision_decision.rejected_issue_ids,
+                "changes_summary": revision_decision.changes_summary,
+            },
+        )
+        model = validate_state(
+            _append_agent_message(model, "report_writer", revision_decision)
+        )
+        result = executors.reporting(state=model, decision=revision_decision)
+        rendered_revision = _apply_result(
+            model,
+            result,
+            next_stage="reporting",
+            next_node="supervisor",
+            runtime_recorder=runtime_recorder,
+        )
+        if result.status != "success":
+            return rendered_revision
+        model = validate_state(rendered_revision)
+        final_report_decision = revision_decision
+        revision_markdowns.append(
+            (revision_decision.revision_round, _read_report_markdown(model))
+        )
+        final_verification = agents.report_verifier(model)
+        _emit_report_verification_event(
+            runtime_recorder,
+            model=model,
+            decision=final_verification,
+            title="Verificador reevalua informe",
+            round_index=revision_decision.revision_round,
+        )
+        model = validate_state(
+            _append_agent_message(model, "report_verifier", final_verification)
+        )
+
+    output_dir = _report_evidence_output_dir(model)
+    debate = build_report_debate_record(
+        run_id=model.run_id,
+        initial_report_decision=initial_report_decision,
+        initial_verification=initial_verification,
+        final_report_decision=final_report_decision,
+        final_verification=final_verification,
+        revision_decision=revision_decision,
+        max_rounds=1,
+    )
+    debate_artifacts = write_report_debate_artifacts(
+        debate=debate,
+        output_dir=output_dir,
+        initial_report_markdown=initial_report_markdown,
+        revision_markdowns=revision_markdowns,
+    )
+    artifacts = [
+        *_write_report_verification_artifacts(model, final_verification),
+        *_report_debate_artifact_refs(debate_artifacts),
+    ]
+    updated = model.to_langgraph_state()
+    updated["artifacts"] = [
+        *updated["artifacts"],
+        *[artifact.model_dump(mode="json") for artifact in artifacts],
+    ]
+    return TFMState(**validate_state(updated).to_langgraph_state())
 
 
 def _retrieve_structurer_context(
@@ -773,6 +912,167 @@ def _retrieve_evaluator_context(
         memory_store=memory_config.memory_store,
         top_k=memory_config.evaluator_top_k,
         min_similarity=memory_config.min_similarity,
+    )
+
+
+def _write_report_verification_artifacts(
+    model: TFMStateModel,
+    decision: ReportVerificationDecision,
+) -> list[ArtifactRef]:
+    output_dir = _report_evidence_output_dir(model)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "report_verification.json"
+    markdown_path = output_dir / "report_verification.md"
+    json_path.write_text(
+        json.dumps(decision.model_dump(mode="json"), indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(
+        render_report_verification_markdown(decision),
+        encoding="utf-8",
+    )
+    return [
+        ArtifactRef(
+            name="report_verification",
+            artifact_type="config",
+            path=json_path.as_posix(),
+            producer="report_verifier",
+            description="Decision estructurada del verificador del informe final.",
+            metadata={
+                "decision_id": decision.decision_id,
+                "verification_status": decision.verification_status,
+            },
+        ),
+        ArtifactRef(
+            name="report_verification_report",
+            artifact_type="report",
+            path=markdown_path.as_posix(),
+            producer="report_verifier",
+            description="Vista humana de la verificacion del informe final.",
+            metadata={
+                "decision_id": decision.decision_id,
+                "verification_status": decision.verification_status,
+            },
+        ),
+    ]
+
+
+def _report_debate_artifact_refs(
+    artifacts: ReportDebateArtifacts,
+) -> list[ArtifactRef]:
+    refs = [
+        ArtifactRef(
+            name="report_debate",
+            artifact_type="config",
+            path=artifacts.debate_path,
+            producer="report_writer",
+            description="Registro JSON del debate controlado del informe.",
+            metadata={
+                "debate_id": artifacts.debate.debate_id,
+                "status": artifacts.debate.status,
+                "rounds_used": artifacts.debate.rounds_used,
+            },
+        ),
+        ArtifactRef(
+            name="report_debate_report",
+            artifact_type="report",
+            path=artifacts.report_path,
+            producer="report_writer",
+            description="Vista humana del debate controlado del informe.",
+            metadata={
+                "debate_id": artifacts.debate.debate_id,
+                "status": artifacts.debate.status,
+            },
+        ),
+        ArtifactRef(
+            name="final_report_initial",
+            artifact_type="report",
+            path=artifacts.initial_report_path,
+            producer="report_writer",
+            description="Borrador inicial del informe antes del debate.",
+            metadata={"debate_id": artifacts.debate.debate_id},
+        ),
+    ]
+    for index, path in enumerate(artifacts.revision_report_paths, start=1):
+        refs.append(
+            ArtifactRef(
+                name=f"final_report_revision_{index:03d}",
+                artifact_type="report",
+                path=path,
+                producer="report_writer",
+                description="Version revisada del informe durante el debate.",
+                metadata={
+                    "debate_id": artifacts.debate.debate_id,
+                    "revision_round": index,
+                },
+            )
+        )
+    return refs
+
+
+def _emit_report_verification_event(
+    runtime_recorder: AgentRuntimeRecorder | None,
+    *,
+    model: TFMStateModel,
+    decision: ReportVerificationDecision,
+    title: str,
+    round_index: int,
+) -> None:
+    _emit_decision_event(
+        runtime_recorder,
+        model=model,
+        decision=decision,
+        kind="agent_decision",
+        source="agent",
+        node="report_verifier",
+        title=title,
+        payload={
+            "debate_round": round_index,
+            "verification_status": decision.verification_status,
+            "n_unsupported_claims": len(decision.unsupported_claims),
+            "n_misleading_claims": len(decision.misleading_claims),
+            "n_missing_limitations": len(decision.missing_limitations),
+            "required_corrections": decision.required_corrections,
+            "human_summary": decision.summary,
+        },
+        summary=decision.summary,
+    )
+
+
+def _append_agent_message(
+    model: TFMStateModel,
+    agent_name: str,
+    decision: Any,
+) -> TFMState:
+    updated = model.to_langgraph_state()
+    updated["messages"] = [
+        *updated["messages"],
+        StateMessage(
+            role="agent",
+            name=agent_name,
+            content=decision.model_dump_json(),
+        ).model_dump(mode="json"),
+    ]
+    return TFMState(**validate_state(updated).to_langgraph_state())
+
+
+def _read_report_markdown(model: TFMStateModel) -> str:
+    if not model.report_path:
+        return ""
+    path = Path(model.report_path)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def _report_evidence_output_dir(model: TFMStateModel) -> Path:
+    if model.report_path:
+        return Path(model.report_path).parent / "evidence"
+    return (
+        Path("codigo/reports")
+        / model.project_context.dataset
+        / model.run_id
+        / "evidence"
     )
 
 
@@ -997,6 +1297,7 @@ def _emit_decision_event(
     node: str,
     title: str,
     payload: dict[str, Any] | None = None,
+    summary: str | None = None,
 ) -> None:
     rationale = getattr(decision, "rationale", None)
     agent_name = getattr(decision, "agent_name", None)
@@ -1012,7 +1313,7 @@ def _emit_decision_event(
         kind=kind,
         source=source,
         title=title,
-        summary=rationale or title,
+        summary=summary or rationale or title,
         stage=model.current_stage,
         node=node,
         agent_name=agent_name,
@@ -1286,6 +1587,8 @@ def _metrics_from_path(path: str | None) -> MetricsReport | None:
         return None
     summary = json.loads(Path(path).read_text(encoding="utf-8"))
     metrics = summary.get("primary_metrics", {})
+    degradation = summary.get("degradation_metrics", {})
+    metric_families = summary.get("metric_families", [])
     return MetricsReport(
         metrics_path=path,
         precision=metrics.get("precision"),
@@ -1297,6 +1600,26 @@ def _metrics_from_path(path: str | None) -> MetricsReport | None:
         extra={
             "primary_split": summary.get("primary_split"),
             "n_predictions": summary.get("n_predictions"),
+            "metric_families": (
+                ", ".join(metric_families)
+                if isinstance(metric_families, list)
+                else metric_families
+            ),
+            "degradation_available": degradation.get("available"),
+            "degradation_n_runs": degradation.get("n_runs"),
+            "degradation_missed_runs": degradation.get("missed_runs"),
+            "degradation_detected_before_failure_rate": degradation.get(
+                "detected_before_failure_rate"
+            ),
+            "degradation_mean_lead_time_to_failure": degradation.get(
+                "mean_lead_time_to_failure"
+            ),
+            "degradation_mean_false_alarm_rate_nominal": degradation.get(
+                "mean_false_alarm_rate_nominal"
+            ),
+            "degradation_mean_score_trend_spearman": degradation.get(
+                "mean_score_trend_spearman"
+            ),
         },
     )
 

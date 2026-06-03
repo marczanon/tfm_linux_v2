@@ -8,9 +8,13 @@ from codigo.app.schemas.agent_decisions import (
     EvaluationDecision,
     ModelingAlternative,
     ModelingDecision,
+    ModelingDecisionStrategy,
     ModelingRetryDecision,
     ReportDecision,
+    ReportRevisionDecision,
     ReportSection,
+    ReportVerificationDecision,
+    ReportVerificationIssue,
     StructuringAlternative,
     StructuringDecision,
     SupervisorDecision,
@@ -19,6 +23,8 @@ from codigo.app.schemas.reasoning import (
     AgentReasoningPostmortem,
     HumanReasoningReview,
     ReasoningMetricDelta,
+    ReportDebateRecord,
+    ReportDebateTurn,
 )
 from codigo.app.schemas.state import CleaningConfig, ModelingConfig, StructuringConfig
 
@@ -189,6 +195,10 @@ class AgentDecisionSchemaTests(unittest.TestCase):
             decision_id="model-001",
             rationale="Compare supported anomaly detectors.",
             confidence=0.82,
+            decision_strategy=ModelingDecisionStrategy(
+                strategy_type="model_family_selection",
+                hypothesis="Compare supported model families before selecting one.",
+            ),
             modeling_config=ModelingConfig(
                 model_name="isolation_forest",
                 random_state=42,
@@ -221,6 +231,70 @@ class AgentDecisionSchemaTests(unittest.TestCase):
             "pca_reconstruction_error",
         )
         json.dumps(payload)
+
+    def test_threshold_calibration_strategy_requires_model_family_candidate(self):
+        with self.assertRaises(ValidationError):
+            ModelingDecision(
+                decision_id="model-threshold-only",
+                rationale="Only tune the threshold.",
+                confidence=0.82,
+                decision_strategy=ModelingDecisionStrategy(
+                    strategy_type="threshold_calibration",
+                    hypothesis="Try a lower threshold without considering model family.",
+                ),
+                modeling_config=ModelingConfig(
+                    model_name="isolation_forest",
+                    random_state=42,
+                    hyperparameters={
+                        "n_estimators": 100,
+                        "threshold_quantile": 0.95,
+                    },
+                ),
+                train_split="train",
+                validation_split="validation",
+                expected_model_path="codigo/models/cwru_bearing/isolation_forest.joblib",
+                comparison_candidates=[],
+            )
+
+        decision = ModelingDecision(
+            decision_id="model-threshold-with-family",
+            rationale="Use threshold analysis but keep another family under comparison.",
+            confidence=0.82,
+            decision_strategy=ModelingDecisionStrategy(
+                strategy_type="threshold_calibration",
+                hypothesis="Assess whether threshold sensitivity explains the errors.",
+                risk_notes=[
+                    "Threshold analysis is diagnostic and does not replace model-family comparison."
+                ],
+            ),
+            modeling_config=ModelingConfig(
+                model_name="isolation_forest",
+                random_state=42,
+                hyperparameters={
+                    "n_estimators": 100,
+                    "threshold_quantile": 0.95,
+                },
+            ),
+            train_split="train",
+            validation_split="validation",
+            expected_model_path="codigo/models/cwru_bearing/isolation_forest.joblib",
+            comparison_candidates=[
+                ModelingAlternative(
+                    alternative_id="pca_reconstruction_error",
+                    rationale="Different scoring geometry.",
+                    modeling_config=ModelingConfig(
+                        model_name="pca_reconstruction_error",
+                        random_state=42,
+                        hyperparameters={"threshold_quantile": 0.99},
+                    ),
+                )
+            ],
+        )
+
+        self.assertEqual(
+            decision.decision_strategy.strategy_type,
+            "threshold_calibration",
+        )
 
     def test_modeling_retry_decision_requires_config_when_retrying(self):
         with self.assertRaises(ValidationError):
@@ -357,6 +431,97 @@ class AgentDecisionSchemaTests(unittest.TestCase):
                 used_memory_context=False,
                 memory_record_ids=["memory-evaluator-tradeoff-001"],
             )
+
+    def test_report_verification_decision_blocks_inconsistent_approval(self):
+        issue = ReportVerificationIssue(
+            issue_type="unsupported_claim",
+            severity="high",
+            claim_text="El informe declara validacion industrial.",
+            reason="La evidencia solo cubre una ejecucion local.",
+            evidence_refs=["report:final_report"],
+            suggested_fix="Reformular como validacion local del TFM.",
+        )
+
+        with self.assertRaises(ValidationError):
+            ReportVerificationDecision(
+                decision_id="run:report_verifier:001",
+                rationale="Verify report factuality.",
+                confidence=0.9,
+                report_path="codigo/reports/cwru_bearing/run/final_report.md",
+                verification_status="approved",
+                summary="Incorrectly approved.",
+                unsupported_claims=[issue],
+            )
+
+    def test_report_verification_decision_serializes_issues(self):
+        decision = ReportVerificationDecision(
+            decision_id="run:report_verifier:001",
+            rationale="Needs one factual correction.",
+            confidence=0.82,
+            report_path="codigo/reports/cwru_bearing/run/final_report.md",
+            verification_status="needs_revision",
+            summary="One claim needs correction.",
+            unsupported_claims=[
+                ReportVerificationIssue(
+                    issue_type="unsupported_claim",
+                    severity="medium",
+                    claim_text="Metricas no existentes.",
+                    reason="La metrica citada no aparece en el estado.",
+                    evidence_refs=["metrics:missing"],
+                    suggested_fix="Eliminar la metrica o citar una metrica real.",
+                )
+            ],
+            required_corrections=["Eliminar la metrica no soportada."],
+        )
+
+        payload = decision.model_dump(mode="json")
+
+        self.assertEqual(payload["agent_name"], "report_verifier")
+        self.assertEqual(payload["verification_status"], "needs_revision")
+        json.dumps(payload)
+
+    def test_report_revision_decision_requires_rationale_for_rejected_issues(self):
+        with self.assertRaises(ValidationError):
+            ReportRevisionDecision(
+                decision_id="run:report_writer_revision:001",
+                rationale="Reject without explaining.",
+                confidence=0.7,
+                revision_round=1,
+                revision_of_decision_id="run:report_writer:001",
+                verifier_decision_id="run:report_verifier:001",
+                output_path="codigo/reports/cwru_bearing/run/final_report.md",
+                sections=[ReportSection(title="Resumen ejecutivo")],
+                rejected_issue_ids=["issue-001"],
+            )
+
+    def test_report_debate_record_serializes_turns(self):
+        record = ReportDebateRecord(
+            debate_id="run:report_debate:001",
+            run_id="run",
+            initial_report_decision_id="run:report_writer:001",
+            initial_verifier_decision_id="run:report_verifier:001",
+            final_report_decision_id="run:report_writer_revision:001",
+            final_verifier_decision_id="run:report_verifier:002",
+            status="approved_after_revision",
+            max_rounds=1,
+            rounds_used=1,
+            turns=[
+                ReportDebateTurn(
+                    turn_id="run:report_debate:writer:initial",
+                    round_index=0,
+                    speaker_agent="report_writer",
+                    intent="draft",
+                    human_summary="Redactor genera borrador.",
+                )
+            ],
+            final_summary="Informe aceptado tras revision.",
+        )
+
+        payload = record.model_dump(mode="json")
+
+        self.assertEqual(payload["status"], "approved_after_revision")
+        self.assertEqual(payload["turns"][0]["speaker_agent"], "report_writer")
+        json.dumps(payload)
 
     def test_reasoning_postmortem_is_json_serializable(self):
         postmortem = AgentReasoningPostmortem(

@@ -22,6 +22,18 @@ def write_predictions(path: Path) -> None:
     ).to_csv(path, index=False)
 
 
+def write_degradation_predictions(path: Path) -> None:
+    pd.DataFrame(
+        [
+            _degradation_row("r0", 0.00, 0, 0.10, 0, 0.0, 1000.0, "normal"),
+            _degradation_row("r1", 0.20, 0, 0.15, 0, 250.0, 750.0, "normal"),
+            _degradation_row("r2", 0.45, 1, 0.40, 0, 550.0, 450.0, "degradation"),
+            _degradation_row("r3", 0.70, 1, 0.80, 1, 700.0, 300.0, "degradation"),
+            _degradation_row("r4", 0.90, 1, 0.95, 1, 900.0, 100.0, "degradation"),
+        ]
+    ).to_csv(path, index=False)
+
+
 def _row(
     window_id: str,
     split: str,
@@ -38,6 +50,38 @@ def _row(
         "label": label,
         "target": target,
         "fault_type": fault_type,
+        "anomaly_score": score,
+        "threshold": 0.5,
+        "predicted_anomaly": predicted,
+    }
+
+
+def _degradation_row(
+    window_id: str,
+    relative_life: float,
+    target: int,
+    score: float,
+    predicted: int,
+    time_since_start_seconds: float,
+    time_to_failure_seconds: float,
+    label: str,
+) -> dict[str, object]:
+    return {
+        "window_id": window_id,
+        "file_id": window_id,
+        "condition_id": "ims_test",
+        "asset_id": "bearing_1",
+        "run_id": "run_to_failure_1",
+        "window_index": int(window_id[1:]),
+        "timestamp_start": f"2004-02-12T10:{int(window_id[1:]):02d}:00",
+        "timestamp_end": f"2004-02-12T10:{int(window_id[1:]):02d}:01",
+        "time_since_start_seconds": time_since_start_seconds,
+        "time_to_failure_seconds": time_to_failure_seconds,
+        "relative_life": relative_life,
+        "split": "test",
+        "label": label,
+        "target": target,
+        "fault_type": "",
         "anomaly_score": score,
         "threshold": 0.5,
         "predicted_anomaly": predicted,
@@ -62,6 +106,31 @@ class EvaluationExecutorTests(unittest.TestCase):
         self.assertEqual(test_metrics["precision"], 0.5)
         self.assertEqual(test_metrics["recall"], 0.5)
         self.assertIn("F1-score", report)
+
+    def test_evaluate_predictions_adds_degradation_metrics_when_temporal_columns_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            predictions_path = base / "predictions.csv"
+            output_dir = base / "evaluation"
+            write_degradation_predictions(predictions_path)
+
+            summary = evaluate_predictions(predictions_path, output_dir)
+            metrics = json.loads(Path(summary["metrics_path"]).read_text(encoding="utf-8"))
+            report = Path(summary["report_fragment_path"]).read_text(encoding="utf-8")
+
+        degradation = metrics["degradation_metrics"]
+        run_metrics = degradation["run_metrics"][0]
+        self.assertIn("run_to_failure_degradation", metrics["metric_families"])
+        self.assertTrue(degradation["available"])
+        self.assertEqual(degradation["n_runs"], 1)
+        self.assertEqual(degradation["n_windows"], 5)
+        self.assertEqual(degradation["detected_runs"], 1)
+        self.assertFalse(run_metrics["missed_failure"])
+        self.assertEqual(run_metrics["lead_time_to_failure"], 300.0)
+        self.assertEqual(run_metrics["false_alarm_rate_nominal"], 0.0)
+        self.assertAlmostEqual(run_metrics["score_trend_spearman"], 1.0)
+        self.assertIn("Evaluacion temporal de degradacion", report)
+        self.assertIn("label_source is not present", metrics["binary_metric_context"]["warning"])
 
     def test_generate_evaluation_report_returns_structured_result(self):
         with tempfile.TemporaryDirectory() as tmp:

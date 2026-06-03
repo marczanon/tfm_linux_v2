@@ -150,6 +150,72 @@ class ModelerAgentTests(unittest.TestCase):
             "codigo/models/cwru_bearing/pca_reconstruction_error.joblib",
         )
 
+    def test_llm_modeler_can_select_one_class_svm_with_bounded_hyperparameters(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-modeler-test",
+                run_id="run-modeler-ocsvm-001",
+            )
+        )
+        client = FakeLLMClient(
+            {
+                "agent_name": "modeler",
+                "decision_id": "run-modeler-ocsvm-001:modeler:001",
+                "rationale": "Use One-Class SVM to test a margin-based detector.",
+                "confidence": 0.86,
+                "decision_strategy": {
+                    "strategy_type": "model_family_selection",
+                    "hypothesis": (
+                        "Compare a margin-based unsupervised detector against "
+                        "the tree and reconstruction baselines."
+                    ),
+                    "risk_notes": [
+                        "One-Class SVM is sensitive to scaling and nu/gamma choices."
+                    ],
+                },
+                "modeling_config": {
+                    "model_name": "one_class_svm",
+                    "random_state": 42,
+                    "hyperparameters": {
+                        "kernel": "rbf",
+                        "nu": 0.05,
+                        "gamma": "scale",
+                        "shrinking": True,
+                        "tol": 0.001,
+                        "max_iter": -1,
+                        "threshold_quantile": 0.99,
+                    },
+                },
+                "train_split": "train",
+                "validation_split": "validation",
+                "expected_model_path": "codigo/models/cwru_bearing/one_class_svm.joblib",
+                "comparison_candidates": [
+                    {
+                        "alternative_id": "pca_reconstruction_error",
+                        "rationale": "Keep a reconstruction baseline under comparison.",
+                        "modeling_config": {
+                            "model_name": "pca_reconstruction_error",
+                            "random_state": 42,
+                            "hyperparameters": {
+                                "n_components": 0.95,
+                                "svd_solver": "full",
+                                "threshold_quantile": 0.99,
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(decision.modeling_config.model_name, "one_class_svm")
+        self.assertEqual(decision.modeling_config.hyperparameters["kernel"], "rbf")
+        self.assertEqual(
+            decision.expected_model_path,
+            "codigo/models/cwru_bearing/one_class_svm.joblib",
+        )
+
     def test_llm_modeler_uses_dataset_specific_expected_model_path(self):
         state_dict = create_initial_cwru_state(
             thread_id="nasa-modeler-test",
@@ -197,6 +263,105 @@ class ModelerAgentTests(unittest.TestCase):
             "codigo/models/nasa_ims_bearing/isolation_forest.joblib",
         )
 
+    def test_deterministic_modeler_uses_temporal_health_indicator_policy(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-modeler-temporal-test",
+            run_id="run-modeler-nasa-temporal-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="proxy_temporal",
+            label_source="temporal_proxy",
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+
+        decision = decide_modeling_action(state)
+
+        self.assertEqual(decision.modeling_config.model_name, "pca_reconstruction_error")
+        self.assertEqual(decision.decision_strategy.strategy_type, "feature_model_fit")
+        self.assertIn("tendencia", decision.decision_strategy.hypothesis)
+        self.assertIn("F1", decision.rationale)
+        self.assertEqual(
+            decision.expected_model_path,
+            "codigo/models/nasa_ims_bearing/pca_reconstruction_error.joblib",
+        )
+
+    def test_temporal_modeler_rejects_threshold_only_strategy(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-modeler-temporal-test",
+            run_id="run-modeler-nasa-temporal-invalid-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="proxy_temporal",
+            label_source="temporal_proxy",
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        client = FakeLLMClient(
+            {
+                "agent_name": "modeler",
+                "decision_id": "run-modeler-nasa-temporal-invalid-001:modeler:001",
+                "rationale": "Tune only threshold for temporal run.",
+                "confidence": 0.9,
+                "decision_strategy": {
+                    "strategy_type": "threshold_calibration",
+                    "hypothesis": "Only tune the threshold.",
+                    "risk_notes": ["Has PCA candidate."],
+                },
+                "modeling_config": {
+                    "model_name": "isolation_forest",
+                    "random_state": 42,
+                    "hyperparameters": {
+                        "n_estimators": 100,
+                        "max_samples": "auto",
+                        "contamination": "auto",
+                        "max_features": 1.0,
+                        "bootstrap": False,
+                        "n_jobs": 1,
+                        "threshold_quantile": 0.99,
+                    },
+                },
+                "train_split": "train",
+                "validation_split": "validation",
+                "expected_model_path": "codigo/models/nasa_ims_bearing/isolation_forest.joblib",
+                "comparison_candidates": [
+                    {
+                        "alternative_id": "pca",
+                        "rationale": "Compare PCA.",
+                        "modeling_config": {
+                            "model_name": "pca_reconstruction_error",
+                            "random_state": 42,
+                            "hyperparameters": {
+                                "n_components": 0.95,
+                                "svd_solver": "full",
+                                "threshold_quantile": 0.99,
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(decision.modeling_config.model_name, "pca_reconstruction_error")
+        self.assertIn("Fallback after LLM failure", decision.rationale)
+
     def test_invalid_llm_modeling_decision_falls_back(self):
         state = validate_state(
             create_initial_cwru_state(
@@ -211,7 +376,7 @@ class ModelerAgentTests(unittest.TestCase):
                 "rationale": "Try a model that the MVP executor cannot train yet.",
                 "confidence": 0.99,
                 "modeling_config": {
-                    "model_name": "one_class_svm",
+                    "model_name": "local_outlier_factor",
                     "random_state": 42,
                     "hyperparameters": {},
                 },

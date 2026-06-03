@@ -51,6 +51,9 @@ export interface RunSnapshot {
   artifacts_path: string;
   metrics_path: string;
   evaluation_path: string;
+  evidence_pack_path?: string | null;
+  evidence_pack_markdown_path?: string | null;
+  audit_report_path?: string | null;
   summary_path: string;
   metadata_path: string;
   created_at: string;
@@ -79,16 +82,30 @@ export interface RunComparisonRow {
   dataset: string;
   current_stage: string;
   approved: boolean | null;
+  supervision_profile: string | null;
+  label_source: string | null;
+  label_granularity: string | null;
+  model_name: string | null;
+  metric_families: string[];
   precision: number | null;
   recall: number | null;
   f1_score: number | null;
   false_positive_rate: number | null;
+  degradation_available: boolean | null;
+  degradation_n_runs: number | null;
+  degradation_detected_before_failure_rate: number | null;
+  degradation_mean_lead_time_to_failure: number | null;
+  degradation_mean_false_alarm_rate_nominal: number | null;
+  degradation_mean_score_trend_spearman: number | null;
+  degradation_missed_runs: number | null;
+  degradation_mean_initial_final_separation: number | null;
   report_path: string | null;
   snapshot_path: string;
 }
 
 export interface MetricComparison {
-  metric: "precision" | "recall" | "f1_score" | "false_positive_rate";
+  metric: string;
+  metric_family: "binary_classification" | "run_to_failure_degradation";
   higher_is_better: boolean;
   best_run_id: string | null;
   best_value: number | null;
@@ -102,6 +119,7 @@ export interface RunComparison {
   run_ids: string[];
   rows: RunComparisonRow[];
   metrics: MetricComparison[];
+  degradation_metrics: MetricComparison[];
 }
 
 export interface VisualizationMetric {
@@ -134,6 +152,65 @@ export interface ProjectionBoundary {
   note: string;
 }
 
+export type TemporalXAxis = "relative_life" | "time_since_start_seconds" | "window_index";
+export type HealthState = "nominal" | "watch" | "warning" | "critical";
+
+export interface TemporalSeriesPoint {
+  window_id: string;
+  run_id: string;
+  x: number;
+  timestamp_start: string | null;
+  timestamp_end: string | null;
+  relative_life: number | null;
+  time_since_start_seconds: number | null;
+  time_to_failure_seconds: number | null;
+  split: string | null;
+  label: string | null;
+  anomaly_score: number;
+  threshold: number | null;
+  predicted_anomaly: number | null;
+  score_ratio: number | null;
+  risk_index: number | null;
+  health_index: number | null;
+  health_state: HealthState;
+  state_reason: string;
+}
+
+export interface TemporalRunSeries {
+  run_id: string;
+  x_axis: TemporalXAxis;
+  points: TemporalSeriesPoint[];
+  n_points_total: number;
+  n_points_sampled: number;
+  threshold: number | null;
+  first_alert_x: number | null;
+  first_alert_time: string | null;
+  first_alert_time_to_failure_seconds: number | null;
+  failure_x: number | null;
+  failure_time: string | null;
+  score_min: number | null;
+  score_max: number | null;
+  current_x: number | null;
+  current_time: string | null;
+  current_time_to_failure_seconds: number | null;
+  current_risk_index: number | null;
+  current_health_index: number | null;
+  current_health_state: HealthState;
+  current_state_reason: string;
+  alert_points: number;
+  warning_points: number;
+  critical_points: number;
+}
+
+export interface TemporalSeriesData {
+  available: boolean;
+  x_axis: TemporalXAxis | null;
+  runs: TemporalRunSeries[];
+  n_runs_total: number;
+  n_points_total: number;
+  warnings: string[];
+}
+
 export interface RunVisualizationData {
   run_id: string;
   dataset: string;
@@ -141,6 +218,7 @@ export interface RunVisualizationData {
   projection_available: boolean;
   projection_points: ProjectionPoint[];
   projection_boundary: ProjectionBoundary | null;
+  temporal_series: TemporalSeriesData | null;
   n_points_total: number;
   n_points_sampled: number;
   source_paths: Record<string, string>;
@@ -323,6 +401,9 @@ export interface DatasetDescriptor {
   adapter_id: string;
   label_availability: string;
   task_type: string;
+  supervision_profile: string;
+  label_granularity: string;
+  label_source: string;
   sampling_rate_hz: number | null;
   channel_names: string[];
   has_multiple_conditions: boolean;

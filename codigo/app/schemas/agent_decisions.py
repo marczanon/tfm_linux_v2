@@ -24,6 +24,7 @@ AgentName = Literal[
     "modeler",
     "evaluator",
     "report_writer",
+    "report_verifier",
 ]
 
 
@@ -119,15 +120,58 @@ class StructuringDecision(AgentDecisionBase):
         return self
 
 
+ModelingStrategyType = Literal[
+    "model_family_selection",
+    "threshold_calibration",
+    "feature_model_fit",
+    "data_split_risk",
+    "baseline_conservation",
+    "needs_more_evidence",
+]
+
+
+class ModelingDecisionStrategy(StrictBaseModel):
+    """Hipotesis explicita que guia una decision del modelador."""
+
+    strategy_type: ModelingStrategyType = "baseline_conservation"
+    hypothesis: str = Field(
+        default=(
+            "Mantener un baseline reproducible y comparar alternativas soportadas "
+            "antes de cambiar el espacio de modelado."
+        ),
+        min_length=1,
+    )
+    evidence_refs: list[str] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list)
+
+
 class ModelingDecision(AgentDecisionBase):
     """Decision del agente modelador."""
 
     agent_name: Literal["modeler"] = "modeler"
+    decision_strategy: ModelingDecisionStrategy = Field(
+        default_factory=ModelingDecisionStrategy
+    )
     modeling_config: ModelingConfig
     train_split: str = Field(default="train", min_length=1)
     validation_split: str | None = "validation"
     expected_model_path: str = Field(min_length=1)
     comparison_candidates: list["ModelingAlternative"] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_strategy_guardrails(self) -> "ModelingDecision":
+        if (
+            self.decision_strategy.strategy_type == "threshold_calibration"
+            and not _has_different_model_family_candidate(
+                self.modeling_config,
+                self.comparison_candidates,
+            )
+        ):
+            raise ValueError(
+                "threshold_calibration decisions require a comparison candidate "
+                "from a different supported model family"
+            )
+        return self
 
 
 class ModelingAlternative(StrictBaseModel):
@@ -143,6 +187,9 @@ class ModelingRetryDecision(AgentDecisionBase):
     """Decision del modelador tras analizar una ejecucion fallida."""
 
     agent_name: Literal["modeler"] = "modeler"
+    decision_strategy: ModelingDecisionStrategy = Field(
+        default_factory=ModelingDecisionStrategy
+    )
     source_run_id: str = Field(min_length=1)
     attempt_number: int = Field(ge=1)
     max_attempts: int = Field(ge=1)
@@ -225,9 +272,35 @@ class ReportSection(StrictBaseModel):
     """Seccion solicitada al agente redactor."""
 
     title: str = Field(min_length=1)
+    body: str | None = Field(default=None, min_length=1)
+    key_findings: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
     include_metrics: bool = False
     include_artifacts: bool = False
     source_paths: list[str] = Field(default_factory=list)
+
+
+ReportVerificationStatus = Literal["approved", "needs_revision", "blocked"]
+ReportVerificationSeverity = Literal["low", "medium", "high", "critical"]
+ReportVerificationIssueType = Literal[
+    "unsupported_claim",
+    "misleading_claim",
+    "missing_limitation",
+    "policy_violation",
+]
+
+
+class ReportVerificationIssue(StrictBaseModel):
+    """Problema detectado por el verificador del informe final."""
+
+    issue_id: str | None = Field(default=None, min_length=1)
+    issue_type: ReportVerificationIssueType
+    severity: ReportVerificationSeverity
+    claim_text: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+    suggested_fix: str = Field(min_length=1)
 
 
 class ReportDecision(AgentDecisionBase):
@@ -237,6 +310,71 @@ class ReportDecision(AgentDecisionBase):
     output_path: str = Field(min_length=1)
     output_format: Literal["markdown", "pdf", "latex"] = "markdown"
     sections: list[ReportSection] = Field(min_length=1)
+
+
+class ReportRevisionDecision(AgentDecisionBase):
+    """Revision estructurada del informe tras una verificacion."""
+
+    agent_name: Literal["report_writer"] = "report_writer"
+    revision_round: int = Field(ge=1)
+    revision_of_decision_id: str = Field(min_length=1)
+    verifier_decision_id: str = Field(min_length=1)
+    output_path: str = Field(min_length=1)
+    output_format: Literal["markdown"] = "markdown"
+    sections: list[ReportSection] = Field(min_length=1)
+    accepted_issue_ids: list[str] = Field(default_factory=list)
+    rejected_issue_ids: list[str] = Field(default_factory=list)
+    rejection_rationales: dict[str, str] = Field(default_factory=dict)
+    changes_summary: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_issue_responses(self) -> "ReportRevisionDecision":
+        accepted = set(self.accepted_issue_ids)
+        rejected = set(self.rejected_issue_ids)
+        overlap = accepted & rejected
+        if overlap:
+            raise ValueError("accepted and rejected issue ids cannot overlap")
+        missing_rationales = [
+            issue_id
+            for issue_id in self.rejected_issue_ids
+            if not self.rejection_rationales.get(issue_id)
+        ]
+        if missing_rationales:
+            raise ValueError("rejected issues require rejection_rationales")
+        return self
+
+
+class ReportVerificationDecision(AgentDecisionBase):
+    """Decision del agente verificador sobre el informe final."""
+
+    agent_name: Literal["report_verifier"] = "report_verifier"
+    report_path: str = Field(min_length=1)
+    verification_status: ReportVerificationStatus
+    summary: str = Field(min_length=1)
+    unsupported_claims: list[ReportVerificationIssue] = Field(default_factory=list)
+    misleading_claims: list[ReportVerificationIssue] = Field(default_factory=list)
+    missing_limitations: list[ReportVerificationIssue] = Field(default_factory=list)
+    required_corrections: list[str] = Field(default_factory=list)
+    acceptable_style_notes: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_status_consistency(self) -> "ReportVerificationDecision":
+        issues = [
+            *self.unsupported_claims,
+            *self.misleading_claims,
+            *self.missing_limitations,
+        ]
+        if self.verification_status == "approved" and any(
+            issue.severity in {"high", "critical"} for issue in issues
+        ):
+            raise ValueError("approved verification cannot include high or critical issues")
+        if self.verification_status == "approved" and self.required_corrections:
+            raise ValueError("approved verification cannot require corrections")
+        if self.verification_status == "blocked" and not issues:
+            raise ValueError("blocked verification requires at least one issue")
+        return self
 
 
 def _validate_memory_usage_declaration(
@@ -262,3 +400,13 @@ def _validate_memory_usage_declaration(
     declared_memory_ids = [item.memory_record_id for item in memory_record_uses]
     if len(set(declared_memory_ids)) != len(declared_memory_ids):
         raise ValueError("memory_record_uses cannot contain duplicate records")
+
+
+def _has_different_model_family_candidate(
+    selected_config: ModelingConfig,
+    candidates: list[ModelingAlternative],
+) -> bool:
+    return any(
+        candidate.modeling_config.model_name != selected_config.model_name
+        for candidate in candidates
+    )

@@ -25,6 +25,8 @@ class ReportingExecutorTests(unittest.TestCase):
         self.assertEqual([artifact.artifact_type for artifact in result.artifacts], ["report"])
         self.assertEqual(result.artifacts[0].name, "final_report")
         self.assertIn("# Informe tecnico de deteccion de anomalias", content)
+        self.assertIn("Resumen narrativo redactado por el agente.", content)
+        self.assertIn("Hallazgo redactado.", content)
         self.assertIn("## Metricas y evaluacion", content)
         self.assertIn("Recall: `0.9500`", content)
         self.assertIn("Validacion limitada a CWRU.", content)
@@ -85,7 +87,12 @@ def _decision(
         output_path=str(report_path),
         output_format=output_format,
         sections=[
-            ReportSection(title="Resumen ejecutivo"),
+            ReportSection(
+                title="Resumen ejecutivo",
+                body="Resumen narrativo redactado por el agente.",
+                key_findings=["Hallazgo redactado."],
+                recommendations=["Revision humana del informe antes de entrega."],
+            ),
             ReportSection(title="Metricas y evaluacion", include_metrics=True),
             ReportSection(title="Artefactos generados", include_artifacts=True),
             ReportSection(title="Limitaciones y siguientes pasos"),

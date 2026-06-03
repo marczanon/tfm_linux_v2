@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +14,7 @@ from codigo.app.schemas.dataset import (
     SourceFormat,
 )
 from codigo.app.schemas.executor_results import ManifestResult
+from codigo.app.services.common_manifest import write_common_manifest
 from codigo.app.schemas.state import ArtifactRef
 
 NASA_IMS_SOURCE_SAMPLE_RATE_HZ = 20000
@@ -122,6 +121,9 @@ class CWRUBearingAdapter:
             adapter_id=self.info.adapter_id,
             label_availability="file_level",
             task_type="binary_anomaly",
+            supervision_profile="binary_fault_classification",
+            label_granularity="file",
+            label_source="official",
             sampling_rate_hz=None,
             channel_names=["DE_time", "FE_time", "BA_time", "RPM"],
             has_multiple_conditions=True,
@@ -189,6 +191,9 @@ class NASAIMSBearingAdapter:
             adapter_id=self.info.adapter_id,
             label_availability="partial",
             task_type="run_to_failure",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="event",
+            label_source="none",
             sampling_rate_hz=None,
             channel_names=structure.channel_names,
             has_multiple_conditions=True,
@@ -236,6 +241,9 @@ class GenericTabularSignalAdapter:
             adapter_id=self.info.adapter_id,
             label_availability="none",
             task_type="unknown",
+            supervision_profile="unlabeled_diagnostic",
+            label_granularity="none",
+            label_source="none",
             sampling_rate_hz=None,
             channel_names=structure.channel_names,
             has_multiple_conditions=False,
@@ -319,8 +327,7 @@ def _generate_nasa_ims_manifest(raw_path: Path, output_dir: Path) -> ManifestRes
         )
 
     output_path = output_dir / "manifest.csv"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_common_manifest(output_path, records)
+    write_common_manifest(output_path, records)
     artifact = ArtifactRef(
         name="nasa_ims_manifest",
         artifact_type="manifest",
@@ -352,7 +359,8 @@ def _generate_nasa_ims_manifest(raw_path: Path, output_dir: Path) -> ManifestRes
 
 def _build_nasa_ims_records(raw_path: Path) -> list[CommonManifestRecord]:
     files = _nasa_ims_manifest_files(raw_path)
-    return [_nasa_ims_record_from_file(file_path, raw_path) for file_path in files]
+    records = [_nasa_ims_record_from_file(file_path, raw_path) for file_path in files]
+    return _with_nasa_ims_run_to_failure_metadata(records)
 
 
 def _nasa_ims_record_from_file(
@@ -382,6 +390,10 @@ def _nasa_ims_record_from_file(
         primary_channel=channel_names[0],
         n_channels=len(channel_names),
         metadata_json={
+            "supervision_profile": "run_to_failure_degradation",
+            "label_source": "none",
+            "label_granularity": "event",
+            "official_window_labels": False,
             "set_id": spec.set_id,
             "expected_n_channels": spec.expected_n_channels,
             "points_per_file": NASA_IMS_POINTS_PER_FILE,
@@ -396,27 +408,57 @@ def _nasa_ims_record_from_file(
     )
 
 
-def _write_common_manifest(path: Path, records: list[CommonManifestRecord]) -> None:
-    fieldnames = list(CommonManifestRecord.model_fields)
-    with path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        for record in records:
-            writer.writerow(_serialize_common_manifest_row(record))
+def _with_nasa_ims_run_to_failure_metadata(
+    records: list[CommonManifestRecord],
+) -> list[CommonManifestRecord]:
+    grouped: dict[str, list[CommonManifestRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.run_id or "unknown_run", []).append(record)
+
+    annotated: list[CommonManifestRecord] = []
+    for group_key, group_records in grouped.items():
+        ordered = sorted(
+            group_records,
+            key=lambda item: (
+                item.timestamp_start or datetime.min,
+                item.source_path,
+                item.record_id,
+            ),
+        )
+        failure_event_time = _nasa_ims_failure_event_time(ordered)
+        failure_mode = _nasa_ims_failure_mode(ordered)
+        for index, record in enumerate(ordered):
+            metadata = {
+                **record.metadata_json,
+                "failure_event_time": failure_event_time,
+                "failure_mode": failure_mode,
+                "end_of_life_policy": "last_snapshot_as_failure_event",
+                "temporal_group_id": group_key,
+                "temporal_order_index": index,
+                "temporal_order_count": len(ordered),
+            }
+            annotated.append(record.model_copy(update={"metadata_json": metadata}))
+    return sorted(annotated, key=lambda item: item.source_path)
 
 
-def _serialize_common_manifest_row(record: CommonManifestRecord) -> dict[str, Any]:
-    row: dict[str, Any] = {}
-    for key, value in record.model_dump().items():
-        if value is None:
-            row[key] = ""
-        elif isinstance(value, datetime):
-            row[key] = value.isoformat()
-        elif isinstance(value, (dict, list)):
-            row[key] = json.dumps(value, sort_keys=True)
-        else:
-            row[key] = value
-    return row
+def _nasa_ims_failure_event_time(records: list[CommonManifestRecord]) -> str | None:
+    candidates = [
+        timestamp
+        for record in records
+        for timestamp in [record.timestamp_end, record.timestamp_start]
+        if timestamp is not None
+    ]
+    if not candidates:
+        return None
+    return max(candidates).isoformat()
+
+
+def _nasa_ims_failure_mode(records: list[CommonManifestRecord]) -> str:
+    for record in records:
+        value = record.metadata_json.get("final_failure") or record.label_detail
+        if value:
+            return str(value)
+    return "unknown_failure_mode"
 
 
 def _nasa_ims_manifest_files(raw_path: Path) -> list[Path]:

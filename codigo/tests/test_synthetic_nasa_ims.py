@@ -43,7 +43,16 @@ class SyntheticNasaIMSTests(unittest.TestCase):
         self.assertEqual(rows[0]["label"], "normal")
         self.assertEqual(rows[-1]["label"], "fault")
         self.assertEqual(json.loads(rows[0]["channel_names"])[0], "channel_1")
-        self.assertTrue(json.loads(rows[-1]["metadata_json"])["synthetic"])
+        first_metadata = json.loads(rows[0]["metadata_json"])
+        last_metadata = json.loads(rows[-1]["metadata_json"])
+        self.assertTrue(last_metadata["synthetic"])
+        self.assertEqual(first_metadata["label_source"], "synthetic")
+        self.assertEqual(first_metadata["label_granularity"], "file")
+        self.assertFalse(first_metadata["official_window_labels"])
+        self.assertEqual(
+            last_metadata["failure_mode"],
+            "synthetic_outer_race_like_degradation",
+        )
         self.assertTrue(spec_payload["synthetic"])
 
 

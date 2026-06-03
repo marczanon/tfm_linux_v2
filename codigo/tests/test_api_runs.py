@@ -162,12 +162,17 @@ class APIRunsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             runs_dir = base / "runs"
-            save_run_snapshot(_state(base, "run-api", f1_score=0.94), runs_dir)
+            save_run_snapshot(
+                _state(base, "run-api", f1_score=0.94, write_debate=True),
+                runs_dir,
+            )
             app = create_app(runs_dir=runs_dir)
 
             snapshot_response = _get(app, "/runs/run-api")
             artifacts_response = _get(app, "/runs/run-api/artifacts")
             report_response = _get(app, "/runs/run-api/report")
+            audit_response = _get(app, "/runs/run-api/audit-report")
+            debate_response = _get(app, "/runs/run-api/report-debate")
 
         self.assertEqual(snapshot_response.status_code, 200)
         self.assertEqual(snapshot_response.json()["run_id"], "run-api")
@@ -176,6 +181,13 @@ class APIRunsTests(unittest.TestCase):
         self.assertEqual(report_response.status_code, 200)
         self.assertIn("# Report run-api", report_response.text)
         self.assertIn("text/markdown", report_response.headers["content-type"])
+        self.assertEqual(audit_response.status_code, 200)
+        self.assertIn("# Auditoria de ejecucion run-api", audit_response.text)
+        self.assertIn("## Solicitud y plan aplicado", audit_response.text)
+        self.assertIn("text/markdown", audit_response.headers["content-type"])
+        self.assertEqual(debate_response.status_code, 200)
+        self.assertIn("# Debate controlado del informe run-api", debate_response.text)
+        self.assertIn("text/markdown", debate_response.headers["content-type"])
 
     def test_compare_runs_returns_metric_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -224,6 +236,74 @@ class APIRunsTests(unittest.TestCase):
             "run-candidate",
         )
 
+    def test_compare_runs_returns_degradation_summary_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            save_run_snapshot(
+                _state(
+                    base,
+                    "temporal-pca",
+                    f1_score=0.62,
+                    metric_extra={
+                        "metric_families": (
+                            "binary_classification, run_to_failure_degradation"
+                        ),
+                        "degradation_available": True,
+                        "degradation_n_runs": 1,
+                        "degradation_mean_lead_time_to_failure": 400.0,
+                        "degradation_mean_false_alarm_rate_nominal": 0.08,
+                        "degradation_mean_score_trend_spearman": 0.81,
+                        "degradation_missed_runs": 0,
+                    },
+                ),
+                runs_dir,
+            )
+            save_run_snapshot(
+                _state(
+                    base,
+                    "temporal-svm",
+                    f1_score=0.70,
+                    metric_extra={
+                        "metric_families": (
+                            "binary_classification, run_to_failure_degradation"
+                        ),
+                        "degradation_available": True,
+                        "degradation_n_runs": 1,
+                        "degradation_mean_lead_time_to_failure": 250.0,
+                        "degradation_mean_false_alarm_rate_nominal": 0.02,
+                        "degradation_mean_score_trend_spearman": 0.74,
+                        "degradation_missed_runs": 0,
+                    },
+                ),
+                runs_dir,
+            )
+            app = create_app(runs_dir=runs_dir)
+
+            response = _get(
+                app,
+                "/runs/compare",
+                params=[
+                    ("run_ids", "temporal-pca"),
+                    ("run_ids", "temporal-svm"),
+                ],
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        temporal = {
+            item["metric"]: item for item in payload["degradation_metrics"]
+        }
+        self.assertEqual(
+            temporal["degradation_mean_lead_time_to_failure"]["best_run_id"],
+            "temporal-pca",
+        )
+        self.assertEqual(
+            temporal["degradation_mean_false_alarm_rate_nominal"]["best_run_id"],
+            "temporal-svm",
+        )
+        self.assertTrue(payload["rows"][0]["degradation_available"])
+
     def test_compare_runs_validation_errors_are_http_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -260,9 +340,11 @@ class APIRunsTests(unittest.TestCase):
 
             missing_run = _get(app, "/runs/missing-run")
             missing_report = _get(app, "/runs/run-no-report/report")
+            missing_debate = _get(app, "/runs/run-no-report/report-debate")
 
         self.assertEqual(missing_run.status_code, 404)
         self.assertEqual(missing_report.status_code, 404)
+        self.assertEqual(missing_debate.status_code, 404)
 
     def test_post_runs_dry_run_returns_plan_without_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -786,7 +868,9 @@ def _state(
     false_positive_rate: float = 0.04,
     approved: bool = True,
     write_report: bool = True,
+    write_debate: bool = False,
     human_approval: HumanApproval | None = None,
+    metric_extra: dict[str, object] | None = None,
 ):
     report_path = base / "reports" / f"{run_id}.md"
     if write_report:
@@ -807,6 +891,7 @@ def _state(
         recall=recall,
         f1_score=f1_score,
         false_positive_rate=false_positive_rate,
+        extra=metric_extra or {},
     ).model_dump(mode="json")
     state_dict["evaluation"] = EvaluationResult(
         approved=approved,
@@ -816,7 +901,7 @@ def _state(
     ).model_dump(mode="json")
     if human_approval is not None:
         state_dict["human_approval"] = human_approval.model_dump(mode="json")
-    state_dict["artifacts"] = [
+    artifacts = [
         ArtifactRef(
             name="metrics",
             artifact_type="metrics",
@@ -824,6 +909,51 @@ def _state(
             producer="evaluator",
         ).model_dump(mode="json")
     ]
+    if write_debate:
+        debate_dir = base / "reports" / run_id / "evidence"
+        debate_dir.mkdir(parents=True, exist_ok=True)
+        debate_json = debate_dir / "report_debate.json"
+        debate_md = debate_dir / "report_debate.md"
+        debate_json.write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "approved_without_revision",
+                    "rounds_used": 0,
+                    "max_rounds": 1,
+                    "final_summary": "Informe aceptado.",
+                    "turns": [
+                        {
+                            "round_index": 0,
+                            "speaker_agent": "report_verifier",
+                            "human_summary": "Informe verificado.",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        debate_md.write_text(
+            f"# Debate controlado del informe {run_id}\n\n## Conversacion resumida\n",
+            encoding="utf-8",
+        )
+        artifacts.extend(
+            [
+                ArtifactRef(
+                    name="report_debate",
+                    artifact_type="config",
+                    path=str(debate_json),
+                    producer="report_writer",
+                ).model_dump(mode="json"),
+                ArtifactRef(
+                    name="report_debate_report",
+                    artifact_type="report",
+                    path=str(debate_md),
+                    producer="report_writer",
+                ).model_dump(mode="json"),
+            ]
+        )
+    state_dict["artifacts"] = artifacts
     state_dict["messages"] = [
         StateMessage(
             role="supervisor",

@@ -13,13 +13,17 @@ from pydantic import ValidationError
 
 from codigo.app.executors.modeling import (
     DEFAULT_MODELING_CONFIG,
+    DEFAULT_OCSVM_MODELING_CONFIG,
     DEFAULT_PCA_MODELING_CONFIG,
     METADATA_COLUMNS,
     SKLEARN_IFOREST_PARAMS,
+    SKLEARN_OCSVM_PARAMS,
     SKLEARN_PCA_PARAMS,
 )
-from codigo.app.schemas.agent_decisions import ModelingRetryDecision
 from codigo.app.schemas.agent_decisions import ModelingDecision
+from codigo.app.schemas.agent_decisions import ModelingAlternative
+from codigo.app.schemas.agent_decisions import ModelingDecisionStrategy
+from codigo.app.schemas.agent_decisions import ModelingRetryDecision
 from codigo.app.schemas.reasoning import AgentMemoryQuery, RetrievedMemoryContext
 from codigo.app.schemas.state import ModelingConfig, TFMStateModel
 from codigo.app.services.llm import (
@@ -31,9 +35,14 @@ from codigo.app.services.llm import (
 from codigo.app.services.vector_memory import VectorMemoryStore
 
 
-SUPPORTED_MODEL_NAMES = {"isolation_forest", "pca_reconstruction_error"}
+SUPPORTED_MODEL_NAMES = {
+    "isolation_forest",
+    "one_class_svm",
+    "pca_reconstruction_error",
+}
 SUPPORTED_HYPERPARAMETERS_BY_MODEL = {
     "isolation_forest": SKLEARN_IFOREST_PARAMS | {"threshold_quantile"},
+    "one_class_svm": SKLEARN_OCSVM_PARAMS | {"threshold_quantile"},
     "pca_reconstruction_error": SKLEARN_PCA_PARAMS | {"threshold_quantile"},
 }
 
@@ -78,6 +87,9 @@ def decide_modeling_action_with_llm(
 def decide_modeling_action_deterministic(state: TFMStateModel) -> ModelingDecision:
     """Fallback reproducible para el MVP CWRU."""
 
+    if _uses_temporal_degradation_profile(state):
+        return _temporal_degradation_modeling_decision(state)
+
     return ModelingDecision(
         decision_id=f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
         rationale=(
@@ -86,10 +98,75 @@ def decide_modeling_action_deterministic(state: TFMStateModel) -> ModelingDecisi
             "and derive the anomaly threshold from the validation split."
         ),
         confidence=1.0,
+        decision_strategy=ModelingDecisionStrategy(
+            strategy_type="baseline_conservation",
+            hypothesis=(
+                "Mantener el baseline local reproducible y dejar alternativas "
+                "comparables para no reducir la decision al umbral."
+            ),
+            risk_notes=[
+                "El umbral es solo una dimension; comparar familia de modelo sigue siendo relevante.",
+            ],
+        ),
         modeling_config=DEFAULT_MODELING_CONFIG,
         train_split="train",
         validation_split="validation",
         expected_model_path=_expected_model_path(state, DEFAULT_MODELING_CONFIG),
+    )
+
+
+def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDecision:
+    return ModelingDecision(
+        decision_id=f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
+        rationale=(
+            "Fallback run-to-failure modeling policy: use PCA reconstruction "
+            "error as an interpretable temporal health indicator and judge the "
+            "run with alert timing, nominal false alarms and score trend rather "
+            "than optimizing F1 as the primary objective."
+        ),
+        confidence=1.0,
+        decision_strategy=ModelingDecisionStrategy(
+            strategy_type="feature_model_fit",
+            hypothesis=(
+                "Construir un score temporal interpretable para degradacion, "
+                "priorizando tendencia, primera alerta y falsas alarmas "
+                "nominales sobre una optimizacion binaria de F1."
+            ),
+            risk_notes=[
+                "Las etiquetas proxy o sinteticas no deben tratarse como ground truth oficial.",
+                "El umbral solo define alertas; la trayectoria del score tambien debe evaluarse.",
+            ],
+        ),
+        modeling_config=DEFAULT_PCA_MODELING_CONFIG,
+        train_split="train",
+        validation_split="validation",
+        expected_model_path=_expected_model_path(state, DEFAULT_PCA_MODELING_CONFIG),
+        comparison_candidates=[
+            ModelingAlternative(
+                alternative_id="isolation_forest_temporal_candidate",
+                modeling_config=DEFAULT_MODELING_CONFIG,
+                rationale=(
+                    "Comparar con el baseline de arboles aislantes como detector "
+                    "no supervisado alternativo."
+                ),
+                expected_effect=(
+                    "Contrastar si el score de aislamiento genera una alerta "
+                    "mas temprana o menos falsas alarmas nominales."
+                ),
+            ),
+            ModelingAlternative(
+                alternative_id="one_class_svm_temporal_candidate",
+                modeling_config=DEFAULT_OCSVM_MODELING_CONFIG,
+                rationale=(
+                    "Comparar con una frontera no lineal de margen sobre features "
+                    "escaladas."
+                ),
+                expected_effect=(
+                    "Evaluar sensibilidad temporal y coste de falsas alarmas en "
+                    "el tramo nominal."
+                ),
+            ),
+        ],
     )
 
 
@@ -318,10 +395,22 @@ def _modeler_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "",
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
+                    (
+                        "- decision_strategy debe declarar la hipotesis de "
+                        "modelado: model_family_selection, threshold_calibration, "
+                        "feature_model_fit, data_split_risk, "
+                        "baseline_conservation o needs_more_evidence."
+                    ),
+                    (
+                        "- No reduzcas la decision al umbral: si usas "
+                        "threshold_calibration, incluye una alternativa de otra "
+                        "familia de modelo en comparison_candidates y explica "
+                        "la cautela en risk_notes."
+                    ),
                     "- modeling_config debe validar contra ModelingConfig.",
                     (
-                        "- model_name debe estar soportado: isolation_forest "
-                        "o pca_reconstruction_error."
+                        "- model_name debe estar soportado: isolation_forest, "
+                        "one_class_svm o pca_reconstruction_error."
                     ),
                     "- random_state debe ser 42.",
                     "- train_split debe ser train.",
@@ -330,9 +419,15 @@ def _modeler_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "- n_jobs debe ser 1 si se incluye.",
                     "- threshold_quantile debe estar en (0, 1].",
                     (
+                        "- Para one_class_svm puedes usar kernel, nu, gamma, "
+                        "degree, coef0, shrinking, tol, cache_size y max_iter "
+                        "dentro de rangos validos."
+                    ),
+                    (
                         "- Incluye comparison_candidates con 1 a 3 alternativas "
                         "comparables cuando haya mas de un modelo soportado."
                     ),
+                    *_profile_specific_modeler_rules(state),
                     (
                         "- No inventes modelos: cada comparison_candidate debe "
                         "usar un model_name soportado."
@@ -410,6 +505,11 @@ def _modeler_retry_messages(
                     "",
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
+                    (
+                        "- decision_strategy debe declarar si el reintento se "
+                        "basa en calibracion de umbral, cambio de familia, "
+                        "riesgo de split, ajuste feature-modelo o falta de evidencia."
+                    ),
                     "- should_retry debe ser false si no queda margen real de mejora.",
                     "- attempt_number y max_attempts deben coincidir con el formato esperado.",
                     (
@@ -425,7 +525,10 @@ def _modeler_retry_messages(
                     "- Si should_retry=false, retry_config debe ser null y stop_reason no puede ser null.",
                     "- Si should_retry=true, retry_config debe validar contra ModelingConfig.",
                     "- retry_config debe cambiar algo respecto a la configuracion previa.",
-                    "- Solo puedes usar modelos soportados: isolation_forest o pca_reconstruction_error.",
+                    (
+                        "- Solo puedes usar modelos soportados: isolation_forest, "
+                        "one_class_svm o pca_reconstruction_error."
+                    ),
                     "- random_state debe ser 42.",
                     "- n_jobs debe ser 1 si se incluye.",
                     "- threshold_quantile debe estar en (0, 1].",
@@ -505,36 +608,108 @@ def _modeler_retry_messages(
 
 
 def _modeler_json_template(state: TFMStateModel) -> dict[str, Any]:
+    default_config = (
+        DEFAULT_PCA_MODELING_CONFIG
+        if _uses_temporal_degradation_profile(state)
+        else DEFAULT_MODELING_CONFIG
+    )
+    strategy = (
+        {
+            "strategy_type": "feature_model_fit",
+            "hypothesis": (
+                "Usar un score temporal interpretable para degradacion y "
+                "evaluarlo por tendencia, primera alerta y falsas alarmas."
+            ),
+            "evidence_refs": [],
+            "risk_notes": [
+                "No presentar etiquetas proxy o sinteticas como ground truth oficial.",
+                "No optimizar F1 como metrica principal del perfil run-to-failure.",
+            ],
+        }
+        if _uses_temporal_degradation_profile(state)
+        else {
+            "strategy_type": "model_family_selection",
+            "hypothesis": (
+                "Comparar familias de modelo soportadas antes de atribuir el "
+                "comportamiento solo al umbral."
+            ),
+            "evidence_refs": [],
+            "risk_notes": [
+                "Evitar optimizar solo threshold_quantile sin contrastar otra familia soportada."
+            ],
+        }
+    )
     return {
         "agent_name": "modeler",
         "decision_id": f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
         "rationale": "Motivo tecnico breve del modelo propuesto.",
         "confidence": 0.9,
-        "modeling_config": DEFAULT_MODELING_CONFIG.model_dump(mode="json"),
+        "decision_strategy": strategy,
+        "modeling_config": default_config.model_dump(mode="json"),
         "train_split": "train",
         "validation_split": "validation",
-        "expected_model_path": _expected_model_path(state, DEFAULT_MODELING_CONFIG),
-        "comparison_candidates": [
+        "expected_model_path": _expected_model_path(state, default_config),
+        "comparison_candidates": _modeler_comparison_candidates_template(state),
+    }
+
+
+def _modeler_comparison_candidates_template(state: TFMStateModel) -> list[dict[str, Any]]:
+    if _uses_temporal_degradation_profile(state):
+        return [
             {
-                "alternative_id": "pca_reconstruction_error",
-                "modeling_config": DEFAULT_PCA_MODELING_CONFIG.model_dump(mode="json"),
-                "rationale": "Baseline lineal por error de reconstruccion.",
+                "alternative_id": "isolation_forest_temporal",
+                "modeling_config": DEFAULT_MODELING_CONFIG.model_dump(mode="json"),
+                "rationale": (
+                    "Comparar con el detector base de arboles aislantes como "
+                    "score temporal alternativo."
+                ),
                 "expected_effect": (
-                    "Comparar un detector interpretable y sensible a cambios "
-                    "globales frente a Isolation Forest."
+                    "Evaluar si mejora primera alerta o reduce falsas alarmas "
+                    "nominales frente al error de reconstruccion."
                 ),
             },
             {
-                "alternative_id": "iforest_conservative_threshold",
-                "modeling_config": _modeling_config_with_updates(
-                    DEFAULT_MODELING_CONFIG,
-                    {"threshold_quantile": 1.0},
-                ).model_dump(mode="json"),
-                "rationale": "Variante mas conservadora del modelo base.",
-                "expected_effect": "Reducir falsos positivos si se mantiene recall.",
+                "alternative_id": "one_class_svm_rbf_temporal",
+                "modeling_config": DEFAULT_OCSVM_MODELING_CONFIG.model_dump(mode="json"),
+                "rationale": "Frontera no lineal de margen sobre features escaladas.",
+                "expected_effect": (
+                    "Contrastar sensibilidad temporal a degradacion con nu/gamma "
+                    "controlados."
+                ),
             },
-        ],
-    }
+        ]
+    return [
+        {
+            "alternative_id": "one_class_svm_rbf",
+            "modeling_config": DEFAULT_OCSVM_MODELING_CONFIG.model_dump(mode="json"),
+            "rationale": (
+                "Detector no supervisado con frontera no lineal sobre "
+                "features escaladas."
+            ),
+            "expected_effect": (
+                "Contrastar una familia basada en margen frente a arboles "
+                "aislantes y reconstruccion lineal."
+            ),
+        },
+        {
+            "alternative_id": "pca_reconstruction_error",
+            "modeling_config": DEFAULT_PCA_MODELING_CONFIG.model_dump(mode="json"),
+            "rationale": "Baseline lineal por error de reconstruccion.",
+            "expected_effect": (
+                "Comparar un detector interpretable y sensible a cambios "
+                "globales frente a Isolation Forest."
+            ),
+        },
+        {
+            "alternative_id": "iforest_conservative_threshold",
+            "modeling_config": _modeling_config_with_updates(
+                DEFAULT_MODELING_CONFIG,
+                {"threshold_quantile": 1.0},
+            ).model_dump(mode="json"),
+            "rationale": "Variante mas conservadora del modelo base.",
+            "expected_effect": "Reducir falsos positivos si se mantiene recall.",
+        },
+    ]
 
 
 def _modeler_retry_json_template(
@@ -554,6 +729,24 @@ def _modeler_retry_json_template(
         "decision_id": f"{state.run_id}:modeler_retry:{attempt_number:03d}",
         "rationale": "Motivo tecnico para reintentar o parar.",
         "confidence": 0.85,
+        "decision_strategy": {
+            "strategy_type": (
+                "model_family_selection"
+                if _memory_suggests_model_family_retry(memory_context)
+                else "threshold_calibration"
+            ),
+            "hypothesis": (
+                "Probar una familia soportada distinta cuando la memoria indica "
+                "que los ajustes de umbral se han estancado."
+                if _memory_suggests_model_family_retry(memory_context)
+                else "Evaluar un cambio acotado del umbral sin ignorar alternativas de familia."
+            ),
+            "evidence_refs": ["failure_analysis"],
+            "risk_notes": [
+                "No convertir el umbral en la unica palanca de decision.",
+                "Contrastar recall, FPR y familia de modelo antes de aprobar el reintento.",
+            ],
+        },
         "source_run_id": source_run_id,
         "attempt_number": attempt_number,
         "max_attempts": max_attempts,
@@ -612,6 +805,18 @@ def _retry_comparison_candidates_template(state: TFMStateModel) -> list[dict[str
     )
     return [
         {
+            "alternative_id": "one_class_svm_rbf_candidate",
+            "modeling_config": DEFAULT_OCSVM_MODELING_CONFIG.model_dump(mode="json"),
+            "rationale": (
+                "Probar una frontera no lineal de margen cuando el problema no "
+                "parece resolverse solo con cuantiles del modelo actual."
+            ),
+            "expected_effect": (
+                "Comprobar si el margen sobre features escaladas separa mejor "
+                "normalidad y anomalia, vigilando sensibilidad a nu/gamma."
+            ),
+        },
+        {
             "alternative_id": "pca_reconstruction_error_candidate",
             "modeling_config": DEFAULT_PCA_MODELING_CONFIG.model_dump(mode="json"),
             "rationale": (
@@ -642,6 +847,30 @@ def _retry_comparison_candidates_template(state: TFMStateModel) -> list[dict[str
     ]
 
 
+def _profile_specific_modeler_rules(state: TFMStateModel) -> list[str]:
+    if not _uses_temporal_degradation_profile(state):
+        return []
+    return [
+        (
+            "- Para supervision_profile=run_to_failure_degradation, la "
+            "hipotesis debe hablar de score temporal, tendencia, primera "
+            "alerta o falsas alarmas nominales."
+        ),
+        (
+            "- No uses threshold_calibration como strategy_type principal en "
+            "run-to-failure; el umbral es auxiliar para disparar alertas."
+        ),
+        (
+            "- No optimices F1 como objetivo principal si label_source es "
+            "none, temporal_proxy o synthetic."
+        ),
+        (
+            "- Incluye una limitacion en risk_notes si las etiquetas por "
+            "ventana proceden de proxy temporal o datos sinteticos."
+        ),
+    ]
+
+
 def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
     return {
         "thread_id": state.thread_id,
@@ -650,6 +879,9 @@ def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
         "dataset": state.project_context.dataset,
         "objective": state.project_context.objective,
         "label_mode": state.project_context.label_mode,
+        "supervision_profile": state.project_context.supervision_profile,
+        "label_source": state.project_context.label_source,
+        "label_granularity": state.project_context.label_granularity,
         "main_channel": state.project_context.main_channel,
         "tensor_path": state.tensor_path,
         "splits_path": state.splits_path,
@@ -705,7 +937,17 @@ def _features_summary_for_llm(features_path: str | None) -> dict[str, Any]:
                         {
                             key: value
                             for key, value in row.items()
-                            if key in {"window_id", "split", "label", "target"}
+                            if key
+                            in {
+                                "window_id",
+                                "split",
+                                "label",
+                                "target",
+                                "run_id",
+                                "relative_life",
+                                "time_to_failure_seconds",
+                                "time_since_start_seconds",
+                            }
                         }
                     )
     except (OSError, csv.Error) as exc:
@@ -820,6 +1062,14 @@ def _validate_single_modeling_decision(
         raise ValueError("train_split must be train")
     if decision.validation_split not in {None, "validation"}:
         raise ValueError("validation_split must be validation or null")
+    if (
+        _uses_temporal_degradation_profile(state)
+        and decision.decision_strategy.strategy_type == "threshold_calibration"
+    ):
+        raise ValueError(
+            "run-to-failure modeler decisions cannot use threshold_calibration "
+            "as the primary strategy"
+        )
     expected_model_path = _expected_model_path(state, config)
     if decision.expected_model_path != expected_model_path:
         raise ValueError(f"expected_model_path must be {expected_model_path}")
@@ -922,6 +1172,72 @@ def _validate_supported_modeling_config(config: ModelingConfig) -> None:
                     raise ValueError("n_components float must be in (0, 1]")
             else:
                 raise ValueError("n_components must be numeric")
+    if config.model_name == "one_class_svm":
+        _validate_one_class_svm_hyperparameters(config.hyperparameters)
+
+
+def _validate_one_class_svm_hyperparameters(
+    hyperparameters: dict[str, Any],
+) -> None:
+    kernel = hyperparameters.get("kernel", "rbf")
+    if kernel not in {"linear", "poly", "rbf", "sigmoid"}:
+        raise ValueError("one_class_svm kernel must be linear, poly, rbf or sigmoid")
+
+    nu = hyperparameters.get("nu", 0.5)
+    if isinstance(nu, bool) or not isinstance(nu, int | float):
+        raise ValueError("one_class_svm nu must be numeric")
+    if not 0.0 < float(nu) <= 1.0:
+        raise ValueError("one_class_svm nu must be in (0, 1]")
+
+    gamma = hyperparameters.get("gamma", "scale")
+    if isinstance(gamma, str):
+        if gamma not in {"scale", "auto"}:
+            raise ValueError("one_class_svm gamma must be scale, auto or positive")
+    elif isinstance(gamma, bool) or not isinstance(gamma, int | float):
+        raise ValueError("one_class_svm gamma must be scale, auto or positive")
+    elif float(gamma) <= 0.0:
+        raise ValueError("one_class_svm gamma must be positive")
+
+    degree = hyperparameters.get("degree")
+    if degree is not None:
+        if isinstance(degree, bool) or not isinstance(degree, int):
+            raise ValueError("one_class_svm degree must be an integer")
+        if not 2 <= degree <= 6:
+            raise ValueError("one_class_svm degree must be between 2 and 6")
+
+    coef0 = hyperparameters.get("coef0")
+    if coef0 is not None:
+        if isinstance(coef0, bool) or not isinstance(coef0, int | float):
+            raise ValueError("one_class_svm coef0 must be numeric")
+        if not -10.0 <= float(coef0) <= 10.0:
+            raise ValueError("one_class_svm coef0 must be between -10 and 10")
+
+    tol = hyperparameters.get("tol")
+    if tol is not None:
+        if isinstance(tol, bool) or not isinstance(tol, int | float):
+            raise ValueError("one_class_svm tol must be numeric")
+        if not 1e-6 <= float(tol) <= 1e-1:
+            raise ValueError("one_class_svm tol must be between 1e-6 and 1e-1")
+
+    shrinking = hyperparameters.get("shrinking")
+    if shrinking is not None and not isinstance(shrinking, bool):
+        raise ValueError("one_class_svm shrinking must be boolean")
+
+    cache_size = hyperparameters.get("cache_size")
+    if cache_size is not None:
+        if isinstance(cache_size, bool) or not isinstance(cache_size, int | float):
+            raise ValueError("one_class_svm cache_size must be numeric")
+        if not 50 <= float(cache_size) <= 1000:
+            raise ValueError("one_class_svm cache_size must be between 50 and 1000")
+
+    max_iter = hyperparameters.get("max_iter")
+    if max_iter is not None:
+        if isinstance(max_iter, bool) or not isinstance(max_iter, int):
+            raise ValueError("one_class_svm max_iter must be an integer")
+        if max_iter != -1 and not 100 <= max_iter <= 100000:
+            raise ValueError(
+                "one_class_svm max_iter must be -1 or between 100 and 100000"
+            )
 
 
 def _expected_model_path(state: TFMStateModel, config: ModelingConfig) -> str:
@@ -1009,6 +1325,10 @@ def _modeling_config_with_updates(
         random_state=payload["random_state"],
         hyperparameters=hyperparameters,
     )
+
+
+def _uses_temporal_degradation_profile(state: TFMStateModel) -> bool:
+    return state.project_context.supervision_profile == "run_to_failure_degradation"
 
 
 def _modeler_turn(state: TFMStateModel) -> int:

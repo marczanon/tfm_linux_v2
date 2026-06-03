@@ -104,6 +104,29 @@ MemoryUsageAuditAssessment = Literal[
     "not_applicable",
 ]
 
+AgentToolName = Literal["evidence_lookup", "threshold_analysis"]
+
+AgentToolAgent = Literal[
+    "supervisor",
+    "cleaner",
+    "structurer",
+    "modeler",
+    "evaluator",
+    "report_writer",
+    "report_verifier",
+    "researcher",
+]
+
+AgentToolEffect = Literal[
+    "read_only",
+    "writes_artifact",
+    "requires_human_review",
+]
+
+AgentToolObservationStatus = Literal["success", "failed", "blocked"]
+
+AgentToolArgumentValue = JsonScalar | list[JsonScalar]
+
 DecisionEpisodeType = Literal[
     "cleaning",
     "structuring",
@@ -115,6 +138,140 @@ DecisionEpisodeType = Literal[
     "memory_management",
     "methodology",
 ]
+
+ReportDebateStatus = Literal[
+    "approved_without_revision",
+    "approved_after_revision",
+    "needs_human_review",
+    "blocked",
+    "inconclusive",
+]
+
+ReportDebateSpeaker = Literal["report_writer", "report_verifier", "system"]
+
+ReportDebateTurnIntent = Literal[
+    "draft",
+    "verification",
+    "revision",
+    "reverification",
+    "final_resolution",
+]
+
+ReportDebateTurnStatus = Literal[
+    "informational",
+    "accepted",
+    "rejected",
+    "verified",
+    "unresolved",
+]
+
+
+class AgentToolSpec(StrictBaseModel):
+    """Herramienta segura que un agente puede elegir como fuente de observacion."""
+
+    tool_name: AgentToolName
+    description: str = Field(min_length=1)
+    allowed_agents: list[AgentToolAgent] = Field(min_length=1)
+    effect: AgentToolEffect = "read_only"
+    input_schema: dict[str, object] = Field(default_factory=dict)
+    output_schema: dict[str, object] = Field(default_factory=dict)
+    produces_artifacts: bool = False
+    human_summary_template: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_tool_policy(self) -> "AgentToolSpec":
+        if self.effect == "read_only" and self.produces_artifacts:
+            raise ValueError("read-only tools cannot produce artifacts")
+        if len(set(self.allowed_agents)) != len(self.allowed_agents):
+            raise ValueError("allowed_agents cannot contain duplicates")
+        return self
+
+
+class AgentToolRequest(StrictBaseModel):
+    """Solicitud estructurada de uso de una herramienta por parte de un agente."""
+
+    request_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    agent_name: AgentToolAgent
+    tool_name: AgentToolName
+    purpose: str = Field(min_length=1)
+    arguments: dict[str, AgentToolArgumentValue] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class AgentToolObservation(StrictBaseModel):
+    """Observacion devuelta por una herramienta agentica segura."""
+
+    observation_id: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    agent_name: AgentToolAgent
+    tool_name: AgentToolName
+    status: AgentToolObservationStatus
+    summary: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+    payload: dict[str, object] = Field(default_factory=dict)
+    errors: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @model_validator(mode="after")
+    def validate_observation_status(self) -> "AgentToolObservation":
+        if self.status == "success" and self.errors:
+            raise ValueError("successful tool observations cannot include errors")
+        if self.status in {"failed", "blocked"} and not self.errors:
+            raise ValueError("failed or blocked tool observations require errors")
+        return self
+
+
+class ReportDebateTurn(StrictBaseModel):
+    """Turno legible y auditable de un debate controlado del informe."""
+
+    turn_id: str = Field(min_length=1)
+    round_index: int = Field(ge=0)
+    speaker_agent: ReportDebateSpeaker
+    source_decision_id: str | None = Field(default=None, min_length=1)
+    intent: ReportDebateTurnIntent
+    human_summary: str = Field(min_length=1)
+    claims_or_objections: list[str] = Field(default_factory=list)
+    accepted_points: list[str] = Field(default_factory=list)
+    rejected_points: list[str] = Field(default_factory=list)
+    changes_requested: list[str] = Field(default_factory=list)
+    changes_applied: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    status: ReportDebateTurnStatus = "informational"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ReportDebateRecord(StrictBaseModel):
+    """Registro completo del debate controlado del informe final."""
+
+    debate_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    initial_report_decision_id: str = Field(min_length=1)
+    initial_verifier_decision_id: str = Field(min_length=1)
+    final_report_decision_id: str = Field(min_length=1)
+    final_verifier_decision_id: str = Field(min_length=1)
+    status: ReportDebateStatus
+    max_rounds: int = Field(ge=0)
+    rounds_used: int = Field(ge=0)
+    turns: list[ReportDebateTurn] = Field(default_factory=list)
+    final_summary: str = Field(min_length=1)
+    unresolved_issues: list[str] = Field(default_factory=list)
+    human_review_recommended: bool = False
+    artifacts: list[dict[str, JsonScalar]] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @model_validator(mode="after")
+    def validate_debate_record(self) -> "ReportDebateRecord":
+        if self.rounds_used > self.max_rounds:
+            raise ValueError("rounds_used cannot exceed max_rounds")
+        if self.status in {"needs_human_review", "blocked"} and not (
+            self.unresolved_issues or self.human_review_recommended
+        ):
+            raise ValueError(
+                "unresolved debate outcomes require unresolved issues or human review"
+            )
+        return self
 
 
 class ReasoningMetricDelta(StrictBaseModel):

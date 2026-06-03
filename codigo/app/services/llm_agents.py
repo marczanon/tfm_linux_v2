@@ -5,7 +5,11 @@ from __future__ import annotations
 from codigo.app.agents.cleaner import decide_cleaning_action
 from codigo.app.agents.evaluator import decide_evaluation_action
 from codigo.app.agents.modeler import decide_modeling_action
-from codigo.app.agents.report_writer import decide_report_action
+from codigo.app.agents.report_writer import (
+    decide_report_action,
+    decide_report_revision_action,
+)
+from codigo.app.agents.report_verifier import decide_report_verification_action
 from codigo.app.agents.structurer import decide_structuring_action
 from codigo.app.agents.supervisor import decide_supervisor_action
 from codigo.app.graph.pipeline import PipelineAgents
@@ -47,6 +51,18 @@ def build_ollama_pipeline_agents(
             use_llm=True,
         ),
         report_writer=lambda state: decide_report_action(
+            state,
+            llm_client=client,
+            use_llm=True,
+        ),
+        report_reviser=lambda state, verification, **kwargs: decide_report_revision_action(
+            state,
+            verification,
+            llm_client=client,
+            use_llm=True,
+            **kwargs,
+        ),
+        report_verifier=lambda state: decide_report_verification_action(
             state,
             llm_client=client,
             use_llm=True,

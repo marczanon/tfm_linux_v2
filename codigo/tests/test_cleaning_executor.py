@@ -195,6 +195,11 @@ class CleaningExecutorTests(unittest.TestCase):
         self.assertEqual(summary["files"][0]["non_finite_removed"], 1)
         self.assertEqual(data["channel"].item(), "channel_2")
         self.assertEqual(data["run_id"].item(), "set_2")
+        self.assertEqual(data["asset_id"].item(), "bearing_test_rig")
+        self.assertEqual(data["timestamp_start"].item(), "2004-02-12T10:32:39")
+        self.assertEqual(data["timestamp_end"].item(), "2004-02-12T10:32:40.024000")
+        self.assertEqual(summary["files"][0]["asset_id"], "bearing_test_rig")
+        self.assertEqual(summary["files"][0]["timestamp_start"], "2004-02-12T10:32:39")
         np.testing.assert_array_equal(data["signal"], np.array([0.2, 1.0], dtype=np.float32))
 
     def test_clean_dataset_rejects_undeclared_common_manifest_channel(self):

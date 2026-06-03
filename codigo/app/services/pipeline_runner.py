@@ -32,6 +32,7 @@ from codigo.app.schemas.pipeline_run import (
     PipelineRunStage,
 )
 from codigo.app.schemas.state import (
+    ArtifactRef,
     CleaningConfig,
     HumanApproval,
     PipelineError,
@@ -265,7 +266,7 @@ def run_dataset_pipeline(
             + "; ".join(plan.blocking_reasons)
         )
     return run_and_persist_pipeline(
-        _initial_state_with_human_approval(plan, human_approval),
+        _initial_state_with_execution_evidence(plan, human_approval),
         executors=build_executors_from_plan(plan),
         agents=_agents_for_plan(plan, agents),
         runs_dir=runs_dir,
@@ -274,16 +275,66 @@ def run_dataset_pipeline(
     )
 
 
-def _initial_state_with_human_approval(
+def _initial_state_with_execution_evidence(
     plan: DatasetPipelinePlan,
     human_approval: HumanApproval | None,
 ) -> TFMState:
     state = build_initial_state_from_plan(plan)
-    if human_approval is None:
-        return state
     updated = dict(state)
-    updated["human_approval"] = human_approval.model_dump(mode="json")
+    artifacts = list(updated.get("artifacts") or [])
+    artifacts.extend(
+        artifact.model_dump(mode="json")
+        for artifact in _write_pipeline_evidence_artifacts(plan)
+    )
+    updated["artifacts"] = artifacts
+    if human_approval is not None:
+        updated["human_approval"] = human_approval.model_dump(mode="json")
     return TFMState(**updated)
+
+
+def _write_pipeline_evidence_artifacts(
+    plan: DatasetPipelinePlan,
+) -> list[ArtifactRef]:
+    evidence_dir = (
+        Path(plan.paths.memory_output_root)
+        / plan.request.dataset_id
+        / plan.request.run_id
+        / "evidence"
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    request_path = evidence_dir / "pipeline_request.json"
+    plan_path = evidence_dir / "pipeline_plan.json"
+    _write_json_file(request_path, plan.request.model_dump(mode="json"))
+    _write_json_file(plan_path, plan.model_dump(mode="json"))
+    return [
+        ArtifactRef(
+            name="pipeline_request",
+            artifact_type="config",
+            path=request_path.as_posix(),
+            producer="pipeline_runner",
+            description="Solicitud exacta recibida por el runner comun.",
+            metadata={"schema": "PipelineRunRequest"},
+        ),
+        ArtifactRef(
+            name="pipeline_plan",
+            artifact_type="config",
+            path=plan_path.as_posix(),
+            producer="pipeline_runner",
+            description="Plan preflight aplicado antes de ejecutar.",
+            metadata={
+                "schema": "DatasetPipelinePlan",
+                "can_execute_requested_stages": plan.can_execute_requested_stages,
+                "n_effective_stages": len(plan.effective_stages),
+            },
+        ),
+    ]
+
+
+def _write_json_file(path: Path, payload) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def _nasa_policy(request: PipelineRunRequest, display_name: str) -> DatasetRunPolicy:
@@ -399,6 +450,8 @@ def _agents_for_plan(
         modeler=base.modeler,
         evaluator=base.evaluator,
         report_writer=base.report_writer,
+        report_reviser=base.report_reviser,
+        report_verifier=base.report_verifier,
     )
 
 
@@ -482,6 +535,21 @@ def _nasa_initial_state(plan: DatasetPipelinePlan) -> TFMState:
             target_sample_rate_hz=target_rate,
             main_channel=main_channel,
             label_mode=label_mode,
+            supervision_profile="run_to_failure_degradation",
+            label_granularity=(
+                "proxy_temporal"
+                if request.dataset_policy_id == NASA_IMS_TEMPORAL_POLICY_V1
+                else "file"
+                if request.allow_synthetic_labels
+                else "event"
+            ),
+            label_source=(
+                "temporal_proxy"
+                if request.dataset_policy_id == NASA_IMS_TEMPORAL_POLICY_V1
+                else "synthetic"
+                if request.allow_synthetic_labels
+                else "none"
+            ),
             notes=notes,
         ),
         raw_path=request.raw_path,

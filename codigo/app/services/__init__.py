@@ -80,6 +80,12 @@ from codigo.app.services.agent_memory import (
     memory_usage_json_template,
     validate_retrieved_memory_usage,
 )
+from codigo.app.services.agent_tools import (
+    agent_tool_catalog,
+    build_state_evidence_catalog,
+    get_agent_tool_spec,
+    run_agent_tool_request,
+)
 from codigo.app.services.decision_memory import (
     DecisionMemoryArtifacts,
     build_evaluation_decision_episode,
@@ -117,6 +123,10 @@ from codigo.app.services.dataset_adapters import (
     get_dataset_adapter,
     infer_dataset_adapter,
     list_dataset_adapters,
+)
+from codigo.app.services.common_manifest import (
+    read_common_manifest,
+    write_common_manifest,
 )
 from codigo.app.services.signal_adapters import (
     SignalChannel,
@@ -165,7 +175,9 @@ __all__ = [
     "TransversalMemoryAuditArtifacts",
     "TransversalMemoryAuditReport",
     "VectorMemoryStore",
+    "agent_tool_catalog",
     "audit_transversal_memory_run",
+    "build_state_evidence_catalog",
     "build_transversal_memory_audit",
     "compare_runs",
     "collection_for_agent",
@@ -175,6 +187,7 @@ __all__ = [
     "describe_dataset",
     "extract_decisions",
     "get_dataset_adapter",
+    "get_agent_tool_spec",
     "get_run",
     "get_run_artifacts",
     "get_default_llm_status",
@@ -208,12 +221,15 @@ __all__ = [
     "memory_usage_json_template",
     "parse_json_object",
     "prepare_synthetic_nasa_ims_binary_dataset",
+    "read_common_manifest",
     "read_signal_channels",
     "read_signal_frame",
     "run_cwru_experiment_plan",
+    "run_agent_tool_request",
     "save_run_snapshot",
     "update_run_index",
     "validate_retrieved_memory_usage",
+    "write_common_manifest",
     "write_reasoning_postmortem",
     "write_decision_memory_artifacts",
     "write_memory_usage_audit",

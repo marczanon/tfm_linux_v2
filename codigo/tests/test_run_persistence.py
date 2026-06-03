@@ -34,6 +34,13 @@ class RunPersistenceTests(unittest.TestCase):
             artifacts = _read_json(run_dir / "artifacts.json")
             metrics = _read_json(run_dir / "metrics.json")
             evaluation = _read_json(run_dir / "evaluation.json")
+            evidence_pack = _read_json(run_dir / "evidence_pack.json")
+            evidence_markdown = (run_dir / "evidence_pack.md").read_text(
+                encoding="utf-8"
+            )
+            audit_report = (run_dir / "execution_audit.md").read_text(
+                encoding="utf-8"
+            )
             summary = (run_dir / "summary.md").read_text(encoding="utf-8")
 
         self.assertEqual(snapshot.run_id, "run-persist-001")
@@ -43,7 +50,32 @@ class RunPersistenceTests(unittest.TestCase):
         self.assertEqual(artifacts[0]["artifact_type"], "metrics")
         self.assertEqual(metrics["f1_score"], 0.94)
         self.assertTrue(evaluation["approved"])
+        self.assertTrue(snapshot.evidence_pack_path.endswith("evidence_pack.json"))
+        self.assertTrue(
+            snapshot.evidence_pack_markdown_path.endswith("evidence_pack.md")
+        )
+        self.assertTrue(snapshot.audit_report_path.endswith("execution_audit.md"))
+        self.assertEqual(evidence_pack["schema_version"], "tfm.run_evidence_pack.v1")
+        self.assertEqual(evidence_pack["run_id"], "run-persist-001")
+        self.assertIn(
+            evidence_pack["artifacts"][0]["checksum_status"],
+            {"computed", "missing"},
+        )
+        if evidence_pack["artifacts"][0]["checksum_status"] == "computed":
+            self.assertTrue(evidence_pack["artifacts"][0]["sha256"])
+        self.assertEqual(
+            [item["agent_name"] for item in evidence_pack["decisions"]],
+            ["supervisor", "cleaner"],
+        )
+        self.assertIn("# Evidence pack run-persist-001", evidence_markdown)
+        self.assertIn("# Auditoria de ejecucion run-persist-001", audit_report)
+        self.assertIn("## Cronologia de agentes", audit_report)
+        self.assertIn("## Verificacion del informe", audit_report)
+        self.assertIn("## Debate del informe", audit_report)
+        self.assertIn("## Lectura para evaluador humano", audit_report)
         self.assertIn("# Run run-persist-001", summary)
+        self.assertIn("Evidence pack JSON", summary)
+        self.assertIn("Auditoria de ejecucion", summary)
         self.assertEqual(len(index.runs), 1)
         self.assertEqual(index.runs[0].run_id, "run-persist-001")
         self.assertEqual(index.runs[0].f1_score, 0.94)

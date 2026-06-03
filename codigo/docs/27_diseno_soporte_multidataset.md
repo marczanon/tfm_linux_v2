@@ -704,8 +704,11 @@ como `normal`, el tramo posterior como `degradation` y anade en
 
 ```text
 dataset_policy_id
-label_source = "temporal_proxy_v1"
+label_source = "temporal_proxy"
+label_granularity = "proxy_temporal"
+label_policy_id = "nasa_ims_temporal_v1"
 official_nasa_labels = false
+official_window_labels = false
 split_hint
 split_source
 temporal_order_index

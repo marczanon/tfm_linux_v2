@@ -58,6 +58,7 @@ class GraphPipelineTests(unittest.TestCase):
                 "modeling",
                 "evaluation",
                 "reporting",
+                "reporting",
             ],
         )
         self.assertEqual(validated.current_stage, "completed")
@@ -75,7 +76,7 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertTrue(validated.evaluation.approved)
         self.assertEqual(validated.evaluation.next_action, "continue")
         self.assertEqual(validated.report_path, str(paths["final_report"]))
-        self.assertEqual(len(validated.messages), 24)
+        self.assertEqual(len(validated.messages), 28)
         self.assertEqual(
             [message.role for message in validated.messages],
             [
@@ -102,12 +103,25 @@ class GraphPipelineTests(unittest.TestCase):
                 "supervisor",
                 "agent",
                 "tool",
+                "agent",
+                "agent",
+                "tool",
+                "agent",
                 "supervisor",
             ],
         )
         self.assertEqual(
             [message.name for message in validated.messages if message.role == "agent"],
-            ["cleaner", "structurer", "modeler", "evaluator", "report_writer"],
+            [
+                "cleaner",
+                "structurer",
+                "modeler",
+                "evaluator",
+                "report_writer",
+                "report_verifier",
+                "report_writer",
+                "report_verifier",
+            ],
         )
         first_decision = json.loads(validated.messages[0].content)
         final_decision = json.loads(validated.messages[-1].content)
@@ -129,8 +143,18 @@ class GraphPipelineTests(unittest.TestCase):
                 "metrics",
                 "report",
                 "report",
+                "report",
+                "config",
+                "report",
+                "config",
+                "report",
+                "report",
+                "report",
             ],
         )
+        artifact_names = {artifact.name for artifact in validated.artifacts}
+        self.assertIn("report_debate", artifact_names)
+        self.assertIn("report_debate_report", artifact_names)
 
     def test_memory_aware_graph_writes_structurer_and_evaluator_memory_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,6 +253,11 @@ class GraphPipelineTests(unittest.TestCase):
             for event in events
             if event.kind == "agent_decision" and event.agent_name == "modeler"
         ]
+        verifier_events = [
+            event
+            for event in events
+            if event.kind == "agent_decision" and event.agent_name == "report_verifier"
+        ]
         self.assertEqual(validated.current_stage, "completed")
         self.assertEqual([event.sequence for event in events], list(range(1, len(events) + 1)))
         self.assertIn("supervisor_decision", kinds)
@@ -238,6 +267,11 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertTrue(agent_events)
         self.assertIn("rationale", agent_events[0].payload["decision"])
         self.assertEqual(agent_events[0].payload["state"]["dataset"], "cwru_bearing")
+        self.assertTrue(verifier_events)
+        self.assertEqual(
+            verifier_events[-1].summary,
+            verifier_events[-1].payload["human_summary"],
+        )
 
     def test_failed_executor_stops_graph_without_calling_later_nodes(self):
         calls: list[str] = []
@@ -327,12 +361,13 @@ class GraphPipelineTests(unittest.TestCase):
                 "modeling",
                 "evaluation",
                 "reporting",
+                "reporting",
             ],
         )
         self.assertEqual(validated.current_stage, "completed")
         self.assertEqual(result.snapshot.run_id, "run-persisted-001")
-        self.assertEqual(result.snapshot.n_artifacts, 11)
-        self.assertEqual(result.snapshot.n_decisions, 17)
+        self.assertEqual(result.snapshot.n_artifacts, 18)
+        self.assertEqual(result.snapshot.n_decisions, 20)
         self.assertEqual(result.snapshot.n_errors, 0)
         self.assertTrue(state_path_exists)
         self.assertTrue(summary_path_exists)

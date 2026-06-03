@@ -154,3 +154,51 @@ Documentos iniciales:
   preparar Fase 7, separando mejoras imprescindibles de auditabilidad, mejoras
   importantes de producto e ideas agenticas avanzadas compatibles con la
   metodologia anti-duplicacion.
+- `56_fase7_hito1_evidence_pack_reporte_agentico.md`: primer hito de Fase 7;
+  extiende snapshots con evidence pack JSON/Markdown, persiste request y plan
+  como artefactos de evidencia y permite que `report_writer` redacte contenido
+  narrativo humano validado por contratos Pydantic.
+- `57_fase7_hito1_frontend_informe_final.md`: integracion frontend del informe
+  final como documento principal de cierre de run, con renderizado legible y
+  evidencia tecnica separada debajo.
+- `58_fase7_hito2_informe_auditoria_ejecucion.md`: segundo hito de Fase 7;
+  genera y expone un informe determinista de auditoria de ejecucion separado
+  del informe agentico final, con bloque propio en frontend.
+- `59_fase7_hito3_verificador_agentico_informe.md`: tercer hito de Fase 7;
+  introduce `report_verifier` para revisar afirmaciones no soportadas,
+  exageraciones y limitaciones ausentes en el informe final, persistiendo JSON
+  y Markdown de verificacion.
+- `60_fase7_investigacion_debate_controlado_informe.md`: investigacion previa
+  al debate controlado entre `report_writer` y `report_verifier`; define
+  contratos candidatos, artefactos, encaje en grafo, auditoria y frontend antes
+  de implementar.
+- `61_fase7_hito4_debate_controlado_informe.md`: cuarto hito de Fase 7;
+  implementa una ronda de debate controlado entre `report_writer` y
+  `report_verifier`, persiste `report_debate.json`/`.md`, expone
+  `/runs/{run_id}/report-debate` e incorpora una conversacion agentica limpia
+  en la pestana de agentes.
+- `62_fase7_hito5_catalogo_herramientas_agenticas.md`: inicio del quinto hito
+  de Fase 7; crea contratos `AgentToolSpec`, `AgentToolRequest` y
+  `AgentToolObservation`, un catalogo minimo de herramientas y la primera
+  herramienta read-only `evidence_lookup`.
+- `63_fase7_hito5_threshold_analysis_modeler_strategy.md`: segundo bloque del
+  quinto hito; anade la herramienta read-only `threshold_analysis` y amplia
+  `ModelingDecision` con una estrategia explicita para evitar decisiones
+  centradas solo en `threshold_quantile`.
+- `64_fase7_hito5_one_class_svm_modeler.md`: tercer bloque del quinto hito;
+  implementa `one_class_svm` como familia no supervisada soportada por el
+  ejecutor de modelado y lo incorpora al espacio de decision del `modeler`.
+- `65_fase7_hito6_nasa_ims_visualizacion.md`: estabilizacion intermedia de
+  NASA IMS; ajusta defaults de UI para politica temporal full y permite
+  visualizacion PCA diagnostica cuando hay features pero no predicciones.
+- `66_fase7_perfiles_supervision_binary_run_to_failure.md`: hoja de ruta para
+  formalizar perfiles `binary_fault_classification` y
+  `run_to_failure_degradation`, con contratos, metricas, visualizaciones y
+  pasos de implementacion sin crear runners paralelos.
+- `67_fase7_hito8_comparativa_run_to_failure.md`: primer bloque del panel de
+  investigacion run-to-failure; extiende `GET /runs/compare` y el frontend para
+  comparar runs por lead time, falsas alarmas nominales, tendencia del score y
+  fallos perdidos, manteniendo F1 como metrica auxiliar.
+- `68_fase7_hito8_monitorizacion_estado_salud.md`: segundo bloque del panel
+  run-to-failure; extiende `temporal_series` con `health_index`, `risk_index` y
+  `health_state` por ventana y por trayectoria para monitorizacion operacional.

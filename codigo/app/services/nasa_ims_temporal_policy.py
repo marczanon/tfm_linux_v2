@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-import csv
-import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from codigo.app.schemas.dataset import CommonManifestRecord
 from codigo.app.schemas.executor_results import ManifestResult
+from codigo.app.services.common_manifest import read_common_manifest, write_common_manifest
 from codigo.app.schemas.state import ArtifactRef
 
 NASA_IMS_TEMPORAL_POLICY_V1 = "nasa_ims_temporal_v1"
-NASA_IMS_TEMPORAL_POLICY_LABEL_SOURCE = "temporal_proxy_v1"
+NASA_IMS_TEMPORAL_POLICY_LABEL_SOURCE = "temporal_proxy"
 NASA_IMS_TEMPORAL_POLICY_MIN_RECORDS_PER_RUN = 3
 NASA_IMS_TEMPORAL_POLICY_NORMAL_FRACTION = 0.4
 
@@ -55,6 +53,7 @@ def apply_nasa_ims_temporal_policy_to_result(
             "dataset": "nasa_ims_bearing",
             "dataset_policy_id": NASA_IMS_TEMPORAL_POLICY_V1,
             "label_source": NASA_IMS_TEMPORAL_POLICY_LABEL_SOURCE,
+            "label_policy_id": NASA_IMS_TEMPORAL_POLICY_V1,
             "official_nasa_labels": False,
             "n_rows": summary.n_rows,
             "source_manifest_path": summary.source_manifest_path,
@@ -92,7 +91,7 @@ def apply_nasa_ims_temporal_policy(
         raise ValueError("normal_fraction must be in (0, 1)")
 
     source = Path(manifest_path)
-    records = _read_common_manifest(source)
+    records = read_common_manifest(source)
     if not records:
         raise ValueError(f"empty NASA IMS manifest: {source}")
     if any(record.dataset != "nasa_ims_bearing" for record in records):
@@ -117,7 +116,7 @@ def apply_nasa_ims_temporal_policy(
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    _write_common_manifest(output, rewritten)
+    write_common_manifest(output, rewritten)
     return NasaIMSTemporalPolicySummary(
         manifest_path=output.as_posix(),
         n_rows=len(rewritten),
@@ -166,6 +165,8 @@ def _apply_policy_to_run(
             **record.metadata_json,
             "dataset_policy_id": NASA_IMS_TEMPORAL_POLICY_V1,
             "label_source": NASA_IMS_TEMPORAL_POLICY_LABEL_SOURCE,
+            "label_granularity": "proxy_temporal",
+            "label_policy_id": NASA_IMS_TEMPORAL_POLICY_V1,
             "official_nasa_labels": False,
             "temporal_group_id": group_key,
             "temporal_order_index": index,
@@ -218,77 +219,3 @@ def _policy_notes(record: CommonManifestRecord) -> str:
     if original:
         parts.append(f"original_notes={original}")
     return "; ".join(parts)
-
-
-def _read_common_manifest(path: Path) -> list[CommonManifestRecord]:
-    with path.open(encoding="utf-8") as file:
-        return [
-            _deserialize_common_manifest_row(row)
-            for row in csv.DictReader(file)
-        ]
-
-
-def _deserialize_common_manifest_row(row: dict[str, str]) -> CommonManifestRecord:
-    data: dict[str, Any] = dict(row)
-    data["channel_names"] = _json_list(row.get("channel_names"))
-    data["metadata_json"] = _json_object(row.get("metadata_json"))
-    for key in ["timestamp_start", "timestamp_end"]:
-        if not str(data.get(key) or "").strip():
-            data[key] = None
-    for key in ["sampling_rate_hz", "target_sample_rate_hz"]:
-        if not str(data.get(key) or "").strip():
-            data[key] = None
-    return CommonManifestRecord.model_validate(data)
-
-
-def _write_common_manifest(
-    path: Path,
-    records: list[CommonManifestRecord],
-) -> None:
-    fieldnames = list(CommonManifestRecord.model_fields)
-    with path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        for record in records:
-            writer.writerow(_serialize_common_manifest_row(record))
-
-
-def _serialize_common_manifest_row(record: CommonManifestRecord) -> dict[str, Any]:
-    row: dict[str, Any] = {}
-    for key, value in record.model_dump().items():
-        if value is None:
-            row[key] = ""
-        elif isinstance(value, datetime):
-            row[key] = value.isoformat()
-        elif isinstance(value, (dict, list)):
-            row[key] = json.dumps(value, sort_keys=True)
-        else:
-            row[key] = value
-    return row
-
-
-def _json_list(value: str | None) -> list[str]:
-    text = _optional_text(value)
-    if text is None:
-        return []
-    parsed = json.loads(text)
-    if not isinstance(parsed, list):
-        raise ValueError("manifest channel_names must be a JSON list")
-    return [str(item) for item in parsed]
-
-
-def _json_object(value: str | None) -> dict[str, Any]:
-    text = _optional_text(value)
-    if text is None:
-        return {}
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise ValueError("manifest metadata_json must be a JSON object")
-    return parsed
-
-
-def _optional_text(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = str(value).strip()
-    return stripped or None

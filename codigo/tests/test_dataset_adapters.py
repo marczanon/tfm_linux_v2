@@ -40,6 +40,9 @@ class DatasetAdaptersTests(unittest.TestCase):
         self.assertEqual(descriptor.dataset_id, "cwru_bearing")
         self.assertIn("DE_time", descriptor.channel_names)
         self.assertEqual(descriptor.label_availability, "file_level")
+        self.assertEqual(descriptor.supervision_profile, "binary_fault_classification")
+        self.assertEqual(descriptor.label_granularity, "file")
+        self.assertEqual(descriptor.label_source, "official")
 
     def test_nasa_hint_does_not_match_incidental_substrings(self):
         with tempfile.TemporaryDirectory(prefix="tmpims") as tmp:
@@ -63,6 +66,9 @@ class DatasetAdaptersTests(unittest.TestCase):
 
         self.assertEqual(descriptor.dataset_id, "nasa_ims_bearing")
         self.assertEqual(descriptor.task_type, "run_to_failure")
+        self.assertEqual(descriptor.supervision_profile, "run_to_failure_degradation")
+        self.assertEqual(descriptor.label_granularity, "event")
+        self.assertEqual(descriptor.label_source, "none")
         self.assertEqual(
             descriptor.channel_names,
             ["channel_1", "channel_2", "channel_3", "channel_4"],
@@ -119,6 +125,49 @@ class DatasetAdaptersTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "preextracted directory"):
                 adapter.build_manifest(raw_dir, output_dir)
 
+    def test_nasa_manifest_preserves_temporal_failure_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_dir = Path(tmp) / "nasa_ims_bearing" / "2nd_test"
+            raw_dir.mkdir(parents=True)
+            for minute in [32, 42, 52]:
+                (raw_dir / f"2004.02.12.10.{minute}.39").write_text(
+                    "0.1\t0.2\t0.3\t0.4\n0.2\t0.3\t0.4\t0.5\n",
+                    encoding="utf-8",
+                )
+            result = get_dataset_adapter("nasa_ims_bearing").build_manifest(
+                raw_dir.parent,
+                Path(tmp) / "interim",
+            )
+
+            rows = _read_manifest_rows(Path(result.manifest_path))
+            metadata = [_metadata(row) for row in rows]
+
+        self.assertEqual([row["timestamp_start"] for row in rows], [
+            "2004-02-12T10:32:39",
+            "2004-02-12T10:42:39",
+            "2004-02-12T10:52:39",
+        ])
+        self.assertTrue(all(item["official_window_labels"] is False for item in metadata))
+        self.assertEqual({item["label_source"] for item in metadata}, {"none"})
+        self.assertEqual({item["label_granularity"] for item in metadata}, {"event"})
+        self.assertEqual(
+            {item["supervision_profile"] for item in metadata},
+            {"run_to_failure_degradation"},
+        )
+        self.assertEqual(
+            {item["failure_event_time"] for item in metadata},
+            {"2004-02-12T10:52:40.024000"},
+        )
+        self.assertEqual({item["failure_mode"] for item in metadata}, {"bearing_1_outer_race"})
+        self.assertEqual(
+            {item["end_of_life_policy"] for item in metadata},
+            {"last_snapshot_as_failure_event"},
+        )
+        self.assertEqual(
+            [item["temporal_order_index"] for item in metadata],
+            [0, 1, 2],
+        )
+
     def test_generic_tabular_adapter_reads_header_channels(self):
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = Path(tmp) / "signals.csv"
@@ -129,6 +178,9 @@ class DatasetAdaptersTests(unittest.TestCase):
         self.assertEqual(descriptor.dataset_id, "generic_tabular_signal")
         self.assertEqual(descriptor.channel_names, ["ax", "ay", "temp"])
         self.assertEqual(descriptor.label_availability, "none")
+        self.assertEqual(descriptor.supervision_profile, "unlabeled_diagnostic")
+        self.assertEqual(descriptor.label_granularity, "none")
+        self.assertEqual(descriptor.label_source, "none")
 
     def test_infer_generic_tabular_adapter_from_plain_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,6 +197,19 @@ class DatasetAdaptersTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "no dataset adapter supports path"):
                 infer_dataset_adapter(missing)
+
+
+def _read_manifest_rows(path: Path) -> list[dict[str, str]]:
+    import csv
+
+    with path.open(encoding="utf-8") as file:
+        return list(csv.DictReader(file))
+
+
+def _metadata(row: dict[str, str]) -> dict[str, object]:
+    import json
+
+    return json.loads(row["metadata_json"])
 
 
 if __name__ == "__main__":

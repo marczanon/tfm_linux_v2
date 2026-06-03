@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import Field, NonNegativeInt, PositiveInt
 
 from codigo.app.schemas.common import JsonScalar, StrictBaseModel
+from codigo.app.schemas.dataset import LabelGranularity, LabelSource, SupervisionProfile
 
 PipelineStage = Literal[
     "initialized",
@@ -61,6 +62,9 @@ class ProjectContext(StrictBaseModel):
     label_mode: Literal["binary_anomaly", "fault_type", "degradation"] = (
         "binary_anomaly"
     )
+    supervision_profile: SupervisionProfile = "binary_fault_classification"
+    label_granularity: LabelGranularity = "file"
+    label_source: LabelSource = "official"
     notes: str | None = None
 
 

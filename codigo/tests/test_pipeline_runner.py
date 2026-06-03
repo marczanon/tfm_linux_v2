@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from codigo.app.graph.state import validate_state
 from codigo.app.schemas.pipeline_run import PipelineRunRequest
 from codigo.app.services.pipeline_runner import (
+    _initial_state_with_execution_evidence,
     build_executors_from_plan,
     build_initial_state_from_plan,
     dataset_pipeline_paths,
@@ -70,6 +72,12 @@ class PipelineRunnerPlanningTests(unittest.TestCase):
         )
         self.assertEqual(state.project_context.dataset, "nasa_ims_bearing")
         self.assertEqual(state.project_context.label_mode, "degradation")
+        self.assertEqual(
+            state.project_context.supervision_profile,
+            "run_to_failure_degradation",
+        )
+        self.assertEqual(state.project_context.label_granularity, "event")
+        self.assertEqual(state.project_context.label_source, "none")
         self.assertEqual(state.project_context.main_channel, "channel_1")
 
     def test_nasa_synthetic_labels_allow_full_supervised_plan(self):
@@ -84,10 +92,17 @@ class PipelineRunnerPlanningTests(unittest.TestCase):
             )
 
             plan = plan_dataset_pipeline_run(request)
+            state = validate_state(build_initial_state_from_plan(plan))
 
         self.assertTrue(plan.can_execute_requested_stages)
         self.assertEqual(plan.policy.status_for("modeling"), "allowed")
         self.assertEqual(plan.policy.status_for("evaluation"), "allowed")
+        self.assertEqual(
+            state.project_context.supervision_profile,
+            "run_to_failure_degradation",
+        )
+        self.assertEqual(state.project_context.label_granularity, "file")
+        self.assertEqual(state.project_context.label_source, "synthetic")
         self.assertTrue(any("sinteticas" in note for note in plan.policy.notes))
 
     def test_nasa_temporal_policy_allows_full_supervised_plan(self):
@@ -108,6 +123,12 @@ class PipelineRunnerPlanningTests(unittest.TestCase):
         self.assertEqual(plan.policy.status_for("modeling"), "allowed")
         self.assertEqual(plan.policy.status_for("evaluation"), "allowed")
         self.assertEqual(state.project_context.label_mode, "binary_anomaly")
+        self.assertEqual(
+            state.project_context.supervision_profile,
+            "run_to_failure_degradation",
+        )
+        self.assertEqual(state.project_context.label_granularity, "proxy_temporal")
+        self.assertEqual(state.project_context.label_source, "temporal_proxy")
         self.assertIn("nasa_ims_temporal_v1", state.project_context.notes or "")
         self.assertTrue(any("proxy" in note for note in plan.policy.notes))
 
@@ -199,6 +220,40 @@ class PipelineRunnerPlanningTests(unittest.TestCase):
         )
         self.assertEqual(paths.memory_output_root, "codigo/reports")
 
+    def test_initial_state_includes_request_and_plan_evidence_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_dir = Path(tmp) / "raw"
+            raw_dir.mkdir()
+            (raw_dir / "97.mat").touch()
+            request = PipelineRunRequest(
+                run_id="cwru-plan-evidence-test",
+                dataset_id="cwru_bearing",
+                raw_path=raw_dir.as_posix(),
+            )
+            plan = plan_dataset_pipeline_run(request)
+            plan = plan.model_copy(
+                update={
+                    "paths": plan.paths.model_copy(
+                        update={"memory_output_root": (Path(tmp) / "reports").as_posix()}
+                    )
+                }
+            )
+
+            state = validate_state(_initial_state_with_execution_evidence(plan, None))
+
+            evidence_artifacts = {
+                artifact.name: artifact for artifact in state.artifacts
+                if artifact.artifact_type == "config"
+            }
+            request_payload = _read_json(
+                Path(evidence_artifacts["pipeline_request"].path)
+            )
+            plan_payload = _read_json(Path(evidence_artifacts["pipeline_plan"].path))
+
+        self.assertEqual(request_payload["run_id"], "cwru-plan-evidence-test")
+        self.assertEqual(plan_payload["request"]["dataset_id"], "cwru_bearing")
+        self.assertTrue(plan_payload["can_execute_requested_stages"])
+
 
 def _nasa_raw_dir(base: Path, *, n_files: int = 1) -> Path:
     raw_dir = base / "nasa_ims_bearing" / "2nd_test"
@@ -210,6 +265,10 @@ def _nasa_raw_dir(base: Path, *, n_files: int = 1) -> Path:
             encoding="utf-8",
         )
     return raw_dir.parent
+
+
+def _read_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

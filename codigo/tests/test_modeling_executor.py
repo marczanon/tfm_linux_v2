@@ -13,9 +13,17 @@ from codigo.app.schemas.state import ModelingConfig
 FIELDS = [
     "window_id",
     "file_id",
+    "condition_id",
+    "asset_id",
+    "run_id",
     "window_index",
     "start",
     "end",
+    "timestamp_start",
+    "timestamp_end",
+    "time_since_start_seconds",
+    "time_to_failure_seconds",
+    "relative_life",
     "split",
     "label",
     "target",
@@ -58,9 +66,17 @@ def _row(
     return {
         "window_id": f"{file_id}_{index:06d}",
         "file_id": file_id,
+        "condition_id": "test_to_failure",
+        "asset_id": "bearing_test_rig",
+        "run_id": "set_2",
         "window_index": index,
         "start": index * 4,
         "end": index * 4 + 4,
+        "timestamp_start": "",
+        "timestamp_end": "",
+        "time_since_start_seconds": index,
+        "time_to_failure_seconds": 100 - index,
+        "relative_life": index / 100,
         "split": split,
         "label": label,
         "target": target,
@@ -98,6 +114,8 @@ class ModelingExecutorTests(unittest.TestCase):
         self.assertEqual(summary["n_predictions"], 8)
         self.assertEqual(model_bundle["feature_columns"], ["mean", "rms"])
         self.assertEqual(len(predictions), 8)
+        self.assertEqual(predictions[0]["run_id"], "set_2")
+        self.assertEqual(predictions[0]["relative_life"], "0.0")
         self.assertIn("anomaly_score", predictions[0])
         self.assertEqual(saved_summary["model_name"], "isolation_forest")
 
@@ -160,6 +178,62 @@ class ModelingExecutorTests(unittest.TestCase):
         self.assertEqual(len(predictions), 8)
         self.assertIn("anomaly_score", predictions[0])
 
+    def test_train_one_class_svm_model_writes_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            features_path = base / "features.csv"
+            output_dir = base / "models"
+            write_features(features_path, feature_rows())
+
+            summary = train_anomaly_model(
+                features_path,
+                output_dir,
+                ModelingConfig(
+                    model_name="one_class_svm",
+                    random_state=42,
+                    hyperparameters={
+                        "kernel": "rbf",
+                        "nu": 0.25,
+                        "gamma": "scale",
+                        "shrinking": True,
+                        "tol": 0.001,
+                        "max_iter": -1,
+                        "threshold_quantile": 0.95,
+                    },
+                ),
+            )
+            model_bundle = joblib.load(summary["model_path"])
+            with open(summary["predictions_path"], encoding="utf-8") as file:
+                predictions = list(csv.DictReader(file))
+
+        self.assertEqual(summary["model_name"], "one_class_svm")
+        self.assertEqual(
+            summary["model_path"],
+            (output_dir / "one_class_svm.joblib").as_posix(),
+        )
+        self.assertEqual(model_bundle["model_family"], "sklearn_one_class_svm")
+        self.assertIn("scaler", model_bundle)
+        self.assertEqual(len(predictions), 8)
+        self.assertIn("anomaly_score", predictions[0])
+
+    def test_invalid_one_class_svm_hyperparameter_returns_failed_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            features_path = base / "features.csv"
+            write_features(features_path, feature_rows())
+
+            result = generate_model_outputs(
+                features_path,
+                base / "models",
+                ModelingConfig(
+                    model_name="one_class_svm",
+                    hyperparameters={"kernel": "rbf", "nu": 1.5},
+                ),
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("one_class_svm nu", result.errors[0].message)
+
     def test_unsupported_model_returns_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -169,7 +243,7 @@ class ModelingExecutorTests(unittest.TestCase):
             result = generate_model_outputs(
                 features_path,
                 base / "models",
-                ModelingConfig(model_name="one_class_svm"),
+                ModelingConfig(model_name="local_outlier_factor"),
             )
 
         self.assertEqual(result.status, "failed")

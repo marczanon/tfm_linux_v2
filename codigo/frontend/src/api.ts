@@ -70,6 +70,14 @@ export async function getRunReport(runId: string): Promise<string> {
   return apiTextRequest(`/runs/${encodeURIComponent(runId)}/report`);
 }
 
+export async function getRunAuditReport(runId: string): Promise<string> {
+  return apiTextRequest(`/runs/${encodeURIComponent(runId)}/audit-report`);
+}
+
+export async function getRunReportDebate(runId: string): Promise<string> {
+  return apiTextRequest(`/runs/${encodeURIComponent(runId)}/report-debate`);
+}
+
 export async function getRunVisualization(
   runId: string,
   maxPoints = 900,

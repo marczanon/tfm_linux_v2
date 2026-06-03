@@ -53,7 +53,9 @@ from codigo.app.services.run_registry import (
     RunComparison,
     compare_runs,
     get_run,
+    get_run_audit_report,
     get_run_artifacts,
+    get_run_report_debate,
     list_runs,
 )
 from codigo.app.services.run_visualization import build_run_visualization
@@ -351,6 +353,44 @@ async def read_run_report(run_id: str, request: Request) -> PlainTextResponse:
     try:
         content = report_path.read_text(encoding="utf-8")
     except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return PlainTextResponse(content, media_type="text/markdown")
+
+
+@router.get("/runs/{run_id}/audit-report", response_class=PlainTextResponse)
+async def read_run_audit_report(
+    run_id: str,
+    request: Request,
+) -> PlainTextResponse:
+    """Devuelve la auditoria humana de ejecucion separada del informe final."""
+
+    try:
+        content = get_run_audit_report(run_id, _runs_dir(request))
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"audit report not found for run: {run_id}",
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return PlainTextResponse(content, media_type="text/markdown")
+
+
+@router.get("/runs/{run_id}/report-debate", response_class=PlainTextResponse)
+async def read_run_report_debate(
+    run_id: str,
+    request: Request,
+) -> PlainTextResponse:
+    """Devuelve el debate controlado del informe final."""
+
+    try:
+        content = get_run_report_debate(run_id, _runs_dir(request))
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"report debate not found for run: {run_id}",
+        ) from exc
+    except (OSError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return PlainTextResponse(content, media_type="text/markdown")
 

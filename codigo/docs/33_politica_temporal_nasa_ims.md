@@ -34,8 +34,9 @@ cada `run_id`:
 
 - el tramo inicial se etiqueta como `normal`;
 - el tramo posterior se etiqueta como `degradation`;
-- las etiquetas se declaran como `temporal_proxy_v1`;
-- `official_nasa_labels` queda siempre en `false`.
+- las etiquetas se declaran como `label_source=temporal_proxy` y
+  `label_policy_id=nasa_ims_temporal_v1`;
+- `official_nasa_labels` y `official_window_labels` quedan siempre en `false`.
 
 Esto permite entrenar detectores de anomalias con ventanas nominales iniciales
 y evaluar contra una degradacion proxy, pero las metricas resultantes son
@@ -45,6 +46,20 @@ evidencia metodologica, no un resultado oficial sobre NASA IMS.
 
 La politica escribe `split_hint` en `metadata_json` para evitar que el ejecutor
 de estructuracion tenga que deducir particiones por su cuenta.
+
+Ademas, conserva los metadatos temporales/fallo del manifiesto comun y anade:
+
+```text
+label_source = "temporal_proxy"
+label_granularity = "proxy_temporal"
+label_policy_id = "nasa_ims_temporal_v1"
+official_nasa_labels = false
+official_window_labels = false
+split_hint
+split_source
+temporal_order_index
+temporal_phase
+```
 
 Para cada secuencia temporal:
 

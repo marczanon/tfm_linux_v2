@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from collections import Counter, defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,9 +50,20 @@ TIME_DOMAIN_FULL_FEATURES = [
 METADATA_FIELDS = [
     "window_id",
     "file_id",
+    "source_path",
+    "condition_id",
+    "asset_id",
+    "run_id",
+    "label_source",
+    "label_granularity",
     "window_index",
     "start",
     "end",
+    "timestamp_start",
+    "timestamp_end",
+    "time_since_start_seconds",
+    "time_to_failure_seconds",
+    "relative_life",
     "split",
     "label",
     "target",
@@ -255,10 +266,17 @@ def _load_clean_file(path: Path, config: StructuringConfig) -> dict[str, Any]:
             "path": path,
             "signal": np.asarray(data["signal"], dtype=np.float32).ravel(),
             "file_id": str(data["file_id"].item()),
+            "source_path": _npz_text(data, "source_path", ""),
             "label": str(data["label"].item()),
             "fault_type": str(data["fault_type"].item() or ""),
+            "condition_id": _npz_text(data, "condition_id", ""),
+            "asset_id": _npz_text(data, "asset_id", ""),
+            "run_id": _npz_text(data, "run_id", ""),
+            "timestamp_start": _parse_datetime(_npz_text(data, "timestamp_start", "")),
+            "timestamp_end": _parse_datetime(_npz_text(data, "timestamp_end", "")),
             "sample_rate_hz": sample_rate,
             "channel": channel,
+            "metadata_json": metadata,
             "split_hint": _split_hint(metadata),
         }
 
@@ -274,7 +292,10 @@ def _load_clean_file_metadata(path: Path) -> dict[str, Any]:
             "label": str(data["label"].item()),
             "fault_type": _npz_text(data, "fault_type", ""),
             "condition_id": _npz_text(data, "condition_id", ""),
+            "asset_id": _npz_text(data, "asset_id", ""),
             "run_id": _npz_text(data, "run_id", ""),
+            "timestamp_start": _parse_datetime(_npz_text(data, "timestamp_start", "")),
+            "timestamp_end": _parse_datetime(_npz_text(data, "timestamp_end", "")),
             "sample_rate_hz": int(data["sample_rate_hz"].item()),
             "channel": str(data["channel"].item()),
             "n_samples": int(signal.size),
@@ -577,11 +598,19 @@ def _window_files(
     rows: list[dict[str, Any]] = []
     windows: list[np.ndarray] = []
     step = max(1, int(config.window_size * (1 - config.overlap)))
+    temporal_context = _temporal_context(files)
     for item in files:
         signal = item["signal"]
         for index, start in enumerate(range(0, signal.size - config.window_size + 1, step)):
             window = signal[start : start + config.window_size]
-            row = _metadata_row(item, index, start, split_by_file[item["file_id"]], config)
+            row = _metadata_row(
+                item,
+                index,
+                start,
+                split_by_file[item["file_id"]],
+                config,
+                temporal_context,
+            )
             row.update(_feature_values(window, config.features))
             rows.append(row)
             windows.append(window)
@@ -594,17 +623,39 @@ def _metadata_row(
     start: int,
     split: str,
     config: StructuringConfig,
+    temporal_context: dict[str, dict[str, datetime | None]],
 ) -> dict[str, Any]:
     file_id = item["file_id"]
     target = 0 if item["label"] == "normal" else 1
     if config.label_mode == "fault_type":
         target = item["fault_type"] or "normal"
+    window_start = _window_timestamp(item.get("timestamp_start"), start, item["sample_rate_hz"])
+    window_end = _window_timestamp(
+        item.get("timestamp_start"),
+        start + config.window_size,
+        item["sample_rate_hz"],
+    )
+    temporal = _window_temporal_metrics(item, window_start, temporal_context)
     return {
         "window_id": f"{file_id}_{index:06d}",
         "file_id": file_id,
+        "source_path": item.get("source_path", ""),
+        "condition_id": item.get("condition_id", ""),
+        "asset_id": item.get("asset_id", ""),
+        "run_id": item.get("run_id", ""),
+        "label_source": item.get("metadata_json", {}).get("label_source", ""),
+        "label_granularity": item.get("metadata_json", {}).get(
+            "label_granularity",
+            "",
+        ),
         "window_index": index,
         "start": start,
         "end": start + config.window_size,
+        "timestamp_start": _datetime_text(window_start),
+        "timestamp_end": _datetime_text(window_end),
+        "time_since_start_seconds": temporal["time_since_start_seconds"],
+        "time_to_failure_seconds": temporal["time_to_failure_seconds"],
+        "relative_life": temporal["relative_life"],
         "split": split,
         "label": item["label"],
         "target": target,
@@ -612,6 +663,98 @@ def _metadata_row(
         "sample_rate_hz": item["sample_rate_hz"],
         "channel": item["channel"],
     }
+
+
+def _temporal_context(
+    files: list[dict[str, Any]],
+) -> dict[str, dict[str, datetime | None]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in files:
+        grouped[_temporal_group_id(item)].append(item)
+
+    context: dict[str, dict[str, datetime | None]] = {}
+    for group_id, group_items in grouped.items():
+        starts = [
+            timestamp
+            for item in group_items
+            for timestamp in [item.get("timestamp_start")]
+            if isinstance(timestamp, datetime)
+        ]
+        failures = [
+            failure
+            for item in group_items
+            for failure in [_parse_datetime(item["metadata_json"].get("failure_event_time"))]
+            if failure is not None
+        ]
+        context[group_id] = {
+            "run_start": min(starts) if starts else None,
+            "failure_event_time": max(failures) if failures else None,
+        }
+    return context
+
+
+def _window_temporal_metrics(
+    item: dict[str, Any],
+    window_start: datetime | None,
+    temporal_context: dict[str, dict[str, datetime | None]],
+) -> dict[str, float | None]:
+    context = temporal_context.get(_temporal_group_id(item), {})
+    run_start = context.get("run_start")
+    failure_event_time = context.get("failure_event_time")
+    time_since_start = _seconds_between(run_start, window_start)
+    time_to_failure = _seconds_between(window_start, failure_event_time)
+    relative_life = None
+    total_life = _seconds_between(run_start, failure_event_time)
+    if (
+        time_since_start is not None
+        and total_life is not None
+        and total_life > 0
+    ):
+        relative_life = min(1.0, max(0.0, time_since_start / total_life))
+    return {
+        "time_since_start_seconds": time_since_start,
+        "time_to_failure_seconds": time_to_failure,
+        "relative_life": relative_life,
+    }
+
+
+def _temporal_group_id(item: dict[str, Any]) -> str:
+    return str(item.get("run_id") or item.get("file_id") or "unknown_run")
+
+
+def _window_timestamp(
+    base: datetime | None,
+    sample_offset: int,
+    sample_rate_hz: int | float,
+) -> datetime | None:
+    if base is None or sample_rate_hz <= 0:
+        return None
+    return base + timedelta(seconds=sample_offset / float(sample_rate_hz))
+
+
+def _seconds_between(
+    start: datetime | None,
+    end: datetime | None,
+) -> float | None:
+    if start is None or end is None:
+        return None
+    return float((end - start).total_seconds())
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
+def _datetime_text(value: datetime | None) -> str:
+    return "" if value is None else value.isoformat()
 
 
 def _feature_values(window: np.ndarray, names: list[str]) -> dict[str, float]:
