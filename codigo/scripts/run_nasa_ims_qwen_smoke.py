@@ -210,8 +210,9 @@ def _agents(client: OllamaJSONClient) -> PipelineAgents:
             llm_client=client,
             use_llm=True,
         ),
-        modeler=lambda state: decide_modeling_action(
+        modeler=lambda state, memory_context=None: decide_modeling_action(
             state,
+            memory_context=memory_context,
             llm_client=client,
             use_llm=True,
         ),

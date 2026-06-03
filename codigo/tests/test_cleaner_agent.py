@@ -155,6 +155,57 @@ class CleanerAgentTests(unittest.TestCase):
         self.assertIn("needs_channel_selection", prompt)
         self.assertIn("clean_DE_time_to_12000_hz", prompt)
 
+    def test_llm_cleaner_receives_run_to_failure_temporal_context(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-cleaner-temporal-test",
+            run_id="run-cleaner-temporal-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="proxy_temporal",
+            label_source="temporal_proxy",
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        client = FakeLLMClient(
+            {
+                "agent_name": "cleaner",
+                "decision_id": "run-cleaner-temporal-001:cleaner:001",
+                "rationale": (
+                    "Keep channel_1 and avoid normalization to preserve temporal "
+                    "score continuity."
+                ),
+                "confidence": 0.88,
+                "cleaning_config": {
+                    "strategy_id": "nasa_ims_bearing_clean_llm_v1",
+                    "remove_non_finite": True,
+                    "resample_to_hz": 20000,
+                    "normalization": "none",
+                    "selected_channel": "channel_1",
+                    "audit_log_path": "codigo/data/processed/nasa_ims_bearing/cleaning_summary.json",
+                },
+                "expected_artifact_path": (
+                    "codigo/data/processed/nasa_ims_bearing/clean_signals"
+                ),
+                "warnings": [],
+            }
+        )
+
+        decide_cleaning_action(state, llm_client=client, use_llm=True)
+
+        prompt = client.messages[1].content
+        self.assertIn("Contexto temporal del perfil", prompt)
+        self.assertIn("run_to_failure_degradation", prompt)
+        self.assertIn("signal_quality_gate_for_temporal_monitoring", prompt)
+        self.assertIn("continuidad temporal", prompt)
+        self.assertIn("El cleaner no decide fallos ni RUL", prompt)
+
     def test_invalid_llm_cleaning_decision_falls_back(self):
         state = validate_state(
             create_initial_cwru_state(

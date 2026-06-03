@@ -16,6 +16,12 @@ class VisualizationMetric(StrictBaseModel):
     label: str = Field(min_length=1)
     value: float | None = None
     higher_is_better: bool = True
+    metric_family: Literal[
+        "binary_classification",
+        "run_to_failure_degradation",
+    ] = "binary_classification"
+    value_kind: Literal["ratio", "seconds", "count", "score"] = "ratio"
+    note: str | None = None
 
 
 class ProjectionPoint(StrictBaseModel):
@@ -84,8 +90,16 @@ class TemporalRunSeries(StrictBaseModel):
     first_alert_x: float | None = None
     first_alert_time: str | None = None
     first_alert_time_to_failure_seconds: float | None = None
+    first_persistent_alert_x: float | None = None
+    first_persistent_alert_time: str | None = None
+    first_persistent_alert_time_to_failure_seconds: float | None = None
+    persistent_alert_min_windows: NonNegativeInt = 3
     failure_x: float | None = None
     failure_time: str | None = None
+    failure_reference: str = Field(
+        default="historic_replay",
+        min_length=1,
+    )
     score_min: float | None = None
     score_max: float | None = None
     current_x: float | None = None
@@ -101,6 +115,9 @@ class TemporalRunSeries(StrictBaseModel):
     alert_points: NonNegativeInt = 0
     warning_points: NonNegativeInt = 0
     critical_points: NonNegativeInt = 0
+    isolated_alert_points: NonNegativeInt = 0
+    alert_episodes: NonNegativeInt = 0
+    longest_alert_streak: NonNegativeInt = 0
 
 
 class TemporalSeriesData(StrictBaseModel):
@@ -114,16 +131,59 @@ class TemporalSeriesData(StrictBaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class AgentOperationalRecommendation(StrictBaseModel):
+    """Recomendacion agentica compacta para el panel operacional."""
+
+    available: bool = False
+    source_agent: str | None = None
+    decision_id: str | None = None
+    status: Literal[
+        "approved",
+        "caution",
+        "needs_revision",
+        "blocked",
+        "unavailable",
+    ] = "unavailable"
+    title: str = Field(default="Sin recomendacion agentica disponible", min_length=1)
+    summary: str = Field(default="No hay decision agentica persistida.", min_length=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    next_action: str | None = None
+    operational_assessment: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    debate_points: list[str] = Field(default_factory=list)
+    guardrail_checks: list[str] = Field(default_factory=list)
+    modeler_summary: str | None = None
+
+
 class RunVisualizationData(StrictBaseModel):
     """Datos compactos para la pestaña de visualizacion."""
 
     run_id: str = Field(min_length=1)
     dataset: str = Field(min_length=1)
+    supervision_profile: str | None = None
+    label_source: str | None = None
+    label_granularity: str | None = None
+    model_name: str | None = None
+    metric_families: list[str] = Field(default_factory=list)
     metrics: list[VisualizationMetric]
+    primary_metrics: list[VisualizationMetric] = Field(default_factory=list)
+    auxiliary_metrics: list[VisualizationMetric] = Field(default_factory=list)
+    binary_metric_context: dict[str, str] = Field(default_factory=dict)
     projection_available: bool
     projection_points: list[ProjectionPoint] = Field(default_factory=list)
     projection_boundary: ProjectionBoundary | None = None
+    projection_role: Literal["primary", "diagnostic"] = "diagnostic"
+    projection_explanation: str = Field(
+        default=(
+            "La proyeccion PCA 2D es una vista diagnostica de features; "
+            "no sustituye las metricas temporales ni la frontera real del modelo."
+        ),
+        min_length=1,
+    )
     temporal_series: TemporalSeriesData | None = None
+    agent_recommendation: AgentOperationalRecommendation | None = None
     n_points_total: NonNegativeInt = 0
     n_points_sampled: NonNegativeInt = 0
     source_paths: dict[str, str] = Field(default_factory=dict)

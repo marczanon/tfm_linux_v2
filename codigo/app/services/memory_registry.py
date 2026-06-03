@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 
 from codigo.app.schemas.api_memory import (
+    MemoryCurationResponse,
     MemoryCollectionSummary,
     MemoryRecordSummary,
 )
@@ -82,6 +83,68 @@ def get_memory_record(
     raise FileNotFoundError(f"memory record not found: {memory_record_id}")
 
 
+def curate_memory_record(
+    memory_dir: Path | str,
+    memory_record_id: str,
+    *,
+    action: str,
+    reason: str,
+    reviewer: str | None = None,
+) -> MemoryCurationResponse:
+    """Excluye o restaura un recuerdo sin borrar su trazabilidad."""
+
+    store = LocalJsonVectorMemoryStore(memory_dir)
+    record = get_memory_record(memory_dir, memory_record_id)
+    tags = _curation_tags(record.tags, action=action, reviewer=reviewer)
+    if action == "exclude":
+        updated = record.model_copy(
+            update={
+                "reusable_as_context": False,
+                "exclude_from_context": True,
+                "tags": tags,
+            }
+        )
+    elif action == "restore":
+        if record.memory_role == "excluded":
+            raise ValueError(
+                "memory records with role=excluded cannot be restored without reindexing"
+            )
+        updated = record.model_copy(
+            update={
+                "reusable_as_context": True,
+                "exclude_from_context": False,
+                "tags": tags,
+            }
+        )
+    else:
+        raise ValueError(f"unsupported memory curation action: {action}")
+    stored = store.upsert(updated)
+    return MemoryCurationResponse(
+        memory_record_id=stored.memory_record_id,
+        action=action,  # type: ignore[arg-type]
+        reason=reason,
+        record=stored,
+    )
+
+
+def delete_memory_record(
+    memory_dir: Path | str,
+    memory_record_id: str,
+    *,
+    reason: str | None = None,
+) -> MemoryCurationResponse:
+    """Borra un recuerdo del indice local."""
+
+    store = LocalJsonVectorMemoryStore(memory_dir)
+    deleted = store.delete(memory_record_id)
+    return MemoryCurationResponse(
+        memory_record_id=deleted.memory_record_id,
+        action="delete",
+        reason=reason,
+        record=deleted,
+    )
+
+
 def _collection_summary(
     target_agent: AgentMemoryTarget,
     collection_name: AgentMemoryCollection,
@@ -142,6 +205,24 @@ def _matches_filters(
         if search_text.strip().lower() not in haystack:
             return False
     return True
+
+
+def _curation_tags(
+    tags: list[str],
+    *,
+    action: str,
+    reviewer: str | None,
+) -> list[str]:
+    next_tags = [tag for tag in tags if not tag.startswith("manual_")]
+    next_tags.extend(["manual_curation", f"manual_{action}"])
+    if reviewer:
+        safe_reviewer = "".join(
+            char.lower() if char.isalnum() else "_"
+            for char in reviewer.strip()
+        ).strip("_")
+        if safe_reviewer:
+            next_tags.append(f"curated_by_{safe_reviewer[:40]}")
+    return sorted(dict.fromkeys(next_tags))
 
 
 def _record_summary(record: ReasoningMemoryRecord) -> MemoryRecordSummary:

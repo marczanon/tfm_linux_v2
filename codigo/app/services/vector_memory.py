@@ -7,11 +7,13 @@ import json
 import math
 import os
 import re
+import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import Field
 
@@ -35,6 +37,8 @@ from codigo.app.schemas.reasoning import (
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+")
 DEFAULT_OLLAMA_EMBEDDING_MODEL = "qwen3-embedding:0.6b"
+DEFAULT_VECTOR_MEMORY_DIR = Path("codigo/reports/reasoning_memory")
+DEFAULT_QDRANT_HOST = "http://127.0.0.1:6333"
 
 COLLECTION_BY_AGENT: dict[AgentMemoryTarget, AgentMemoryCollection] = {
     "cleaner": "cleaner_memory",
@@ -80,6 +84,18 @@ class LocalHashEmbeddingModel(StrictBaseModel):
 
 class EmbeddingCallError(RuntimeError):
     """Error controlado durante la generacion de embeddings."""
+
+
+class QdrantMemoryError(RuntimeError):
+    """Error controlado durante llamadas al backend Qdrant."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class VectorMemoryConfigError(RuntimeError):
+    """Error de configuracion del backend de memoria vectorial."""
 
 
 @runtime_checkable
@@ -180,6 +196,9 @@ class VectorMemoryStore(Protocol):
     ) -> list[ReasoningMemoryRecord]:
         ...
 
+    def delete(self, memory_record_id: str) -> ReasoningMemoryRecord:
+        ...
+
     def query(self, query: AgentMemoryQuery) -> RetrievedMemoryContext:
         ...
 
@@ -232,6 +251,19 @@ class LocalJsonVectorMemoryStore:
             entries = self._load_entries(collection)  # type: ignore[arg-type]
             records.extend(entry.record for entry in _sorted_entries(entries))
         return records
+
+    def delete(self, memory_record_id: str) -> ReasoningMemoryRecord:
+        """Elimina un recuerdo del indice local por identificador."""
+
+        for path in sorted(self.root_dir.glob("*.json")):
+            collection_name = path.stem
+            entries = self._load_entries(collection_name)
+            entry = entries.pop(memory_record_id, None)
+            if entry is None:
+                continue
+            self._write_entries(collection_name, entries)  # type: ignore[arg-type]
+            return entry.record
+        raise FileNotFoundError(f"memory record not found: {memory_record_id}")
 
     def query(self, query: AgentMemoryQuery) -> RetrievedMemoryContext:
         query_vector = self.embedding_model.embed(_query_text(query))
@@ -310,7 +342,7 @@ class LocalJsonVectorMemoryStore:
 
     def _write_entries(
         self,
-        collection_name: AgentMemoryCollection,
+        collection_name: AgentMemoryCollection | str,
         entries: dict[str, StoredMemoryVector],
     ) -> None:
         payload = {
@@ -326,6 +358,313 @@ class LocalJsonVectorMemoryStore:
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp_path.replace(path)
+
+
+class QdrantVectorMemoryStore:
+    """Backend Qdrant opcional compatible con `VectorMemoryStore`."""
+
+    backend_name = "qdrant_vector_memory_store"
+
+    def __init__(
+        self,
+        *,
+        host: str = "http://127.0.0.1:6333",
+        api_key: str | None = None,
+        embedding_model: EmbeddingProvider | None = None,
+        timeout_seconds: float = 10.0,
+        distance: str = "Cosine",
+    ) -> None:
+        self.host = host.rstrip("/")
+        self.api_key = api_key
+        self.embedding_model = embedding_model or LocalHashEmbeddingModel()
+        self.timeout_seconds = timeout_seconds
+        self.distance = distance
+
+    def upsert(self, record: ReasoningMemoryRecord) -> ReasoningMemoryRecord:
+        vector = self.embedding_model.embed(_record_text(record))
+        self._ensure_collection(record.collection_name, len(vector))
+        enriched = self._with_embedding_metadata(record, embedding_dimension=len(vector))
+        self._request_json(
+            "PUT",
+            f"/collections/{_url_part(enriched.collection_name)}/points?wait=true",
+            {
+                "points": [
+                    {
+                        "id": _qdrant_point_id(enriched.memory_record_id),
+                        "vector": vector,
+                        "payload": _qdrant_payload(enriched),
+                    }
+                ]
+            },
+        )
+        return enriched
+
+    def rebuild(
+        self,
+        records: list[ReasoningMemoryRecord],
+        *,
+        clear_existing: bool = True,
+    ) -> list[ReasoningMemoryRecord]:
+        if clear_existing:
+            collection_names = {
+                *COLLECTION_BY_AGENT.values(),
+                *(record.collection_name for record in records),
+            }
+            for collection_name in sorted(collection_names):
+                self._delete_collection_if_exists(collection_name)
+        return [self.upsert(record) for record in records]
+
+    def list_records(
+        self,
+        collection_name: AgentMemoryCollection | None = None,
+    ) -> list[ReasoningMemoryRecord]:
+        collection_names = (
+            [collection_name]
+            if collection_name is not None
+            else sorted(set(COLLECTION_BY_AGENT.values()))
+        )
+        records: list[ReasoningMemoryRecord] = []
+        for name in collection_names:
+            records.extend(self._scroll_collection(name))
+        records.sort(key=lambda record: (record.created_at, record.memory_record_id), reverse=True)
+        return records
+
+    def delete(self, memory_record_id: str) -> ReasoningMemoryRecord:
+        point_id = _qdrant_point_id(memory_record_id)
+        for collection_name in sorted(set(COLLECTION_BY_AGENT.values())):
+            records = self._scroll_collection(collection_name)
+            match = next(
+                (
+                    record
+                    for record in records
+                    if record.memory_record_id == memory_record_id
+                ),
+                None,
+            )
+            if match is None:
+                continue
+            self._request_json(
+                "POST",
+                f"/collections/{_url_part(collection_name)}/points/delete?wait=true",
+                {"points": [point_id]},
+            )
+            return match
+        raise FileNotFoundError(f"memory record not found: {memory_record_id}")
+
+    def query(self, query: AgentMemoryQuery) -> RetrievedMemoryContext:
+        query_vector = self.embedding_model.embed(_query_text(query))
+        retrieved: list[RetrievedMemoryItem] = []
+        for collection_name in self._candidate_collection_names(query):
+            query_payload = {
+                "query": query_vector,
+                "limit": max(query.top_k * 10, 20),
+                "with_payload": True,
+                "with_vector": False,
+            }
+            response = self._query_collection(collection_name, query_payload)
+            if response is None:
+                continue
+            for raw_point in _qdrant_result_list(response):
+                record = _record_from_qdrant_payload(raw_point.get("payload"))
+                if record is None or not _record_matches_query(record, query):
+                    continue
+                similarity = _qdrant_similarity(raw_point.get("score"))
+                if similarity < query.min_similarity:
+                    continue
+                retrieved.append(
+                    RetrievedMemoryItem(
+                        record=record,
+                        similarity=similarity,
+                        retrieval_use=RETRIEVAL_USE_BY_ROLE[record.memory_role],
+                        rank=1,
+                    )
+                )
+        retrieved.sort(
+            key=lambda item: (-item.similarity, item.record.memory_record_id)
+        )
+        ranked = [
+            item.model_copy(update={"rank": index})
+            for index, item in enumerate(retrieved[: query.top_k], start=1)
+        ]
+        return RetrievedMemoryContext(
+            context_id=f"{query.query_id}:retrieved_memory_context",
+            query=query,
+            items=ranked,
+            retrieval_backend=self.backend_name,
+            embedding_model=self.embedding_model.identifier,
+        )
+
+    def _candidate_collection_names(
+        self,
+        query: AgentMemoryQuery,
+    ) -> list[AgentMemoryCollection]:
+        collection_names = [COLLECTION_BY_AGENT[query.target_agent]]
+        if query.target_agent != "shared_methodology":
+            collection_names.append("shared_methodology_memory")
+        return collection_names
+
+    def _query_collection(
+        self,
+        collection_name: AgentMemoryCollection | str,
+        query_payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        try:
+            return self._request_json(
+                "POST",
+                f"/collections/{_url_part(collection_name)}/points/query",
+                query_payload,
+            )
+        except QdrantMemoryError as exc:
+            if exc.status_code == 404:
+                return None
+            if exc.status_code not in {400, 405}:
+                raise
+
+        legacy_payload = {
+            **query_payload,
+            "vector": query_payload["query"],
+        }
+        legacy_payload.pop("query", None)
+        try:
+            return self._request_json(
+                "POST",
+                f"/collections/{_url_part(collection_name)}/points/search",
+                legacy_payload,
+            )
+        except QdrantMemoryError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
+    def _scroll_collection(
+        self,
+        collection_name: AgentMemoryCollection | str,
+    ) -> list[ReasoningMemoryRecord]:
+        records: list[ReasoningMemoryRecord] = []
+        offset: str | int | None = None
+        while True:
+            payload: dict[str, Any] = {
+                "limit": 128,
+                "with_payload": True,
+                "with_vector": False,
+            }
+            if offset is not None:
+                payload["offset"] = offset
+            try:
+                response = self._request_json(
+                    "POST",
+                    f"/collections/{_url_part(collection_name)}/points/scroll",
+                    payload,
+                )
+            except QdrantMemoryError as exc:
+                if exc.status_code == 404:
+                    return []
+                raise
+            result = response.get("result") if isinstance(response, dict) else None
+            if not isinstance(result, dict):
+                return records
+            raw_points = result.get("points", [])
+            if not isinstance(raw_points, list):
+                return records
+            for raw_point in raw_points:
+                if not isinstance(raw_point, dict):
+                    continue
+                record = _record_from_qdrant_payload(raw_point.get("payload"))
+                if record is not None:
+                    records.append(record)
+            next_offset = result.get("next_page_offset")
+            if next_offset in {None, offset}:
+                return records
+            offset = next_offset
+
+    def _ensure_collection(
+        self,
+        collection_name: AgentMemoryCollection | str,
+        vector_size: int,
+    ) -> None:
+        if self._collection_exists(collection_name):
+            return
+        self._request_json(
+            "PUT",
+            f"/collections/{_url_part(collection_name)}",
+            {
+                "vectors": {
+                    "size": vector_size,
+                    "distance": self.distance,
+                }
+            },
+        )
+
+    def _collection_exists(self, collection_name: AgentMemoryCollection | str) -> bool:
+        try:
+            self._request_json("GET", f"/collections/{_url_part(collection_name)}")
+            return True
+        except QdrantMemoryError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
+
+    def _delete_collection_if_exists(
+        self,
+        collection_name: AgentMemoryCollection | str,
+    ) -> None:
+        try:
+            self._request_json("DELETE", f"/collections/{_url_part(collection_name)}")
+        except QdrantMemoryError as exc:
+            if exc.status_code != 404:
+                raise
+
+    def _with_embedding_metadata(
+        self,
+        record: ReasoningMemoryRecord,
+        *,
+        embedding_dimension: int,
+    ) -> ReasoningMemoryRecord:
+        vector_id = record.vector_id or f"{record.collection_name}:{record.memory_record_id}"
+        return record.model_copy(
+            update={
+                "embedding_model": self.embedding_model.model_name,
+                "embedding_version": self.embedding_model.version,
+                "embedding_dimension": embedding_dimension,
+                "vector_id": vector_id,
+            }
+        )
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["api-key"] = self.api_key
+        request = urllib.request.Request(
+            f"{self.host}{path}",
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise QdrantMemoryError(
+                f"qdrant call failed with HTTP {exc.code}: {exc.reason}",
+                status_code=exc.code,
+            ) from exc
+        except (OSError, urllib.error.URLError) as exc:
+            raise QdrantMemoryError(f"qdrant call failed: {exc}") from exc
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise QdrantMemoryError("qdrant response is not valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise QdrantMemoryError("qdrant response must be a JSON object")
+        return parsed
 
 
 def memory_record_from_postmortem(
@@ -489,6 +828,36 @@ def get_default_embedding_provider() -> EmbeddingProvider:
     )
 
 
+def get_default_vector_memory_store(
+    root_dir: str | Path = DEFAULT_VECTOR_MEMORY_DIR,
+    *,
+    embedding_model: EmbeddingProvider | None = None,
+) -> VectorMemoryStore:
+    """Crea el backend de memoria configurado sin acoplar agentes al store."""
+
+    backend = os.getenv("TFM_MEMORY_BACKEND", "json").strip().lower()
+    provider = embedding_model or get_default_embedding_provider()
+    if backend in {"json", "local_json", "local"}:
+        return LocalJsonVectorMemoryStore(root_dir, embedding_model=provider)
+    if backend == "qdrant":
+        host = (
+            os.getenv("TFM_QDRANT_HOST")
+            or os.getenv("QDRANT_URL")
+            or DEFAULT_QDRANT_HOST
+        )
+        api_key = os.getenv("TFM_QDRANT_API_KEY") or os.getenv("QDRANT_API_KEY")
+        timeout = float(os.getenv("TFM_QDRANT_TIMEOUT_SECONDS", "10"))
+        distance = os.getenv("TFM_QDRANT_DISTANCE", "Cosine")
+        return QdrantVectorMemoryStore(
+            host=host,
+            api_key=api_key,
+            embedding_model=provider,
+            timeout_seconds=timeout,
+            distance=distance,
+        )
+    raise VectorMemoryConfigError(f"unsupported TFM_MEMORY_BACKEND: {backend}")
+
+
 def collection_for_agent(target_agent: AgentMemoryTarget) -> AgentMemoryCollection:
     """Devuelve la coleccion vectorial canonica de un agente."""
 
@@ -609,6 +978,8 @@ def _episode_candidate_content(episode: DecisionEpisode) -> str:
         f"Chosen action: {episode.chosen_action}",
         f"Expected effect: {episode.expected_effect or 'n/a'}",
         f"Execution result: {episode.execution_result_summary or 'n/a'}",
+        f"Before metrics: {json.dumps(episode.before_metrics, sort_keys=True)}",
+        f"After metrics: {json.dumps(episode.after_metrics, sort_keys=True)}",
         "Evidence used: " + ", ".join(episode.evidence_used),
         "Retrieved memory ids: " + ", ".join(episode.retrieved_memory_record_ids),
         "Tradeoffs observed: " + ", ".join(episode.tradeoffs_observed),
@@ -687,6 +1058,7 @@ def _episode_candidate_tags(
         episode.decision_type,
         episode.outcome,
         *episode.failure_modes,
+        *episode.tradeoffs_observed,
         *episode.reusable_lessons,
     ]
     if episode.dataset is not None:
@@ -794,6 +1166,60 @@ def _embedding_provider_metadata(provider: EmbeddingProvider) -> dict[str, str |
     if isinstance(dimension, int):
         metadata["dimension"] = dimension
     return metadata
+
+
+def _qdrant_point_id(memory_record_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"tfm-memory:{memory_record_id}"))
+
+
+def _qdrant_payload(record: ReasoningMemoryRecord) -> dict[str, Any]:
+    return {
+        "memory_record_id": record.memory_record_id,
+        "collection_name": record.collection_name,
+        "target_agent": record.target_agent,
+        "dataset": record.dataset,
+        "source_type": record.source_type,
+        "memory_role": record.memory_role,
+        "human_verdict": record.human_verdict,
+        "reusable_as_context": record.reusable_as_context,
+        "exclude_from_context": record.exclude_from_context,
+        "run_id": record.run_id,
+        "decision_id": record.decision_id,
+        "tags": record.tags,
+        "record": record.model_dump(mode="json"),
+        "text": _record_text(record),
+    }
+
+
+def _record_from_qdrant_payload(payload: Any) -> ReasoningMemoryRecord | None:
+    if not isinstance(payload, dict):
+        return None
+    record_payload = payload.get("record")
+    if not isinstance(record_payload, dict):
+        return None
+    return ReasoningMemoryRecord.model_validate(record_payload)
+
+
+def _qdrant_result_list(response: dict[str, Any]) -> list[dict[str, Any]]:
+    result = response.get("result")
+    if isinstance(result, dict):
+        points = result.get("points")
+        if not isinstance(points, list):
+            return []
+        return [item for item in points if isinstance(item, dict)]
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    return []
+
+
+def _qdrant_similarity(score: Any) -> float:
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        return 0.0
+    return max(0.0, min(1.0, float(score)))
+
+
+def _url_part(value: str) -> str:
+    return urllib.parse.quote(value, safe="")
 
 
 def _sorted_entries(

@@ -32,6 +32,7 @@ from codigo.app.services.llm import (
     LLMMessage,
     get_default_json_llm_client,
 )
+from codigo.app.services.agent_tools import agent_tool_catalog
 from codigo.app.services.vector_memory import VectorMemoryStore
 
 
@@ -45,11 +46,22 @@ SUPPORTED_HYPERPARAMETERS_BY_MODEL = {
     "one_class_svm": SKLEARN_OCSVM_PARAMS | {"threshold_quantile"},
     "pca_reconstruction_error": SKLEARN_PCA_PARAMS | {"threshold_quantile"},
 }
+RUN_TO_FAILURE_REQUIRED_TOOLS = {
+    "temporal_health_lookup",
+    "degradation_metrics_lookup",
+}
+RUN_TO_FAILURE_REQUIRED_TARGETS = {
+    "detected_before_failure_rate",
+    "mean_lead_time_to_failure",
+    "mean_false_alarm_rate_nominal",
+    "mean_score_trend_spearman",
+}
 
 
 def decide_modeling_action(
     state: TFMStateModel,
     *,
+    memory_context: RetrievedMemoryContext | None = None,
     llm_client: JSONLLMClient | None = None,
     use_llm: bool | None = None,
 ) -> ModelingDecision:
@@ -59,7 +71,11 @@ def decide_modeling_action(
     if should_use_llm:
         try:
             client = llm_client or get_default_json_llm_client()
-            return decide_modeling_action_with_llm(state, client)
+            return decide_modeling_action_with_llm(
+                state,
+                client,
+                memory_context=memory_context,
+            )
         except (LLMCallError, ValidationError, ValueError) as exc:
             fallback = decide_modeling_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
@@ -72,15 +88,17 @@ def decide_modeling_action(
 def decide_modeling_action_with_llm(
     state: TFMStateModel,
     llm_client: JSONLLMClient,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
 ) -> ModelingDecision:
     """Solicita al LLM una ModelingDecision y valida sus limites."""
 
     payload = llm_client.complete_json(
-        _modeler_messages(state),
+        _modeler_messages(state, memory_context=memory_context),
         json_schema=ModelingDecision.model_json_schema(),
     )
     decision = ModelingDecision.model_validate(payload)
-    _validate_modeling_decision_bounds(state, decision)
+    _validate_modeling_decision_bounds(state, decision, memory_context=memory_context)
     return decision
 
 
@@ -132,10 +150,36 @@ def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDec
                 "priorizando tendencia, primera alerta y falsas alarmas "
                 "nominales sobre una optimizacion binaria de F1."
             ),
+            evidence_refs=[
+                "tool:temporal_health_lookup",
+                "tool:degradation_metrics_lookup",
+                "temporal:run_to_failure_profile",
+                "temporal:first_persistent_alert",
+                "temporal:longest_alert_streak",
+                "metric:mean_lead_time_to_failure",
+                "metric:mean_false_alarm_rate_nominal",
+                "metric:mean_score_trend_spearman",
+                "label_source:temporal_proxy",
+            ],
             risk_notes=[
                 "Las etiquetas proxy o sinteticas no deben tratarse como ground truth oficial.",
                 "El umbral solo define alertas; la trayectoria del score tambien debe evaluarse.",
             ],
+            tool_names=[
+                "temporal_health_lookup",
+                "degradation_metrics_lookup",
+            ],
+            optimization_targets=[
+                "detected_before_failure_rate",
+                "mean_lead_time_to_failure",
+                "mean_false_alarm_rate_nominal",
+                "mean_score_trend_spearman",
+            ],
+            alert_policy=(
+                "Usar threshold_quantile como disparador auxiliar y evaluar "
+                "primer aviso sostenido, picos aislados, tendencia y falsas "
+                "alarmas nominales antes de aprobar la estrategia."
+            ),
         ),
         modeling_config=DEFAULT_PCA_MODELING_CONFIG,
         train_split="train",
@@ -168,6 +212,76 @@ def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDec
             ),
         ],
     )
+
+
+def build_modeler_memory_query(
+    state: TFMStateModel,
+    *,
+    top_k: int = 3,
+    min_similarity: float = 0.0,
+) -> AgentMemoryQuery:
+    """Construye una consulta RAG para la primera decision del modelador."""
+
+    features_path = _features_path_for_state(state)
+    query_text = "\n".join(
+        [
+            "Modeler initial decision for industrial anomaly detection.",
+            f"Dataset: {state.project_context.dataset}",
+            f"Objective: {state.project_context.objective}",
+            f"Supervision profile: {state.project_context.supervision_profile}",
+            f"Label source: {state.project_context.label_source}",
+            f"Features summary: {json.dumps(_features_summary_for_llm(features_path), ensure_ascii=True)}",
+            (
+                "Need prior lessons about supported model family, temporal "
+                "run-to-failure guardrails, threshold policy, false alarms, "
+                "lead time and cases where F1 should remain auxiliary."
+            ),
+        ]
+    )
+    return AgentMemoryQuery(
+        query_id=f"{state.run_id}:modeler:{_modeler_turn(state):03d}:memory_query",
+        target_agent="modeler",
+        query_text=query_text,
+        dataset=state.project_context.dataset,
+        run_id=state.run_id,
+        decision_id=f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
+        decision_context={
+            "current_stage": state.current_stage,
+            "supervision_profile": state.project_context.supervision_profile,
+            "label_source": state.project_context.label_source,
+            "model_name": (
+                None if state.modeling_config is None else state.modeling_config.model_name
+            ),
+            "has_features_path": bool(features_path),
+        },
+        allowed_memory_roles=[
+            "positive_example",
+            "negative_example",
+            "boundary_case",
+            "warning",
+            "methodology",
+            "evidence",
+        ],
+        top_k=top_k,
+        min_similarity=min_similarity,
+    )
+
+
+def retrieve_modeler_memory_context(
+    state: TFMStateModel,
+    *,
+    memory_store: VectorMemoryStore,
+    top_k: int = 3,
+    min_similarity: float = 0.0,
+) -> RetrievedMemoryContext:
+    """Recupera memoria supervisada para la primera decision del modelador."""
+
+    query = build_modeler_memory_query(
+        state,
+        top_k=top_k,
+        min_similarity=min_similarity,
+    )
+    return memory_store.query(query)
 
 
 def decide_modeling_retry_action(
@@ -366,7 +480,11 @@ def _should_use_llm(
     return os.getenv("TFM_MODELER_MODE", "").strip().lower() == "llm"
 
 
-def _modeler_messages(state: TFMStateModel) -> list[LLMMessage]:
+def _modeler_messages(
+    state: TFMStateModel,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> list[LLMMessage]:
     features_path = _features_path_for_state(state)
     return [
         LLMMessage(
@@ -390,8 +508,29 @@ def _modeler_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "Resumen de features:",
                     json.dumps(_features_summary_for_llm(features_path), indent=2, ensure_ascii=True),
                     "",
+                    "Herramientas agenticas disponibles:",
+                    json.dumps(_modeler_tool_catalog_for_llm(), indent=2, ensure_ascii=True),
+                    "",
+                    "Memoria recuperada para el modelador:",
+                    json.dumps(
+                        _memory_context_for_llm(memory_context),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
+                    "",
+                    "Guia derivada de la memoria recuperada:",
+                    json.dumps(
+                        _memory_modeling_guidance_for_llm(memory_context),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
+                    "",
                     "Formato JSON esperado:",
-                    json.dumps(_modeler_json_template(state), indent=2, ensure_ascii=True),
+                    json.dumps(
+                        _modeler_json_template(state, memory_context=memory_context),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
                     "",
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
@@ -435,6 +574,20 @@ def _modeler_messages(state: TFMStateModel) -> list[LLMMessage]:
                     (
                         "- expected_model_path debe ser la ruta esperada para "
                         "el model_name elegido."
+                    ),
+                    (
+                        "- La memoria recuperada es evidencia historica: puede "
+                        "informar la decision, pero no sustituye metricas, "
+                        "modelos soportados ni guardarrails."
+                    ),
+                    (
+                        "- Si usas una memoria recuperada, pon "
+                        "used_memory_context=true, cita sus memory_record_id y "
+                        "rellena memory_record_uses."
+                    ),
+                    (
+                        "- Si un recuerdo es warning o boundary_case, explica "
+                        "en risk_mitigation como evitas repetir su fallo."
                     ),
                     f"- decision_id debe ser: {state.run_id}:modeler:{_modeler_turn(state):03d}",
                 ]
@@ -607,7 +760,11 @@ def _modeler_retry_messages(
     ]
 
 
-def _modeler_json_template(state: TFMStateModel) -> dict[str, Any]:
+def _modeler_json_template(
+    state: TFMStateModel,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> dict[str, Any]:
     default_config = (
         DEFAULT_PCA_MODELING_CONFIG
         if _uses_temporal_degradation_profile(state)
@@ -620,11 +777,33 @@ def _modeler_json_template(state: TFMStateModel) -> dict[str, Any]:
                 "Usar un score temporal interpretable para degradacion y "
                 "evaluarlo por tendencia, primera alerta y falsas alarmas."
             ),
-            "evidence_refs": [],
+            "evidence_refs": [
+                "tool:temporal_health_lookup",
+                "tool:degradation_metrics_lookup",
+                "temporal:first_persistent_alert",
+                "temporal:longest_alert_streak",
+                "metric:mean_lead_time_to_failure",
+                "metric:mean_false_alarm_rate_nominal",
+                "metric:mean_score_trend_spearman",
+            ],
             "risk_notes": [
                 "No presentar etiquetas proxy o sinteticas como ground truth oficial.",
                 "No optimizar F1 como metrica principal del perfil run-to-failure.",
             ],
+            "tool_names": [
+                "temporal_health_lookup",
+                "degradation_metrics_lookup",
+            ],
+            "optimization_targets": [
+                "detected_before_failure_rate",
+                "mean_lead_time_to_failure",
+                "mean_false_alarm_rate_nominal",
+                "mean_score_trend_spearman",
+            ],
+            "alert_policy": (
+                "Umbral auxiliar con evaluacion por aviso sostenido, picos "
+                "aislados, tendencia y falsas alarmas nominales."
+            ),
         }
         if _uses_temporal_degradation_profile(state)
         else {
@@ -637,8 +816,15 @@ def _modeler_json_template(state: TFMStateModel) -> dict[str, Any]:
             "risk_notes": [
                 "Evitar optimizar solo threshold_quantile sin contrastar otra familia soportada."
             ],
+            "tool_names": ["evidence_lookup"],
+            "optimization_targets": ["recall", "false_positive_rate", "f1_score"],
+            "alert_policy": "Umbral de anomalia binaria derivado de validation.",
         }
     )
+    memory_ids = [
+        item.record.memory_record_id
+        for item in ([] if memory_context is None else memory_context.items)
+    ]
     return {
         "agent_name": "modeler",
         "decision_id": f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
@@ -650,6 +836,29 @@ def _modeler_json_template(state: TFMStateModel) -> dict[str, Any]:
         "validation_split": "validation",
         "expected_model_path": _expected_model_path(state, default_config),
         "comparison_candidates": _modeler_comparison_candidates_template(state),
+        "memory_context_id": None if memory_context is None else memory_context.context_id,
+        "used_memory_context": bool(memory_ids),
+        "memory_record_ids": memory_ids[:3],
+        "memory_usage_summary": (
+            None
+            if not memory_ids
+            else "Como influyen los recuerdos recuperados en la primera decision de modelado."
+        ),
+        "memory_record_uses": [
+            {
+                "memory_record_id": memory_id,
+                "usage": "adapted",
+                "influence_summary": (
+                    "Que aprendizaje concreto aporta este recuerdo a modelo, "
+                    "politica de alerta o guardarrail temporal."
+                ),
+                "risk_mitigation": (
+                    "Como se evita aplicar el recuerdo fuera de contexto o "
+                    "repetir un warning/caso frontera."
+                ),
+            }
+            for memory_id in memory_ids[:3]
+        ],
     }
 
 
@@ -868,6 +1077,22 @@ def _profile_specific_modeler_rules(state: TFMStateModel) -> list[str]:
             "- Incluye una limitacion en risk_notes si las etiquetas por "
             "ventana proceden de proxy temporal o datos sinteticos."
         ),
+        (
+            "- tool_names debe incluir temporal_health_lookup y "
+            "degradation_metrics_lookup."
+        ),
+        (
+            "- evidence_refs debe citar las herramientas usadas y al menos una "
+            "referencia temporal o metrica de degradacion."
+        ),
+        (
+            "- optimization_targets debe incluir deteccion antes de fallo, lead "
+            "time, falsas alarmas nominales y tendencia del score."
+        ),
+        (
+            "- alert_policy debe explicar como distinguir pico aislado, aviso "
+            "sostenido y umbral auxiliar."
+        ),
     ]
 
 
@@ -966,13 +1191,25 @@ def _features_summary_for_llm(features_path: str | None) -> dict[str, Any]:
     }
 
 
+def _modeler_tool_catalog_for_llm() -> list[dict[str, Any]]:
+    return [
+        {
+            "tool_name": spec.tool_name,
+            "effect": spec.effect,
+            "description": spec.description,
+            "input_schema": spec.input_schema,
+        }
+        for spec in agent_tool_catalog(agent_name="modeler")
+    ]
+
+
 def _memory_context_for_llm(
     memory_context: RetrievedMemoryContext | None,
 ) -> dict[str, Any]:
     if memory_context is None:
         return {
             "available": False,
-            "reason": "memory retrieval disabled for this retry decision",
+            "reason": "memory retrieval disabled for this modeler decision",
         }
     return {
         "available": True,
@@ -998,6 +1235,50 @@ def _memory_context_for_llm(
                 "tags": item.record.tags[:12],
             }
             for item in memory_context.items
+        ],
+    }
+
+
+def _memory_modeling_guidance_for_llm(
+    memory_context: RetrievedMemoryContext | None,
+) -> dict[str, Any]:
+    if memory_context is None or not memory_context.items:
+        return {
+            "available": False,
+            "recommended_attention": [],
+            "warning_memory_record_ids": [],
+            "boundary_memory_record_ids": [],
+            "source_memory_record_ids": [],
+        }
+    warning_ids = [
+        item.record.memory_record_id
+        for item in memory_context.items
+        if item.record.memory_role == "warning"
+    ]
+    boundary_ids = [
+        item.record.memory_record_id
+        for item in memory_context.items
+        if item.record.memory_role == "boundary_case"
+    ]
+    tags = {tag for item in memory_context.items for tag in item.record.tags}
+    attention: list[str] = []
+    if "rul_not_estimated" in tags:
+        attention.append("No presentar RUL como estimacion real si solo hay replay historico.")
+    if "isolated_spike_not_failure" in tags:
+        attention.append("Separar picos aislados de avisos sostenidos.")
+    if "mean_false_alarm_rate_nominal" in tags:
+        attention.append("Controlar falsas alarmas nominales como metrica primaria temporal.")
+    if "compare_model_family_after_partial_threshold_gain" in tags:
+        attention.append("Comparar familias de modelo, no solo mover threshold_quantile.")
+    if not attention and (warning_ids or boundary_ids):
+        attention.append("Usar warning/boundary como cautela, no como receta automatica.")
+    return {
+        "available": True,
+        "recommended_attention": attention,
+        "warning_memory_record_ids": warning_ids,
+        "boundary_memory_record_ids": boundary_ids,
+        "source_memory_record_ids": [
+            item.record.memory_record_id for item in memory_context.items
         ],
     }
 
@@ -1040,10 +1321,51 @@ def _memory_retry_guidance_for_llm(
 def _validate_modeling_decision_bounds(
     state: TFMStateModel,
     decision: ModelingDecision,
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
 ) -> None:
     _validate_single_modeling_decision(state, decision)
+    _validate_modeler_memory_usage(decision, memory_context=memory_context)
     for candidate in decision.comparison_candidates:
         _validate_supported_modeling_config(candidate.modeling_config)
+
+
+def _validate_modeler_memory_usage(
+    decision: ModelingDecision,
+    *,
+    memory_context: RetrievedMemoryContext | None,
+) -> None:
+    if decision.memory_context_id is not None:
+        if memory_context is None:
+            raise ValueError("memory_context_id was declared but no memory was provided")
+        if decision.memory_context_id != memory_context.context_id:
+            raise ValueError("memory_context_id does not match retrieved context")
+    if not decision.used_memory_context:
+        return
+    if memory_context is None or not memory_context.items:
+        raise ValueError("used_memory_context=true requires retrieved memory")
+    available_record_ids = {
+        item.record.memory_record_id for item in memory_context.items
+    }
+    unknown_ids = sorted(set(decision.memory_record_ids) - available_record_ids)
+    if unknown_ids:
+        raise ValueError(
+            "memory_record_ids were not retrieved: " + ", ".join(unknown_ids)
+        )
+    if not decision.memory_usage_summary:
+        raise ValueError("used memory requires memory_usage_summary")
+    declared_use_ids = {item.memory_record_id for item in decision.memory_record_uses}
+    if declared_use_ids != set(decision.memory_record_ids):
+        raise ValueError(
+            "memory_record_uses must describe exactly the cited memory_record_ids"
+        )
+    records_by_id = {
+        item.record.memory_record_id: item.record for item in memory_context.items
+    }
+    for use in decision.memory_record_uses:
+        record = records_by_id[use.memory_record_id]
+        if record.memory_role in {"boundary_case", "warning"} and not use.risk_mitigation:
+            raise ValueError("boundary or warning memory requires risk_mitigation")
 
 
 def _validate_single_modeling_decision(
@@ -1070,6 +1392,8 @@ def _validate_single_modeling_decision(
             "run-to-failure modeler decisions cannot use threshold_calibration "
             "as the primary strategy"
         )
+    if _uses_temporal_degradation_profile(state):
+        _validate_run_to_failure_modeling_strategy(decision)
     expected_model_path = _expected_model_path(state, config)
     if decision.expected_model_path != expected_model_path:
         raise ValueError(f"expected_model_path must be {expected_model_path}")
@@ -1129,6 +1453,56 @@ def _validate_modeling_retry_decision_bounds(
             raise ValueError("retry_config must differ from the failed config")
     for candidate in decision.comparison_candidates:
         _validate_supported_modeling_config(candidate.modeling_config)
+
+
+def _validate_run_to_failure_modeling_strategy(decision: ModelingDecision) -> None:
+    strategy = decision.decision_strategy
+    missing_tools = sorted(RUN_TO_FAILURE_REQUIRED_TOOLS - set(strategy.tool_names))
+    if missing_tools:
+        raise ValueError(
+            "run-to-failure modeler strategy must use tools: "
+            + ", ".join(missing_tools)
+        )
+
+    evidence_refs = set(strategy.evidence_refs)
+    required_tool_refs = {f"tool:{name}" for name in RUN_TO_FAILURE_REQUIRED_TOOLS}
+    missing_tool_refs = sorted(required_tool_refs - evidence_refs)
+    if missing_tool_refs:
+        raise ValueError(
+            "run-to-failure modeler strategy must cite tool refs: "
+            + ", ".join(missing_tool_refs)
+        )
+    has_temporal_or_degradation_ref = any(
+        ref.startswith("temporal:")
+        or ref.startswith("metric:mean_")
+        or ref.startswith("metric:degradation_")
+        or ref.startswith("metric_extra:degradation_")
+        for ref in evidence_refs
+    )
+    if not has_temporal_or_degradation_ref:
+        raise ValueError(
+            "run-to-failure modeler strategy must cite temporal or degradation evidence"
+        )
+
+    missing_targets = sorted(
+        RUN_TO_FAILURE_REQUIRED_TARGETS - set(strategy.optimization_targets)
+    )
+    if missing_targets:
+        raise ValueError(
+            "run-to-failure modeler strategy missing optimization targets: "
+            + ", ".join(missing_targets)
+        )
+    if strategy.alert_policy is None:
+        raise ValueError("run-to-failure modeler strategy requires alert_policy")
+    alert_policy = strategy.alert_policy.lower()
+    if "sosten" not in alert_policy and "persistent" not in alert_policy:
+        raise ValueError(
+            "run-to-failure alert_policy must address sustained/persistent alerts"
+        )
+    if "pico" not in alert_policy and "spike" not in alert_policy:
+        raise ValueError("run-to-failure alert_policy must address isolated spikes")
+    if "f1" in " ".join(strategy.optimization_targets).lower():
+        raise ValueError("run-to-failure optimization_targets cannot prioritize F1")
 
 
 def _validate_supported_modeling_config(config: ModelingConfig) -> None:

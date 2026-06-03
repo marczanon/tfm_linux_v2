@@ -2183,3 +2183,334 @@ actuales, el numero de puntos en alerta y el tiempo restante hasta fallo solo
 cuando este aparece como metadato de un replay historico. De esta forma, la
 aplicacion se aproxima a una monitorizacion industrial de activos sin afirmar
 una prediccion RUL real cuando el modelo aun no la produce.
+
+El siguiente ajuste traslada esa informacion a una lectura mas humana dentro de
+la pestana \texttt{Visualizacion}. El contrato
+\texttt{RunVisualizationData} declara ahora el perfil de supervision, fuente y
+granularidad de etiquetas, modelo usado, familias metricas, metricas primarias
+y metricas auxiliares. Para \texttt{run\_to\_failure\_degradation}, las
+metricas principales pasan a ser deteccion antes de fallo, \texttt{lead\_time},
+falsas alarmas nominales, tendencia del score, fallos perdidos y separacion
+inicio-final. Precision, recall, F1, FPR, ROC-AUC y PR-AUC se conservan como
+metricas binarias auxiliares cuando proceden de una politica proxy.
+
+En la interfaz, la misma pestana se vuelve sensible al perfil. Si la run es
+run-to-failure, se muestra un panel de control del motor con estado actual,
+salud, riesgo, primer aviso, \texttt{lead\_time}, alertas, puntos criticos, una
+tira de ventanas coloreada por estado y un flujo compacto
+\texttt{ventanas -> detector -> estado -> agente}. La curva temporal existente
+se mantiene como lectura tecnica, pero incorpora bandas de estado para facilitar
+la interpretacion. La proyeccion PCA se conserva como diagnostico 2D de
+features; la interfaz aclara que la elipse dibujada es una aproximacion visual
+y no la frontera real del detector ni la metrica principal del perfil temporal.
+
+Tras revisar la interpretacion visual, se ha separado explicitamente un pico
+puntual de una alerta sostenida. Cada ventana se evalua localmente, por lo que
+un score critico aislado puede ir seguido de una ventana nominal sin implicar
+que el motor haya fallado y se haya recuperado. Para evitar esa lectura, la
+visualizacion distingue entre \texttt{primer pico} y
+\texttt{aviso sostenido}, definido como una racha minima de ventanas
+consecutivas en \texttt{warning} o \texttt{critical}. Tambien muestra picos
+aislados, episodios de alerta y racha maxima. El fallo mostrado sigue siendo un
+marcador historico del replay cuando existe \texttt{time\_to\_failure\_seconds};
+no se presenta como una prediccion RUL real del modelo.
+
+\section{Fase 8: adaptacion agentica del perfil run-to-failure}
+
+Con la base temporal y visual del perfil
+\texttt{run\_to\_failure\_degradation} preparada, la siguiente fase desplaza el
+centro de gravedad hacia los agentes Qwen/LLM. El objetivo ya no es solo que el
+pipeline calcule metricas temporales y las muestre en la interfaz, sino que los
+agentes gobiernen la investigacion dentro de contratos estrictos: observar
+evidencia temporal, formular hipotesis, elegir herramientas, seleccionar modelo
+y politica de alerta, debatir resultados, recomendar acciones y generar memoria
+reutilizable.
+
+La metodologia mantiene la separacion de seguridad: los LLM no ejecutan codigo
+arbitrario ni transforman datos directamente. Sus decisiones se validan mediante
+contratos Pydantic y los ejecutores deterministas aplican las acciones
+materiales. La diferencia respecto a la fase anterior es de protagonismo:
+\texttt{run\_to\_failure\_degradation} pasa a ser el caso principal para
+estudiar si agentes locales pequenos pueden conducir una monitorizacion
+industrial compleja con evidencia, debate y auditoria. Histeresis avanzada, RUL
+experimental y autoencoders se trataran despues de cerrar esta base agentica,
+para que esas ampliaciones tambien dependan de decisiones de agentes y no solo
+de reglas fijas.
+
+El primer hito de esta fase introduce un paquete de evidencia temporal para
+agentes. La herramienta \texttt{evidence\_lookup} incorpora una seccion
+\texttt{temporal} que resume, sin cargar CSV completos en el estado, el perfil
+\texttt{run\_to\_failure\_degradation}: estado actual de la trayectoria, primer
+pico, primer aviso sostenido, episodios de alerta, picos aislados, racha maxima,
+referencia de fallo historico, metricas de degradacion y advertencias sobre
+etiquetas proxy y RUL no estimado. Esta evidencia se deriva de la misma serie
+temporal que alimenta el panel visual, evitando una interpretacion paralela
+para agentes.
+
+Ademas, se refuerza el papel del agente \texttt{cleaner}. Su prompt LLM recibe
+contexto temporal especifico para razonar sobre canal, frecuencia, valores no
+finitos y normalizacion como decisiones que condicionan la continuidad temporal
+y la estabilidad del score posterior. El agente no decide fallos ni estima RUL;
+mantiene su frontera de calidad de senal, pero con protagonismo dentro del
+perfil temporal que gobiernan los agentes Qwen/LLM.
+
+El segundo hito convierte esa evidencia agregada en herramientas agenticas
+especificas. Se incorporan \texttt{temporal\_health\_lookup}, que devuelve
+estado de salud, primer pico, aviso sostenido, episodios, picos aislados, racha
+maxima y referencia de fallo historico, y
+\texttt{degradation\_metrics\_lookup}, que devuelve metricas temporales
+primarias y contexto de etiquetas. Ambas herramientas son de solo lectura y
+generan referencias citables; no aprueban ejecuciones, no eligen modelos y no
+estiman RUL. Con ello, los agentes ganan capacidad de eleccion informada sin
+romper la arquitectura: \texttt{cleaner}, \texttt{structurer},
+\texttt{modeler} y \texttt{evaluator} siguen tomando decisiones en contratos
+propios, mientras que los ejecutores deterministas siguen aplicando las acciones
+materiales.
+
+El tercer hito especializa al agente \texttt{modeler} como estratega
+run-to-failure. En lugar de introducir un contrato paralelo, se extiende
+\texttt{ModelingDecisionStrategy} con tres campos compatibles:
+\texttt{tool\_names}, \texttt{optimization\_targets} y
+\texttt{alert\_policy}. Para el perfil
+\texttt{run\_to\_failure\_degradation}, la decision del modelador debe declarar
+el uso de \texttt{temporal\_health\_lookup} y
+\texttt{degradation\_metrics\_lookup}, citar referencias temporales o metricas
+de degradacion, optimizar deteccion antes de fallo, lead time, falsas alarmas
+nominales y tendencia del score, y describir una politica que separe pico
+aislado, aviso sostenido y umbral auxiliar. F1 queda restringida a metrica
+auxiliar. El fallback seguro tambien se adapta a este marco: conserva
+\texttt{pca\_reconstruction\_error} como score interpretable, pero deja
+herramientas, objetivos, evidencia y alternativas comparables trazadas.
+
+El cuarto hito extiende al agente \texttt{evaluator} como auditor operacional
+del perfil temporal. \texttt{EvaluationDecision} incorpora campos compatibles
+para registrar herramientas, referencias de evidencia, una valoracion
+operacional, puntos de debate temporal y comprobaciones de guardarrail. En
+\texttt{run\_to\_failure\_degradation}, el evaluador debe citar
+\texttt{temporal\_health\_lookup} y
+\texttt{degradation\_metrics\_lookup}, debatir pico aislado frente a aviso
+sostenido, declarar que RUL no esta estimado, mantener F1 como metrica auxiliar
+y advertir que las etiquetas proxy no son oficiales por ventana. La base del
+debate temporal queda integrada en la decision del evaluador y se conserva en
+la memoria de decisiones para futuras runs, sin crear todavia un contrato
+separado de debate.
+
+El quinto hito traslada esa decision agentica al panel principal de
+visualizacion. El contrato \texttt{RunVisualizationData} incorpora
+\texttt{AgentOperationalRecommendation}, derivado de los mensajes JSON
+persistidos de \texttt{evaluator} y contextualizado con la ultima estrategia de
+\texttt{modeler}. La interfaz muestra la recomendacion operacional, confianza,
+siguiente accion, evidencia citada, herramientas usadas, guardarrails, cautelas
+y puntos de debate. Si una ejecucion esta aprobada pero mantiene limitaciones
+metodologicas, la recomendacion se presenta como cautela y no como aprobacion
+limpia. De este modo, el panel no sustituye al agente por reglas de interfaz:
+hace visible la interpretacion Qwen/LLM y conserva su trazabilidad dentro de la
+monitorizacion run-to-failure.
+
+El sexto hito adapta el post-mortem y la memoria agentica al perfil temporal sin
+crear un sistema paralelo. En lugar de definir un contrato independiente
+\texttt{RunToFailurePostMortem}, se extienden los episodios canonicos
+\texttt{DecisionEpisode} y los candidatos \texttt{MemoryCandidate}. El servicio
+\texttt{decision\_memory.py} genera ahora episodios del \texttt{modeler} con la
+familia de modelo elegida, hipotesis, herramientas temporales, referencias de
+evidencia, objetivos de optimizacion y politica de alerta. Para
+\texttt{run\_to\_failure\_degradation}, estos episodios incorporan lecciones
+sobre metricas temporales, F1 como metrica auxiliar y necesidad de declarar la
+politica de aviso.
+
+La memoria del \texttt{evaluator} tambien se especializa para este perfil. Las
+metricas de degradacion almacenadas en \texttt{MetricsReport.extra}, como
+\texttt{degradation\_mean\_lead\_time\_to\_failure} o
+\texttt{degradation\_mean\_false\_alarm\_rate\_nominal}, se trasladan a
+\texttt{after\_metrics} del episodio y al contenido indexable del candidato de
+memoria. Ademas, una aprobacion temporal con limitaciones se marca como
+\texttt{partially\_supported}, de forma que la memoria futura la trate como caso
+de frontera y no como ejemplo positivo simple. Los tags del candidato incluyen
+tradeoffs y guardarrails como \texttt{rul\_not\_estimated},
+\texttt{sustained\_alert\_required} o \texttt{isolated\_spike\_not\_failure},
+facilitando su recuperacion vectorial por consultas futuras.
+
+Finalmente, el grafo escribe artefactos de memoria del \texttt{modeler} cuando
+\texttt{PipelineMemoryConfig.generate\_decision\_memory} esta activo:
+\texttt{modeler\_decision\_episode}, su informe legible,
+\texttt{modeler\_memory\_candidate} y su informe. Las ejecuciones sin memoria
+activa no cambian comportamiento. Con ello, el perfil temporal empieza a cerrar
+el ciclo de aprendizaje: las decisiones Qwen/LLM dejan una traza estructurada e
+indexable sobre estrategias de degradacion, no solo un resultado numerico final.
+
+A partir de este punto se define una hoja de ruta especifica para elevar el
+sistema de memoria. El diagnostico distingue entre la memoria RAG local ya
+implementada y una base vectorial industrial completa: actualmente
+\texttt{LocalJsonVectorMemoryStore} persiste colecciones por agente en JSON,
+calcula similitud coseno y puede usar \texttt{qwen3-embedding:0.6b} via Ollama,
+con \texttt{LocalHashEmbeddingModel} como fallback reproducible. Esta solucion
+es suficiente como baseline auditable del TFM, pero no incorpora todavia
+Qdrant, Weaviate, Chroma, Milvus, \texttt{pgvector}, busqueda hibrida, reranking
+ni evaluacion sistematica del retrieval.
+
+La hoja de ruta avanzada propone primero hacer visible la memoria en frontend:
+estado del recuerdo, ciclo candidato--indexado--recuperado--usado--auditado,
+consultas realizadas, similitudes, filtros, modelo de embeddings y citas usadas
+por cada decision. Solo despues se plantea mejorar el backend con Qdrant,
+reranking Qwen, busqueda hibrida y consolidacion/reflexion de recuerdos. Esta
+secuencia conserva el principio agentico del trabajo: la memoria informa a los
+agentes Qwen y aumenta su capacidad deliberativa, pero no sustituye su decision
+ni convierte la ejecucion en un conjunto de reglas deterministas.
+
+El primer hito de esta linea transforma la vista de memoria persistida de la
+pestana de agentes en un cockpit operativo. La interfaz muestra contadores por
+coleccion, recuerdos reutilizables, datasets, excluidos, distribucion por rol y
+origen, asi como un ciclo visual de candidatos, indexados, recuperados en
+runtime, usados por agentes y auditorias. Los identificadores de memoria citados
+por eventos agenticos pasan a ser navegables y el detalle del recuerdo incorpora
+veredicto, origen, resultado, modelo de embedding, dimension,
+\texttt{vector\_id}, tags,
+metricas, contenido indexable y ruta de origen. Este hito no cambia la API ni
+el store JSON local; su funcion es hacer observable la memoria existente antes
+de introducir Qdrant, reranking o busqueda hibrida.
+
+El segundo hito completa la observabilidad de retrieval. El grafo persiste
+ahora, para cada recuperacion de memoria dentro del flujo principal, un
+\texttt{memory\_query.json} separado del
+\texttt{retrieved\_memory\_context.json}. La query conserva \texttt{query\_id},
+agente objetivo, texto de consulta, dataset, \texttt{run\_id},
+\texttt{decision\_id}, contexto de decision, roles permitidos,
+\texttt{top\_k} y \texttt{min\_similarity}. El contexto recuperado conserva
+items, ranking, similitud, uso previsto, backend y modelo de embeddings.
+
+La telemetria runtime distingue ahora fases del retrieval mediante
+\texttt{retrieval\_event}: consulta no disponible, consulta solicitada,
+contexto recuperado, memoria usada y memoria ignorada por el agente. En la
+interfaz, el cockpit muestra backend, embedding, parametros de consulta,
+extracto de query, items recuperados con score, rol, origen y dataset, ademas
+de recuerdos citados o ignorados. Esta trazabilidad permite reconstruir una
+decision con memoria desde la UI y prepara el siguiente paso: que el
+\texttt{modeler} consulte memoria antes de su primera decision de modelo.
+
+El tercer hito lleva esa recuperacion a la decision inicial del modelador y
+anade gobierno operativo de recuerdos. \texttt{ModelingDecision} declara ahora
+\texttt{memory\_context\_id}, \texttt{used\_memory\_context},
+\texttt{memory\_record\_ids}, \texttt{memory\_usage\_summary} y
+\texttt{memory\_record\_uses}. La consulta
+\texttt{build\_modeler\_memory\_query} incluye dataset, objetivo, perfil de
+supervision, fuente de etiquetas, resumen de features y preguntas sobre familia
+de modelo, politica temporal, falsos avisos, lead time y uso auxiliar de F1. El
+prompt Qwen recibe los recuerdos recuperados y una guia derivada de warnings o
+casos frontera, pero la validacion impide citar recuerdos no recuperados y
+exige mitigacion explicita si se usa una advertencia.
+
+La memoria se mantiene como capacidad transversal, no como herramienta
+exclusiva del modelador. El backend conserva colecciones por agente
+(\texttt{cleaner\_memory}, \texttt{structurer\_memory},
+\texttt{modeler\_memory}, \texttt{evaluator\_memory},
+\texttt{report\_writer\_memory} y memoria metodologica compartida), y el mismo
+contrato de recuperacion/cita puede ampliarse a cada nodo del grafo. Para
+facilitar benchmarks y pruebas exploratorias, la API y el cockpit permiten
+excluir un recuerdo del RAG sin perder trazabilidad, restaurarlo o borrarlo del
+indice local. Esta curacion manual prepara comparaciones con memoria completa,
+memoria filtrada o memoria desactivada, manteniendo el protagonismo de Qwen:
+la memoria informa su decision, pero no la sustituye por una politica
+determinista.
+
+Para comprobar si la memoria produce algun efecto observable se ha implementado
+un benchmark offline sobre snapshots persistidos. El servicio
+\texttt{memory\_effect\_benchmark.py} y el script
+\texttt{benchmark\_memory\_effect.py} cargan una o varias runs, leen los
+artefactos \texttt{\{agent\}\_retrieved\_memory\_context}, contrastan recuerdos
+recuperados frente a recuerdos citados y clasifican cada ejecucion como memoria
+no observada, consulta sin recuerdos, retrieval ignorado, memoria usada o uso
+invalido. Si se indica una run baseline, el informe anade deltas de
+configuracion y metricas sin atribuir causalidad automaticamente.
+
+Como primera evidencia real se ha comparado
+\texttt{cwru-memory-transversal-fase4-001} con
+\texttt{cwru-memory-transversal-fase4-002-llm}. El informe generado en
+\texttt{codigo/reports/memory\_benchmarks/cwru-memory-transversal-fase4-m4-pre}
+concluye que la memoria fue recuperada y citada por \texttt{structurer} y
+\texttt{evaluator}, sin uso invalido. Las metricas binarias permanecen iguales
+respecto al baseline. Por tanto, en este par concreto la memoria si aporta
+deliberacion y trazabilidad agentica, pero no demuestra todavia una mejora
+numerica de rendimiento.
+
+El siguiente refinamiento incorpora un quality gate determinista sin consolidar
+recuerdos. El servicio \texttt{memory\_quality\_gate.py} clasifica cada recuerdo
+recuperado como \texttt{pass}, \texttt{caution} o
+\texttt{exclude\_candidate}. La decision se basa en similitud, coherencia de
+dataset y perfil, rol del recuerdo, veredicto humano, tags de exclusion manual
+y procedencia del recuerdo. Las cautelas no bloquean automaticamente al agente:
+sirven para dejar evidencia de que un caso frontera, warning o recuerdo parcial
+requiere mitigacion explicita.
+
+El benchmark se ha ampliado ademas con variantes controladas como
+\texttt{memory\_off}, \texttt{memory\_full}, \texttt{memory\_filtered},
+\texttt{memory\_conflict\_excluded} y \texttt{retrieval\_only}. Al regenerar el
+smoke CWRU anterior, la run base queda etiquetada como \texttt{memory\_off} y
+la run con Qwen como \texttt{memory\_full}. Los recuerdos citados por
+\texttt{structurer} y \texttt{evaluator} pasan el gate sin advertencias. Por
+decision metodologica no se implementa todavia memoria consolidada o
+reflexiones globales, ya que podrian fijar prematuramente conclusiones y
+limitar futuras deliberaciones de los agentes.
+
+Como primer paso hacia una memoria RAG con base vectorial externa se ha
+implementado \texttt{QdrantVectorMemoryStore}. Este backend mantiene el mismo
+contrato \texttt{VectorMemoryStore} que el indice JSON local, de forma que los
+agentes continuan trabajando con \texttt{AgentMemoryQuery} y
+\texttt{RetrievedMemoryContext} sin acoplarse al proveedor de almacenamiento.
+Cada recuerdo se guarda como punto Qdrant con embedding denso, metadatos
+filtrables y el \texttt{ReasoningMemoryRecord} completo en el payload. El
+identificador del punto se deriva de \texttt{memory\_record\_id} mediante UUID
+determinista, lo que conserva la trazabilidad de upserts y eliminaciones.
+
+La seleccion de backend se centraliza en
+\texttt{get\_default\_vector\_memory\_store}: por defecto se mantiene
+\texttt{LocalJsonVectorMemoryStore} como baseline reproducible, mientras que
+\texttt{TFM\_MEMORY\_BACKEND=qdrant} activa Qdrant con host, clave, timeout y
+distancia configurables. Esta decision permite avanzar hacia un RAG industrial
+sin perder la capacidad de ejecutar pruebas locales estables ni comparar el
+efecto de la memoria contra una linea base. El hito se valida con tests
+mockeados de HTTP que cubren insercion, busqueda en coleccion de agente y
+memoria compartida, scroll, borrado y seleccion automatica de backend. Quedan
+pendientes la migracion JSON--Qdrant, un smoke test con servidor Qdrant real y
+la comparacion de retrieval entre ambos backends.
+
+El siguiente hito completa esa primera validacion operacional. Se incorpora el
+servicio \texttt{memory\_backend\_migration.py}, que permite migrar registros
+entre dos implementaciones de \texttt{VectorMemoryStore} y comparar los IDs
+recuperados por ambos backends ante las mismas consultas. La migracion concreta
+\texttt{LocalJsonVectorMemoryStore -> QdrantVectorMemoryStore} lee los
+\texttt{ReasoningMemoryRecord} ya persistidos, los reindexa en Qdrant y genera
+consultas de verificacion por agente y dataset. Para que la comparacion sea
+metodologicamente justa, se crea un espejo local temporal reembebido con el
+mismo proveedor usado en Qdrant; asi se evita comparar un indice Qdrant nuevo
+con vectores JSON antiguos generados por otro modelo de embeddings.
+
+Tambien se anade el script
+\texttt{codigo/scripts/migrate\_memory\_to\_qdrant.py} y un servicio Docker
+opcional \texttt{qdrant} bajo el profile \texttt{memory-qdrant}. En el smoke
+real se levanta Qdrant en \texttt{http://127.0.0.1:6333} y se migra la memoria
+existente usando \texttt{local\_hash\_embedding} para aislar la infraestructura
+de la disponibilidad de Ollama. El resultado migra 20 recuerdos distribuidos en
+\texttt{evaluator\_memory}, \texttt{modeler\_memory} y
+\texttt{structurer\_memory}. Las tres consultas de verificacion presentan
+solapamiento medio 1.0 y orden exacto 3/3 respecto al espejo local reembebido.
+Esto valida que Qdrant puede reproducir el retrieval del baseline bajo el mismo
+embedding, aunque todavia queda ejecutar una run agentica real con
+\texttt{TFM\_MEMORY\_BACKEND=qdrant} y repetir el flujo con
+\texttt{qwen3-embedding:0.6b}.
+
+Como comprobacion posterior, los scripts de ejecucion con memoria se adaptan
+para construir el store mediante
+\texttt{get\_default\_vector\_memory\_store}. De este modo, una misma run puede
+usar memoria JSON o Qdrant modificando \texttt{TFM\_MEMORY\_BACKEND}, sin
+cambiar el contrato de los agentes ni el grafo. Se ejecuta un smoke CWRU con
+\texttt{TFM\_MEMORY\_BACKEND=qdrant}, \texttt{local\_hash\_embedding} y memoria
+de decision desactivada para aislar la infraestructura. La run
+\texttt{cwru-memory-qdrant-m4-4-smoke-001} finaliza aprobada y persiste
+contextos de memoria para \texttt{structurer}, \texttt{modeler} y
+\texttt{evaluator}, todos con
+\texttt{retrieval\_backend=qdrant\_vector\_memory\_store}. El benchmark de
+efecto de memoria la clasifica como \texttt{retrieval\_only}: Qdrant recupera
+memoria y no hay uso invalido, pero al ejecutarse sin LLM no se evalua todavia
+la cita ni la influencia deliberativa de Qwen. Esa validacion queda reservada
+para una run posterior con agentes LLM y, preferentemente, con el perfil
+\texttt{run\_to\_failure\_degradation}.

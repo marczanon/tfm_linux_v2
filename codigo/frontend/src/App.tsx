@@ -25,6 +25,8 @@ import {
   compareRuns,
   createBackgroundRun,
   createDryRun,
+  curateMemoryRecord,
+  deleteMemoryRecord,
   describeDataset,
   getHealth,
   getLLMStatus,
@@ -42,6 +44,7 @@ import {
   listRuns,
 } from "./api";
 import type {
+  AgentOperationalRecommendation,
   AgentRuntimeEvent,
   AgentMemoryTarget,
   ArtifactRef,
@@ -231,6 +234,7 @@ export default function App() {
   const [loadingRunDetail, setLoadingRunDetail] = useState(false);
   const [loadingVisualization, setLoadingVisualization] = useState(false);
   const [loadingMemory, setLoadingMemory] = useState(false);
+  const [curatingMemory, setCuratingMemory] = useState(false);
   const [comparingRuns, setComparingRuns] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [executing, setExecuting] = useState(false);
@@ -514,7 +518,6 @@ export default function App() {
         listMemoryCollections(),
         listMemoryRecords({
           target_agent: targetAgent,
-          reusable_only: true,
           search_text: emptyToNull(memorySearchText),
         }),
       ]);
@@ -545,6 +548,55 @@ export default function App() {
       setError(errorText(caught));
     } finally {
       setLoadingMemory(false);
+    }
+  }
+
+  async function handleCurateMemoryRecord(
+    memoryRecordId: string,
+    action: "exclude" | "restore",
+  ) {
+    const reason =
+      action === "exclude"
+        ? "Manual exclusion from cockpit"
+        : "Manual restore from cockpit";
+    setCuratingMemory(true);
+    setError(null);
+    try {
+      const response = await curateMemoryRecord(memoryRecordId, {
+        action,
+        reason,
+        reviewer: "frontend_user",
+      });
+      if (response.record) {
+        setSelectedMemoryRecord(response.record);
+      } else {
+        setSelectedMemoryRecord(null);
+      }
+      await refreshMemoryView();
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setCuratingMemory(false);
+    }
+  }
+
+  async function handleDeleteMemoryRecord(memoryRecordId: string) {
+    const confirmed = window.confirm(
+      "Borrar este recuerdo del indice local de memoria? Esta accion no elimina los artefactos fuente.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    setCuratingMemory(true);
+    setError(null);
+    try {
+      await deleteMemoryRecord(memoryRecordId, "Manual delete from cockpit");
+      setSelectedMemoryRecord(null);
+      await refreshMemoryView();
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setCuratingMemory(false);
     }
   }
 
@@ -767,8 +819,15 @@ export default function App() {
           selectedMemoryRecord={selectedMemoryRecord}
           memorySearchText={memorySearchText}
           loadingMemory={loadingMemory}
+          curatingMemory={curatingMemory}
           onMemorySearchChange={setMemorySearchText}
           onSelectMemoryRecord={(memoryRecordId) => void loadMemoryRecord(memoryRecordId)}
+          onCurateMemoryRecord={(memoryRecordId, action) =>
+            void handleCurateMemoryRecord(memoryRecordId, action)
+          }
+          onDeleteMemoryRecord={(memoryRecordId) =>
+            void handleDeleteMemoryRecord(memoryRecordId)
+          }
         />
       ) : (
         <VisualizationView
@@ -1659,8 +1718,11 @@ function AgentObservabilityView({
   selectedMemoryRecord,
   memorySearchText,
   loadingMemory,
+  curatingMemory,
   onMemorySearchChange,
   onSelectMemoryRecord,
+  onCurateMemoryRecord,
+  onDeleteMemoryRecord,
 }: {
   job: ApiRunJobStatus | null;
   events: AgentRuntimeEvent[];
@@ -1671,8 +1733,14 @@ function AgentObservabilityView({
   selectedMemoryRecord: ReasoningMemoryRecord | null;
   memorySearchText: string;
   loadingMemory: boolean;
+  curatingMemory: boolean;
   onMemorySearchChange: (value: string) => void;
   onSelectMemoryRecord: (memoryRecordId: string) => void;
+  onCurateMemoryRecord: (
+    memoryRecordId: string,
+    action: "exclude" | "restore",
+  ) => void;
+  onDeleteMemoryRecord: (memoryRecordId: string) => void;
 }) {
   const latestEvent = events.length > 0 ? events[events.length - 1] : null;
   const selectedEvents = eventsForAgent(events, selectedAgentId);
@@ -1727,16 +1795,24 @@ function AgentObservabilityView({
           </div>
           <Brain size={20} />
         </div>
-        <AgentRuntimeDetail event={selectedEvent} eventCount={selectedEvents.length} />
+        <AgentRuntimeDetail
+          event={selectedEvent}
+          eventCount={selectedEvents.length}
+          onSelectMemoryRecord={onSelectMemoryRecord}
+        />
         <AgentMemoryPanel
           agentId={selectedAgentId}
+          events={selectedEvents}
           collections={memoryCollections}
           records={memoryRecords}
           selectedRecord={selectedMemoryRecord}
           searchText={memorySearchText}
           loading={loadingMemory}
+          curating={curatingMemory}
           onSearchChange={onMemorySearchChange}
           onSelectRecord={onSelectMemoryRecord}
+          onCurateRecord={onCurateMemoryRecord}
+          onDeleteRecord={onDeleteMemoryRecord}
         />
       </section>
 
@@ -1796,9 +1872,11 @@ function AgentNodeCard({
 function AgentRuntimeDetail({
   event,
   eventCount,
+  onSelectMemoryRecord,
 }: {
   event: AgentRuntimeEvent | null;
   eventCount: number;
+  onSelectMemoryRecord?: (memoryRecordId: string) => void;
 }) {
   if (event === null) {
     return <p className="empty-state compact-empty">Sin eventos del agente</p>;
@@ -1842,9 +1920,20 @@ function AgentRuntimeDetail({
           <h4>Memoria citada</h4>
           <div className="memory-chip-row">
             {event.memory_record_ids.map((memoryId) => (
-              <span className="memory-chip" key={memoryId}>
-                {memoryId}
-              </span>
+              onSelectMemoryRecord ? (
+                <button
+                  className="memory-chip memory-chip-button"
+                  key={memoryId}
+                  type="button"
+                  onClick={() => onSelectMemoryRecord(memoryId)}
+                >
+                  {memoryId}
+                </button>
+              ) : (
+                <span className="memory-chip" key={memoryId}>
+                  {memoryId}
+                </span>
+              )
             ))}
           </div>
         </section>
@@ -1933,31 +2022,85 @@ function AgentConversation({
 
 function AgentMemoryPanel({
   agentId,
+  events,
   collections,
   records,
   selectedRecord,
   searchText,
   loading,
+  curating,
   onSearchChange,
   onSelectRecord,
+  onCurateRecord,
+  onDeleteRecord,
 }: {
   agentId: string;
+  events: AgentRuntimeEvent[];
   collections: MemoryCollectionSummary[];
   records: MemoryRecordSummary[];
   selectedRecord: ReasoningMemoryRecord | null;
   searchText: string;
   loading: boolean;
+  curating: boolean;
   onSearchChange: (value: string) => void;
   onSelectRecord: (memoryRecordId: string) => void;
+  onCurateRecord: (memoryRecordId: string, action: "exclude" | "restore") => void;
+  onDeleteRecord: (memoryRecordId: string) => void;
 }) {
   const target = memoryTargetForAgent(agentId);
   const collection = collections.find((item) => item.target_agent === target) ?? null;
+  const sourceTypes = collection?.source_types ?? {};
+  const retrievedMemoryIds = useMemo(
+    () =>
+      new Set(
+        events
+          .filter((event) => event.kind === "memory_retrieval" || event.memory_context_id !== null)
+          .flatMap((event) => event.memory_record_ids),
+      ),
+    [events],
+  );
+  const citedMemoryIds = useMemo(
+    () => new Set(events.flatMap((event) => event.memory_record_ids)),
+    [events],
+  );
+  const lifecycleStages = [
+    {
+      label: "candidatos",
+      value: sourceTypes.memory_candidate ?? 0,
+      detail: "destilados",
+      tone: "candidate",
+    },
+    {
+      label: "indexados",
+      value: collection?.n_records ?? 0,
+      detail: collection?.collection_name ?? target,
+      tone: "indexed",
+    },
+    {
+      label: "recuperados",
+      value: retrievedMemoryIds.size,
+      detail: "runtime actual",
+      tone: "reusable",
+    },
+    {
+      label: "usados",
+      value: citedMemoryIds.size,
+      detail: "citados por agente",
+      tone: "used",
+    },
+    {
+      label: "auditorias",
+      value: sourceTypes.memory_usage_audit ?? 0,
+      detail: "uso posterior",
+      tone: "audited",
+    },
+  ];
 
   return (
     <section className="runtime-block memory-panel">
       <div className="section-heading">
         <div>
-          <h3>Memoria persistida</h3>
+          <h3>Cockpit de memoria</h3>
           <p>{collection?.collection_name ?? target}</p>
         </div>
         <StatusPill
@@ -1967,11 +2110,32 @@ function AgentMemoryPanel({
         />
       </div>
 
-      <div className="memory-summary-grid">
-        <MiniStat label="Reutilizables" value={collection?.n_reusable ?? 0} />
-        <MiniStat label="Datasets" value={collection?.datasets.length ?? 0} />
-        <MiniStat label="Excluidos" value={collection?.n_excluded ?? 0} />
+      <div className="memory-cockpit-grid">
+        <MemoryStat label="Total" value={collection?.n_records ?? 0} />
+        <MemoryStat label="Reutilizables" value={collection?.n_reusable ?? 0} />
+        <MemoryStat label="Datasets" value={collection?.datasets.length ?? 0} />
+        <MemoryStat label="Excluidos" value={collection?.n_excluded ?? 0} tone="warning" />
       </div>
+
+      <MemoryLifecycleStrip stages={lifecycleStages} />
+
+      <div className="memory-distribution-grid">
+        <MemoryDistribution
+          title="Roles"
+          entries={collection?.memory_roles ?? {}}
+          labelFor={roleLabel}
+        />
+        <MemoryDistribution
+          title="Origen"
+          entries={collection?.source_types ?? {}}
+          labelFor={sourceTypeLabel}
+        />
+      </div>
+
+      <MemoryRuntimeFlow
+        events={events}
+        onSelectRecord={onSelectRecord}
+      />
 
       <label className="field compact-field">
         <span>Buscar</span>
@@ -1987,42 +2151,302 @@ function AgentMemoryPanel({
         <MemoryRecordList
           records={records}
           selectedRecordId={selectedRecord?.memory_record_id ?? null}
+          usedRecordIds={citedMemoryIds}
           onSelectRecord={onSelectRecord}
         />
       )}
 
-      <MemoryRecordDetail record={selectedRecord} />
+      <MemoryRecordDetail
+        record={selectedRecord}
+        curating={curating}
+        onCurateRecord={onCurateRecord}
+        onDeleteRecord={onDeleteRecord}
+      />
     </section>
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
+function MemoryStat({
+  label,
+  value,
+  tone = "normal",
+}: {
+  label: string;
+  value: number;
+  tone?: "normal" | "warning";
+}) {
   return (
-    <div className="mini-stat">
+    <div className={`memory-stat ${tone}`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
   );
 }
 
+function MemoryLifecycleStrip({
+  stages,
+}: {
+  stages: { label: string; value: number; detail: string; tone: string }[];
+}) {
+  return (
+    <div className="memory-lifecycle" aria-label="Ciclo de vida de memoria">
+      {stages.map((stage) => (
+        <div className={`memory-lifecycle-step ${stage.tone}`} key={stage.label}>
+          <span>{stage.label}</span>
+          <strong>{stage.value}</strong>
+          <small>{stage.detail}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MemoryDistribution({
+  title,
+  entries,
+  labelFor,
+}: {
+  title: string;
+  entries: Record<string, number>;
+  labelFor: (value: string) => string;
+}) {
+  const sortedEntries = Object.entries(entries).sort((left, right) => right[1] - left[1]);
+  return (
+    <section className="memory-distribution">
+      <h4>{title}</h4>
+      {sortedEntries.length === 0 ? (
+        <p>sin datos</p>
+      ) : (
+        <div className="memory-chip-row">
+          {sortedEntries.slice(0, 6).map(([key, value]) => (
+            <span className="memory-chip subtle" key={key}>
+              {labelFor(key)} · {value}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MemoryRuntimeFlow({
+  events,
+  onSelectRecord,
+}: {
+  events: AgentRuntimeEvent[];
+  onSelectRecord: (memoryRecordId: string) => void;
+}) {
+  const memoryEvents = events.filter(
+    (event) =>
+      event.kind === "memory_retrieval" ||
+      event.memory_context_id !== null ||
+      event.memory_record_ids.length > 0,
+  );
+  const visibleEvents = memoryEvents.slice(-6).reverse();
+
+  return (
+    <section className="memory-runtime-flow">
+      <div>
+        <h4>Runtime</h4>
+        <span>{memoryEvents.length} eventos con memoria</span>
+      </div>
+      {visibleEvents.length === 0 ? (
+        <p className="empty-state compact-empty">Sin recuperaciones en el agente seleccionado</p>
+      ) : (
+        <div className="memory-flow-list">
+          {visibleEvents.map((event) => {
+            const retrievalEvent = stringFromPayload(event.payload, "retrieval_event");
+            const flowItems = memoryFlowItems(event);
+            const meta = memoryFlowMeta(event);
+            const query = recordFromPayload(event.payload, "query");
+            const queryText = stringValue(query?.query_text);
+            const citedIds = stringArrayFromPayload(event.payload, "cited_memory_record_ids");
+            const ignoredIds = stringArrayFromPayload(event.payload, "ignored_memory_record_ids");
+            const fallbackIds = event.memory_record_ids;
+            return (
+              <article className="memory-flow-event" key={event.event_id}>
+                <div>
+                  <strong>{retrievalEventLabel(retrievalEvent, event.kind)}</strong>
+                  <span>{formatEventTime(event.created_at)} · {event.memory_context_id ?? "sin contexto"}</span>
+                </div>
+                {meta.length > 0 ? (
+                  <div className="memory-flow-meta">
+                    {meta.map((item) => (
+                      <span key={`${event.event_id}-${item.label}`}>
+                        {item.label}: <strong>{item.value}</strong>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <p>{event.summary}</p>
+                {queryText ? (
+                  <p className="memory-query-excerpt">{shortText(queryText, 220)}</p>
+                ) : null}
+                {flowItems.length > 0 ? (
+                  <div className="memory-flow-items">
+                    {flowItems.map((item) => (
+                      <button
+                        className="memory-flow-item"
+                        key={`${event.event_id}-${item.memoryRecordId}`}
+                        type="button"
+                        onClick={() => onSelectRecord(item.memoryRecordId)}
+                      >
+                        <strong>
+                          #{item.rank ?? "-"} · sim {formatSimilarity(item.similarity)}
+                        </strong>
+                        <span>{item.memoryRecordId}</span>
+                        <em>
+                          {roleLabel(item.memoryRole ?? "")} · {sourceTypeLabel(item.sourceType ?? "")} · {item.dataset ?? "-"}
+                        </em>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {citedIds.length > 0 || ignoredIds.length > 0 || fallbackIds.length > 0 ? (
+                  <div className="memory-chip-row">
+                    {(citedIds.length > 0 ? citedIds : fallbackIds).slice(0, 4).map((memoryId) => (
+                      <button
+                        className="memory-chip memory-chip-button"
+                        key={`${event.event_id}-cited-${memoryId}`}
+                        type="button"
+                        onClick={() => onSelectRecord(memoryId)}
+                      >
+                        usado · {memoryId}
+                      </button>
+                    ))}
+                    {ignoredIds.slice(0, 4).map((memoryId) => (
+                      <button
+                        className="memory-chip subtle memory-chip-button"
+                        key={`${event.event_id}-ignored-${memoryId}`}
+                        type="button"
+                        onClick={() => onSelectRecord(memoryId)}
+                      >
+                        ignorado · {memoryId}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface MemoryFlowItem {
+  memoryRecordId: string;
+  rank: number | null;
+  similarity: number | null;
+  memoryRole: string | null;
+  sourceType: string | null;
+  dataset: string | null;
+}
+
+function retrievalEventLabel(
+  retrievalEvent: string | null,
+  fallbackKind: AgentRuntimeEvent["kind"],
+): string {
+  const labels: Record<string, string> = {
+    retrieval_unavailable: "RAG no disponible",
+    retrieval_requested: "Consulta solicitada",
+    retrieval_returned: "Contexto recuperado",
+    retrieval_used: "Memoria usada",
+    retrieval_rejected_by_agent: "Memoria ignorada",
+  };
+  return retrievalEvent === null ? kindLabel(fallbackKind) : labels[retrievalEvent] ?? retrievalEvent;
+}
+
+function memoryFlowMeta(event: AgentRuntimeEvent): { label: string; value: string }[] {
+  const query = recordFromPayload(event.payload, "query");
+  const items = [
+    {
+      label: "backend",
+      value: stringFromPayload(event.payload, "retrieval_backend"),
+    },
+    {
+      label: "embedding",
+      value: stringFromPayload(event.payload, "embedding_model"),
+    },
+    {
+      label: "top_k",
+      value: stringValue(query?.top_k),
+    },
+    {
+      label: "min_sim",
+      value: stringValue(query?.min_similarity),
+    },
+    {
+      label: "dataset",
+      value: stringValue(query?.dataset),
+    },
+  ];
+  return items.filter((item): item is { label: string; value: string } => item.value !== null);
+}
+
+function memoryFlowItems(event: AgentRuntimeEvent): MemoryFlowItem[] {
+  const value = event.payload.items;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter(isRecord)
+    .map((item) => {
+      const memoryRecordId = stringValue(item.memory_record_id);
+      if (memoryRecordId === null) {
+        return null;
+      }
+      return {
+        memoryRecordId,
+        rank: numberValue(item.rank),
+        similarity: numberValue(item.similarity),
+        memoryRole: stringValue(item.memory_role),
+        sourceType: stringValue(item.source_type),
+        dataset: stringValue(item.dataset),
+      };
+    })
+    .filter((item): item is MemoryFlowItem => item !== null);
+}
+
+function formatSimilarity(value: number | null): string {
+  if (value === null) {
+    return "-";
+  }
+  return new Intl.NumberFormat("es-ES", {
+    maximumFractionDigits: 3,
+  }).format(value);
+}
+
+function shortText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength - 1)}...`;
+}
+
 function MemoryRecordList({
   records,
   selectedRecordId,
+  usedRecordIds,
   onSelectRecord,
 }: {
   records: MemoryRecordSummary[];
   selectedRecordId: string | null;
+  usedRecordIds: Set<string>;
   onSelectRecord: (memoryRecordId: string) => void;
 }) {
   if (records.length === 0) {
-    return <p className="empty-state compact-empty">Sin recuerdos recuperados</p>;
+    return <p className="empty-state compact-empty">Sin recuerdos para el filtro actual</p>;
   }
 
   return (
     <div className="memory-record-list">
-      {records.slice(0, 8).map((record) => (
+      {records.slice(0, 10).map((record) => (
         <button
-          className={`memory-record-row ${
+          className={`memory-record-row ${record.exclude_from_context ? "excluded" : ""} ${
+            usedRecordIds.has(record.memory_record_id) ? "used" : ""
+          } ${
             record.memory_record_id === selectedRecordId ? "selected" : ""
           }`}
           key={record.memory_record_id}
@@ -2031,26 +2455,80 @@ function MemoryRecordList({
         >
           <div>
             <strong>{record.memory_record_id}</strong>
-            <span>{record.dataset ?? "-"} | {roleLabel(record.memory_role)}</span>
+            <span>
+              {record.dataset ?? "-"} | {roleLabel(record.memory_role)} | {sourceTypeLabel(record.source_type)}
+            </span>
           </div>
           <p>{record.summary}</p>
+          <span className="memory-record-badges">
+            {record.reusable_as_context ? <em>reutilizable</em> : null}
+            {record.exclude_from_context ? <em>excluido</em> : null}
+            {usedRecordIds.has(record.memory_record_id) ? <em>citado</em> : null}
+          </span>
         </button>
       ))}
     </div>
   );
 }
 
-function MemoryRecordDetail({ record }: { record: ReasoningMemoryRecord | null }) {
+function MemoryRecordDetail({
+  record,
+  curating,
+  onCurateRecord,
+  onDeleteRecord,
+}: {
+  record: ReasoningMemoryRecord | null;
+  curating: boolean;
+  onCurateRecord: (memoryRecordId: string, action: "exclude" | "restore") => void;
+  onDeleteRecord: (memoryRecordId: string) => void;
+}) {
   if (record === null) {
     return null;
   }
+  const metricEntries = Object.entries(record.metrics ?? {});
+  const embeddingText =
+    record.embedding_model === null
+      ? "sin embedding"
+      : `${record.embedding_model}${record.embedding_dimension ? ` · ${record.embedding_dimension} dim` : ""}`;
 
   return (
     <section className="memory-record-detail">
       <div className="event-head">
-        <StatusPill ok={record.reusable_as_context} label={roleLabel(record.memory_role)} />
-        <span>{record.human_verdict ?? "sin_veredicto"}</span>
+        <StatusPill
+          ok={record.reusable_as_context && !record.exclude_from_context}
+          label={recordStateLabel(record)}
+          muted={!record.exclude_from_context}
+        />
+        <span>{verdictLabel(record.human_verdict)}</span>
       </div>
+      <div className="memory-curation-actions">
+        {record.exclude_from_context ? (
+          <button
+            type="button"
+            disabled={curating}
+            onClick={() => onCurateRecord(record.memory_record_id, "restore")}
+          >
+            Restaurar
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={curating}
+            onClick={() => onCurateRecord(record.memory_record_id, "exclude")}
+          >
+            Excluir de RAG
+          </button>
+        )}
+        <button
+          className="danger-button"
+          type="button"
+          disabled={curating}
+          onClick={() => onDeleteRecord(record.memory_record_id)}
+        >
+          Borrar
+        </button>
+      </div>
+      <h4>{record.summary}</h4>
       <dl className="meta-list detail-meta">
         <div>
           <dt>run_id</dt>
@@ -2060,8 +2538,46 @@ function MemoryRecordDetail({ record }: { record: ReasoningMemoryRecord | null }
           <dt>decision_id</dt>
           <dd>{record.decision_id ?? "-"}</dd>
         </div>
+        <div>
+          <dt>origen</dt>
+          <dd>{sourceTypeLabel(record.source_type)}</dd>
+        </div>
+        <div>
+          <dt>resultado</dt>
+          <dd>{outcomeLabel(record.outcome)}</dd>
+        </div>
+        <div>
+          <dt>embedding</dt>
+          <dd>{embeddingText}</dd>
+        </div>
+        <div>
+          <dt>vector_id</dt>
+          <dd>{record.vector_id ?? "-"}</dd>
+        </div>
       </dl>
+      {record.tags.length > 0 ? (
+        <div className="memory-chip-row">
+          {record.tags.slice(0, 10).map((tag) => (
+            <span className="memory-chip subtle" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {metricEntries.length > 0 ? (
+        <div className="memory-metric-grid">
+          {metricEntries.slice(0, 8).map(([metric, value]) => (
+            <div className="memory-metric" key={metric}>
+              <span>{metric}</span>
+              <strong>{formatMetric(value)}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <pre className="memory-content">{record.content}</pre>
+      {record.source_path ? (
+        <p className="memory-source-path">{record.source_path}</p>
+      ) : null}
     </section>
   );
 }
@@ -2554,6 +3070,11 @@ function VisualizationView({
   loading: boolean;
   onSelectRun: (runId: string) => void;
 }) {
+  const temporalRun =
+    data?.temporal_series?.available && data.temporal_series.runs.length
+      ? data.temporal_series.runs[0]
+      : null;
+  const isRunToFailure = isRunToFailureVisualization(data);
   return (
     <section className="visualization-workspace">
       <section className="panel visualization-control-panel">
@@ -2587,6 +3108,18 @@ function VisualizationView({
               <dd>{data.dataset}</dd>
             </div>
             <div>
+              <dt>perfil</dt>
+              <dd>{profileLabel(data.supervision_profile)}</dd>
+            </div>
+            <div>
+              <dt>etiquetas</dt>
+              <dd>{labelSourceLabel(data.label_source)}</dd>
+            </div>
+            <div>
+              <dt>modelo</dt>
+              <dd>{data.model_name ?? "-"}</dd>
+            </div>
+            <div>
               <dt>puntos</dt>
               <dd>
                 {data.n_points_sampled}/{data.n_points_total}
@@ -2601,32 +3134,77 @@ function VisualizationView({
       <section className="panel visualization-panel">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Metricas</p>
-            <h2>Rendimiento</h2>
+            <p className="eyebrow">
+              {isRunToFailure ? "Metricas temporales" : "Metricas"}
+            </p>
+            <h2>{isRunToFailure ? "Degradacion" : "Rendimiento"}</h2>
           </div>
           <BarChart3 size={20} />
         </div>
         {loading ? (
           <p className="empty-state compact-empty">Cargando visualizacion</p>
         ) : data ? (
-          <MetricBars metrics={data.metrics} />
+          <VisualizationMetricsPanel data={data} />
         ) : (
           <p className="empty-state compact-empty">Sin run seleccionada</p>
         )}
       </section>
 
+      {isRunToFailure ? (
+        <section className="panel motor-control-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Panel de control</p>
+              <h2>Estado del motor</h2>
+            </div>
+            <Activity size={20} />
+          </div>
+          {loading ? (
+            <p className="empty-state compact-empty">Preparando estado operacional</p>
+          ) : temporalRun ? (
+            <MotorControlPanel run={temporalRun} data={data!} />
+          ) : (
+            <p className="empty-state compact-empty">
+              {data?.temporal_series?.warnings[0] ??
+                "Sin serie temporal para construir estado del motor"}
+            </p>
+          )}
+        </section>
+      ) : null}
+
+      {isRunToFailure ? (
+        <section className="panel agent-recommendation-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Recomendacion agentica</p>
+              <h2>Lectura operacional</h2>
+            </div>
+            <Brain size={20} />
+          </div>
+          {loading ? (
+            <p className="empty-state compact-empty">Recuperando decision agentica</p>
+          ) : (
+            <AgentRecommendationPanel
+              recommendation={data?.agent_recommendation ?? null}
+            />
+          )}
+        </section>
+      ) : null}
+
       <section className="panel temporal-panel">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Degradacion</p>
-            <h2>Serie temporal</h2>
+            <p className="eyebrow">
+              {isRunToFailure ? "Curva tecnica" : "Degradacion"}
+            </p>
+            <h2>{isRunToFailure ? "Ventanas y score" : "Serie temporal"}</h2>
           </div>
           <Activity size={20} />
         </div>
         {loading ? (
           <p className="empty-state compact-empty">Preparando serie temporal</p>
-        ) : data?.temporal_series?.available && data.temporal_series.runs.length ? (
-          <TemporalSeriesChart run={data.temporal_series.runs[0]} />
+        ) : temporalRun ? (
+          <TemporalSeriesChart run={temporalRun} />
         ) : (
           <p className="empty-state compact-empty">
             {data?.temporal_series?.warnings[0] ??
@@ -2643,8 +3221,12 @@ function VisualizationView({
       <section className="panel projection-panel">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Espacio 2D</p>
-            <h2>Agrupacion y anomalias</h2>
+            <p className="eyebrow">
+              {isRunToFailure ? "Diagnostico 2D" : "Espacio 2D"}
+            </p>
+            <h2>
+              {isRunToFailure ? "Mapa de features" : "Agrupacion y anomalias"}
+            </h2>
           </div>
           <Activity size={20} />
         </div>
@@ -2660,6 +3242,9 @@ function VisualizationView({
             {data?.warnings[0] ?? "Selecciona una run con features y predicciones"}
           </p>
         )}
+        {data?.projection_explanation ? (
+          <p className="projection-note">{data.projection_explanation}</p>
+        ) : null}
         {data?.projection_boundary ? (
           <p className="projection-note">{data.projection_boundary.note}</p>
         ) : null}
@@ -2675,14 +3260,348 @@ function VisualizationView({
   );
 }
 
-function MetricBars({ metrics }: { metrics: VisualizationMetric[] }) {
+function VisualizationMetricsPanel({ data }: { data: RunVisualizationData }) {
+  const isRunToFailure = isRunToFailureVisualization(data);
+  const primaryMetrics = data.primary_metrics.length ? data.primary_metrics : data.metrics;
+  const auxiliaryMetrics = data.auxiliary_metrics.length ? data.auxiliary_metrics : [];
+
+  if (isRunToFailure) {
+    return (
+      <div className="visual-metrics-stack">
+        <VisualizationMetricCards metrics={primaryMetrics} />
+        {auxiliaryMetrics.some((metric) => metric.value !== null) ? (
+          <section className="auxiliary-metrics">
+            <div>
+              <strong>Metricas binarias auxiliares</strong>
+              <span>
+                {labelSourceLabel(data.label_source)} | {data.label_granularity ?? "-"}
+              </span>
+            </div>
+            <MetricBars metrics={auxiliaryMetrics} compact />
+          </section>
+        ) : null}
+      </div>
+    );
+  }
+
+  return <MetricBars metrics={primaryMetrics} />;
+}
+
+function VisualizationMetricCards({ metrics }: { metrics: VisualizationMetric[] }) {
+  const visible = metrics.filter((metric) => metric.value !== null);
+  if (visible.length === 0) {
+    return <p className="empty-state compact-empty">Sin metricas principales</p>;
+  }
+
+  return (
+    <div className="visual-metric-grid">
+      {visible.map((metric) => (
+        <div className="visual-metric-card" key={metric.name}>
+          <span>{metric.label}</span>
+          <strong>{formatVisualizationMetric(metric)}</strong>
+          <em>{metric.higher_is_better ? "mejor alto" : "mejor bajo"}</em>
+          {metric.note ? <small>{metric.note}</small> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MotorControlPanel({
+  run,
+  data,
+}: {
+  run: TemporalRunSeries;
+  data: RunVisualizationData;
+}) {
+  const health = run.current_health_index ?? 0;
+  const risk = run.current_risk_index ?? 0;
+  const persistentAlertX = run.first_persistent_alert_x;
+  const leadTime =
+    run.first_persistent_alert_time_to_failure_seconds !== null
+      ? formatSeconds(run.first_persistent_alert_time_to_failure_seconds)
+      : run.first_alert_time_to_failure_seconds !== null
+        ? formatSeconds(run.first_alert_time_to_failure_seconds)
+        : "no disponible";
+  const failureContext =
+    run.failure_reference === "historic_replay" && run.failure_x !== null
+      ? "El fallo mostrado procede del replay historico del dataset; no es una prediccion RUL del modelo."
+      : "Esta run no trae un marcador de fallo historico suficiente para calcular RUL.";
+  const alertContext =
+    persistentAlertX !== null
+      ? `Aviso sostenido: al menos ${run.persistent_alert_min_windows} ventanas consecutivas en alerta o critico.`
+      : `Sin aviso sostenido de ${run.persistent_alert_min_windows} ventanas; los colores intensos pueden ser picos aislados.`;
+  const sourceWarning =
+    data.label_source && data.label_source !== "official"
+      ? `Etiquetas ${labelSourceLabel(data.label_source).toLowerCase()}; no son ground truth oficial por ventana.`
+      : "Etiquetas oficiales.";
+
+  return (
+    <div className="motor-control-grid">
+      <div className={`motor-status-block ${run.current_health_state}`}>
+        <span>estado actual</span>
+        <strong>{healthStateLabel(run.current_health_state)}</strong>
+        <p>{run.current_state_reason}</p>
+      </div>
+      <div className="motor-meter-block">
+        <StateMeter label="salud" value={health} state={run.current_health_state} />
+        <StateMeter label="riesgo" value={risk} state={run.current_health_state} invert />
+      </div>
+      <div className="motor-kpi-grid">
+        <div>
+          <span>primer pico</span>
+          <strong>{formatMetric(run.first_alert_x)}</strong>
+        </div>
+        <div>
+          <span>aviso sostenido</span>
+          <strong>{formatMetric(persistentAlertX)}</strong>
+        </div>
+        <div>
+          <span>lead time sost.</span>
+          <strong>{leadTime}</strong>
+        </div>
+        <div>
+          <span>alertas</span>
+          <strong>{run.alert_points}</strong>
+        </div>
+        <div>
+          <span>picos aislados</span>
+          <strong>{run.isolated_alert_points}</strong>
+        </div>
+        <div>
+          <span>racha maxima</span>
+          <strong>{run.longest_alert_streak}</strong>
+        </div>
+      </div>
+      <OperationalFlow data={data} run={run} />
+      <WindowStateStrip run={run} />
+      <div className="motor-context-note">
+        <p>{alertContext}</p>
+        <p>{failureContext}</p>
+        <p>{sourceWarning}</p>
+      </div>
+    </div>
+  );
+}
+
+function AgentRecommendationPanel({
+  recommendation,
+}: {
+  recommendation: AgentOperationalRecommendation | null;
+}) {
+  if (recommendation === null) {
+    return <p className="empty-state compact-empty">Sin recomendacion disponible</p>;
+  }
+
+  const available = recommendation.available;
+  const source = recommendation.source_agent ?? "evaluator";
+  const statusOk = recommendation.status === "approved";
+  const muted =
+    !available ||
+    recommendation.status === "unavailable" ||
+    recommendation.status === "caution";
+
+  return (
+    <div className={`agent-recommendation ${recommendation.status}`}>
+      <div className="agent-recommendation-header">
+        <span className="agent-recommendation-icon">
+          <Brain size={18} />
+        </span>
+        <div>
+          <span>
+            {source} | {recommendation.decision_id ?? "-"}
+          </span>
+          <strong>{recommendation.title}</strong>
+        </div>
+        <StatusPill
+          ok={statusOk}
+          muted={muted}
+          label={recommendationStatusLabel(recommendation.status)}
+        />
+      </div>
+
+      <p className="agent-recommendation-summary">{recommendation.summary}</p>
+
+      <dl className="recommendation-meta">
+        <div>
+          <dt>confianza</dt>
+          <dd>{confidenceText(recommendation.confidence)}</dd>
+        </div>
+        <div>
+          <dt>siguiente</dt>
+          <dd>{recommendation.next_action ?? "-"}</dd>
+        </div>
+        <div>
+          <dt>herramientas</dt>
+          <dd>{recommendation.tool_names.length}</dd>
+        </div>
+        <div>
+          <dt>evidencias</dt>
+          <dd>{recommendation.evidence_refs.length}</dd>
+        </div>
+      </dl>
+
+      {recommendation.modeler_summary ? (
+        <section className="recommendation-block">
+          <h3>Estrategia modelador</h3>
+          <p>{recommendation.modeler_summary}</p>
+        </section>
+      ) : null}
+
+      <div className="recommendation-columns">
+        <RecommendationList
+          title="Evidencia"
+          items={recommendation.evidence_refs}
+          compact
+        />
+        <RecommendationList title="Herramientas" items={recommendation.tool_names} compact />
+        <RecommendationList
+          title="Guardarrailes"
+          items={recommendation.guardrail_checks}
+        />
+        <RecommendationList title="Cautelas" items={recommendation.limitations} />
+        <RecommendationList title="Debate" items={recommendation.debate_points} />
+      </div>
+    </div>
+  );
+}
+
+function RecommendationList({
+  compact = false,
+  items,
+  title,
+}: {
+  compact?: boolean;
+  items: string[];
+  title: string;
+}) {
+  if (items.length === 0) {
+    return null;
+  }
+  return (
+    <section className={`recommendation-block ${compact ? "compact" : ""}`}>
+      <h3>{title}</h3>
+      <ul className="recommendation-list">
+        {items.map((item) => (
+          <li key={`${title}-${item}`}>{item}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function StateMeter({
+  label,
+  value,
+  state,
+  invert = false,
+}: {
+  label: string;
+  value: number;
+  state: HealthState;
+  invert?: boolean;
+}) {
+  const bounded = Math.max(0, Math.min(100, value));
+  return (
+    <div className="state-meter">
+      <div>
+        <span>{label}</span>
+        <strong>{formatMetric(value)}</strong>
+      </div>
+      <div className={`state-meter-track ${state} ${invert ? "risk" : "health"}`}>
+        <span style={{ width: `${bounded}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function OperationalFlow({
+  data,
+  run,
+}: {
+  data: RunVisualizationData;
+  run: TemporalRunSeries;
+}) {
+  const steps = [
+    {
+      label: "ventanas",
+      value: `${run.n_points_total}`,
+      detail: temporalAxisLabel(run.x_axis),
+    },
+    {
+      label: "detector",
+      value: data.model_name ?? "-",
+      detail: "score de anomalia",
+    },
+    {
+      label: "estado",
+      value: healthStateLabel(run.current_health_state),
+      detail: `${run.longest_alert_streak} ventanas seguidas max.`,
+    },
+    {
+      label: "agente",
+      value: "Qwen/LLM",
+      detail: "interpreta evidencia",
+    },
+  ];
+
+  return (
+    <div className="operational-flow" aria-label="Flujo de lectura operacional">
+      {steps.map((step, index) => (
+        <div className="operational-step" key={step.label}>
+          <span>{step.label}</span>
+          <strong>{step.value}</strong>
+          <em>{step.detail}</em>
+          {index < steps.length - 1 ? <i aria-hidden="true" /> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function WindowStateStrip({ run }: { run: TemporalRunSeries }) {
+  const points = run.points.slice(0, 180);
+  return (
+    <div className="window-state-strip">
+      <div>
+        <strong>ventanas procesadas</strong>
+        <span>
+          {run.n_points_sampled}/{run.n_points_total} visibles | {run.alert_episodes} episodios
+        </span>
+      </div>
+      <div className="window-strip-track" aria-label="Estados por ventana">
+        {points.map((point) => (
+          <span
+            className={`window-strip-segment ${point.health_state}`}
+            key={point.window_id}
+            title={`${point.window_id} | ${healthStateLabel(point.health_state)} | salud ${formatMetric(point.health_index)} | riesgo ${formatMetric(point.risk_index)}`}
+          />
+        ))}
+      </div>
+      <div className="window-strip-legend">
+        <span><i className="nominal" /> nominal</span>
+        <span><i className="watch" /> vigilancia</span>
+        <span><i className="warning" /> alerta</span>
+        <span><i className="critical" /> critico</span>
+      </div>
+    </div>
+  );
+}
+
+function MetricBars({
+  metrics,
+  compact = false,
+}: {
+  metrics: VisualizationMetric[];
+  compact?: boolean;
+}) {
   const visible = metrics.filter((metric) => metric.value !== null);
   if (visible.length === 0) {
     return <p className="empty-state compact-empty">Sin metricas numericas</p>;
   }
 
   return (
-    <div className="metric-bars">
+    <div className={`metric-bars ${compact ? "compact" : ""}`}>
       {visible.map((metric) => {
         const value = metric.value ?? 0;
         const width = `${Math.max(0, Math.min(1, value)) * 100}%`;
@@ -2714,6 +3633,7 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
   const xValues = [
     ...run.points.map((point) => point.x),
     ...(run.first_alert_x !== null ? [run.first_alert_x] : []),
+    ...(run.first_persistent_alert_x !== null ? [run.first_persistent_alert_x] : []),
     ...(run.failure_x !== null ? [run.failure_x] : []),
   ];
   const yValues = [
@@ -2729,6 +3649,23 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
     })
     .join(" ");
   const thresholdY = run.threshold === null ? null : yScale(run.threshold);
+  const stateBands = run.points.map((point, index) => {
+    const currentX = xScale(point.x);
+    const left =
+      index === 0
+        ? padding
+        : (xScale(run.points[index - 1].x) + currentX) / 2;
+    const right =
+      index === run.points.length - 1
+        ? width - padding
+        : (currentX + xScale(run.points[index + 1].x)) / 2;
+    return {
+      key: `${point.window_id}-band`,
+      state: point.health_state,
+      x: Math.max(padding, left),
+      width: Math.max(1, Math.min(width - padding, right) - Math.max(padding, left)),
+    };
+  });
 
   return (
     <div className="temporal-wrap">
@@ -2756,16 +3693,20 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
           <dd>{temporalAxisLabel(run.x_axis)}</dd>
         </div>
         <div>
-          <dt>primer aviso</dt>
+          <dt>primer pico</dt>
           <dd>{formatMetric(run.first_alert_x)}</dd>
         </div>
         <div>
-          <dt>lead time</dt>
-          <dd>{formatSeconds(run.first_alert_time_to_failure_seconds)}</dd>
+          <dt>aviso sost.</dt>
+          <dd>{formatMetric(run.first_persistent_alert_x)}</dd>
         </div>
         <div>
-          <dt>alertas</dt>
-          <dd>{run.alert_points}</dd>
+          <dt>lead sost.</dt>
+          <dd>{formatSeconds(run.first_persistent_alert_time_to_failure_seconds)}</dd>
+        </div>
+        <div>
+          <dt>racha max.</dt>
+          <dd>{run.longest_alert_streak}</dd>
         </div>
       </dl>
       <p className="temporal-state-note">{run.current_state_reason}</p>
@@ -2775,6 +3716,16 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
         aria-label="Serie temporal de degradacion"
       >
         <rect className="temporal-bg" x="0" y="0" width={width} height={height} rx="8" />
+        {stateBands.map((band) => (
+          <rect
+            className={`temporal-state-band ${band.state}`}
+            height={height - padding * 2}
+            key={band.key}
+            width={band.width}
+            x={band.x}
+            y={padding}
+          />
+        ))}
         <line className="temporal-axis" x1={padding} x2={width - padding} y1={height - padding} y2={height - padding} />
         <line className="temporal-axis" x1={padding} x2={padding} y1={padding} y2={height - padding} />
         {thresholdY !== null ? (
@@ -2804,7 +3755,19 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
             r="6"
           >
             <title>
-              {`Primer aviso | x ${formatMetric(run.first_alert_x)} | lead ${formatSeconds(run.first_alert_time_to_failure_seconds)}`}
+              {`Primer pico | x ${formatMetric(run.first_alert_x)} | lead ${formatSeconds(run.first_alert_time_to_failure_seconds)}`}
+            </title>
+          </circle>
+        ) : null}
+        {run.first_persistent_alert_x !== null ? (
+          <circle
+            className="temporal-persistent-alert"
+            cx={xScale(run.first_persistent_alert_x)}
+            cy={yScale(scoreAtX(run, run.first_persistent_alert_x))}
+            r="6"
+          >
+            <title>
+              {`Aviso sostenido | x ${formatMetric(run.first_persistent_alert_x)} | lead ${formatSeconds(run.first_persistent_alert_time_to_failure_seconds)}`}
             </title>
           </circle>
         ) : null}
@@ -2825,7 +3788,8 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
       <div className="temporal-legend">
         <span><i className="legend-score" /> score</span>
         <span><i className="legend-threshold" /> umbral</span>
-        <span><i className="legend-first-alert" /> primer aviso</span>
+        <span><i className="legend-first-alert" /> primer pico</span>
+        <span><i className="legend-persistent-alert" /> aviso sostenido</span>
         <span><i className="legend-failure" /> fallo</span>
         <span><i className="legend-health-warning" /> warning</span>
         <span><i className="legend-health-critical" /> critico</span>
@@ -2866,6 +3830,17 @@ function healthStateLabel(state: HealthState): string {
     critical: "critico",
   };
   return labels[state];
+}
+
+function recommendationStatusLabel(status: AgentOperationalRecommendation["status"]): string {
+  const labels: Record<AgentOperationalRecommendation["status"], string> = {
+    approved: "aprobada",
+    caution: "cautela",
+    needs_revision: "revision",
+    blocked: "bloqueada",
+    unavailable: "sin decision",
+  };
+  return labels[status];
 }
 
 function formatSeconds(value: number | null): string {
@@ -3581,6 +4556,56 @@ function metricLabel(metric: string): string {
   return labels[metric] ?? metric;
 }
 
+function isRunToFailureVisualization(data: RunVisualizationData | null): boolean {
+  if (data === null) {
+    return false;
+  }
+  return (
+    data.supervision_profile === "run_to_failure_degradation" ||
+    data.metric_families.includes("run_to_failure_degradation")
+  );
+}
+
+function profileLabel(profile: string | null): string {
+  if (profile === "run_to_failure_degradation") {
+    return "run-to-failure";
+  }
+  if (profile === "binary_fault_classification") {
+    return "binario";
+  }
+  return profile ?? "-";
+}
+
+function labelSourceLabel(source: string | null): string {
+  const labels: Record<string, string> = {
+    official: "Oficial",
+    temporal_proxy: "Proxy temporal",
+    synthetic: "Sintetica",
+    none: "Sin etiquetas",
+  };
+  return source === null ? "-" : labels[source] ?? source;
+}
+
+function formatVisualizationMetric(metric: VisualizationMetric): string {
+  if (metric.value === null) {
+    return "-";
+  }
+  if (metric.value_kind === "seconds") {
+    return formatSeconds(metric.value);
+  }
+  if (metric.value_kind === "count") {
+    return new Intl.NumberFormat("es-ES", {
+      maximumFractionDigits: 0,
+    }).format(metric.value);
+  }
+  if (metric.value_kind === "ratio" && metric.value >= 0 && metric.value <= 1) {
+    return `${new Intl.NumberFormat("es-ES", {
+      maximumFractionDigits: 1,
+    }).format(metric.value * 100)}%`;
+  }
+  return formatMetric(metric.value);
+}
+
 function formatComparisonMetric(metric: string, value: number | null): string {
   if (metric.includes("lead_time")) {
     return formatSeconds(value);
@@ -3866,6 +4891,17 @@ function stringValue(value: unknown): string | null {
   return null;
 }
 
+function numberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -3904,6 +4940,53 @@ function roleLabel(role: string): string {
     excluded: "excluido",
   };
   return labels[role] ?? role;
+}
+
+function sourceTypeLabel(sourceType: string): string {
+  const labels: Record<string, string> = {
+    decision_episode: "episodio",
+    memory_candidate: "candidato",
+    reasoning_postmortem: "post-mortem",
+    human_review: "revision humana",
+    memory_usage_audit: "auditoria",
+    experiment_summary: "experimento",
+    technical_documentation: "documentacion",
+    methodology_note: "metodologia",
+  };
+  return labels[sourceType] ?? sourceType;
+}
+
+function outcomeLabel(outcome: string | null): string {
+  const labels: Record<string, string> = {
+    validated: "validado",
+    supported: "soportado",
+    partially_supported: "parcial",
+    overcorrected: "sobrecorregido",
+    contradicted: "contradicho",
+    inconclusive: "inconcluso",
+  };
+  return outcome === null ? "-" : labels[outcome] ?? outcome;
+}
+
+function verdictLabel(verdict: string | null): string {
+  const labels: Record<string, string> = {
+    correct: "correcto",
+    partially_correct: "parcial",
+    incorrect: "incorrecto",
+    unsafe: "inseguro",
+    needs_more_evidence: "mas evidencia",
+  };
+  return verdict === null ? "sin veredicto" : labels[verdict] ?? verdict;
+}
+
+function recordStateLabel(record: MemoryRecordSummary): string {
+  if (record.exclude_from_context || record.memory_role === "excluded") {
+    return "excluido";
+  }
+  if (record.reusable_as_context) {
+    return "recuperable";
+  }
+  return "indexado";
 }
 
 function kindLabel(kind: AgentRuntimeEvent["kind"]): string {

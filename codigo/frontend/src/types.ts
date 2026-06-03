@@ -127,6 +127,9 @@ export interface VisualizationMetric {
   label: string;
   value: number | null;
   higher_is_better: boolean;
+  metric_family: "binary_classification" | "run_to_failure_degradation";
+  value_kind: "ratio" | "seconds" | "count" | "score";
+  note: string | null;
 }
 
 export interface ProjectionPoint {
@@ -186,8 +189,13 @@ export interface TemporalRunSeries {
   first_alert_x: number | null;
   first_alert_time: string | null;
   first_alert_time_to_failure_seconds: number | null;
+  first_persistent_alert_x: number | null;
+  first_persistent_alert_time: string | null;
+  first_persistent_alert_time_to_failure_seconds: number | null;
+  persistent_alert_min_windows: number;
   failure_x: number | null;
   failure_time: string | null;
+  failure_reference: string;
   score_min: number | null;
   score_max: number | null;
   current_x: number | null;
@@ -200,6 +208,9 @@ export interface TemporalRunSeries {
   alert_points: number;
   warning_points: number;
   critical_points: number;
+  isolated_alert_points: number;
+  alert_episodes: number;
+  longest_alert_streak: number;
 }
 
 export interface TemporalSeriesData {
@@ -211,14 +222,50 @@ export interface TemporalSeriesData {
   warnings: string[];
 }
 
+export type AgentRecommendationStatus =
+  | "approved"
+  | "caution"
+  | "needs_revision"
+  | "blocked"
+  | "unavailable";
+
+export interface AgentOperationalRecommendation {
+  available: boolean;
+  source_agent: string | null;
+  decision_id: string | null;
+  status: AgentRecommendationStatus;
+  title: string;
+  summary: string;
+  confidence: number | null;
+  next_action: string | null;
+  operational_assessment: string | null;
+  evidence_refs: string[];
+  tool_names: string[];
+  limitations: string[];
+  debate_points: string[];
+  guardrail_checks: string[];
+  modeler_summary: string | null;
+}
+
 export interface RunVisualizationData {
   run_id: string;
   dataset: string;
+  supervision_profile: string | null;
+  label_source: string | null;
+  label_granularity: string | null;
+  model_name: string | null;
+  metric_families: string[];
   metrics: VisualizationMetric[];
+  primary_metrics: VisualizationMetric[];
+  auxiliary_metrics: VisualizationMetric[];
+  binary_metric_context: Record<string, string>;
   projection_available: boolean;
   projection_points: ProjectionPoint[];
   projection_boundary: ProjectionBoundary | null;
+  projection_role: "primary" | "diagnostic";
+  projection_explanation: string;
   temporal_series: TemporalSeriesData | null;
+  agent_recommendation: AgentOperationalRecommendation | null;
   n_points_total: number;
   n_points_sampled: number;
   source_paths: Record<string, string>;
@@ -331,6 +378,21 @@ export interface ReasoningMemoryRecord extends MemoryRecordSummary {
   embedding_version: string | null;
   embedding_dimension: number | null;
   vector_id: string | null;
+}
+
+export type MemoryCurationAction = "exclude" | "restore" | "delete";
+
+export interface MemoryCurationRequest {
+  action: Exclude<MemoryCurationAction, "delete">;
+  reason: string;
+  reviewer: string | null;
+}
+
+export interface MemoryCurationResponse {
+  memory_record_id: string;
+  action: MemoryCurationAction;
+  reason: string | null;
+  record: ReasoningMemoryRecord | null;
 }
 
 export interface HumanReviewSettings {

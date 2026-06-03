@@ -14,6 +14,8 @@ from codigo.app.schemas.api_datasets import (
     DatasetDescribeResponse,
 )
 from codigo.app.schemas.api_memory import (
+    MemoryCurationRequest,
+    MemoryCurationResponse,
     MemoryCollectionSummary,
     MemoryRecordSummary,
 )
@@ -43,6 +45,8 @@ from codigo.app.services.pipeline_runner import (
     run_dataset_pipeline,
 )
 from codigo.app.services.memory_registry import (
+    curate_memory_record,
+    delete_memory_record,
     get_memory_record,
     list_memory_collections,
     list_memory_records,
@@ -160,6 +164,52 @@ async def read_memory_record(
 
     try:
         return get_memory_record(_memory_dir(request), memory_record_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch(
+    "/memory/records/{memory_record_id}/curation",
+    response_model=MemoryCurationResponse,
+)
+async def update_memory_record_curation(
+    memory_record_id: str,
+    payload: MemoryCurationRequest,
+    request: Request,
+) -> MemoryCurationResponse:
+    """Excluye o restaura un recuerdo del contexto RAG reutilizable."""
+
+    try:
+        return curate_memory_record(
+            _memory_dir(request),
+            memory_record_id,
+            action=payload.action,
+            reason=payload.reason,
+            reviewer=payload.reviewer,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete(
+    "/memory/records/{memory_record_id}",
+    response_model=MemoryCurationResponse,
+)
+async def delete_memory_record_route(
+    memory_record_id: str,
+    request: Request,
+    reason: str | None = Query(default=None, min_length=1, max_length=500),
+) -> MemoryCurationResponse:
+    """Borra un recuerdo del indice local de memoria."""
+
+    try:
+        return delete_memory_record(
+            _memory_dir(request),
+            memory_record_id,
+            reason=reason,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

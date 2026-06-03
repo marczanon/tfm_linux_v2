@@ -57,6 +57,27 @@ formaran parte del resultado de investigacion; hasta entonces, la metodologia
 debe intentar llevar la linea agentica tan lejos como sea razonablemente
 posible sin abandonar seguridad, reproducibilidad ni trazabilidad.
 
+\section{Memoria agentica y RAG}
+
+La memoria se trata como una capacidad metodologica central, no como un simple
+historial de ejecuciones. Cada recuerdo debe representar una decision, una
+evidencia, una advertencia o una leccion reutilizable; debe poder recuperarse
+por un agente, citarse dentro de una decision estructurada y auditarse despues.
+Por ello se separan cuatro responsabilidades: los agentes deciden si usan la
+memoria, los contratos limitan que pueden declarar, los ejecutores persisten e
+indexan artefactos reproducibles y la interfaz debe mostrar el ciclo completo
+del recuerdo.
+
+El baseline del TFM conserva una memoria vectorial local basada en JSON y
+embeddings Qwen cuando Ollama esta disponible. Esta eleccion facilita
+reproducibilidad, inspeccion manual y pruebas locales, pero se declara
+explicitamente como punto de partida, no como equivalente a una base vectorial
+industrial. La evolucion metodologica prevista compara ese baseline con
+tecnicas actuales de RAG: observabilidad de consultas, evaluacion de retrieval,
+reranking, busqueda hibrida, consolidacion de episodios y eventualmente una
+base vectorial externa. En todos los casos, la memoria debe informar a Qwen sin
+sustituir el protagonismo deliberativo de los agentes.
+
 \section{Generalización multi-dataset}
 
 Tras consolidar el MVP sobre CWRU, la siguiente extensión metodológica consiste

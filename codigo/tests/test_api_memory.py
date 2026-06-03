@@ -101,6 +101,73 @@ class APIMemoryTests(unittest.TestCase):
         self.assertEqual(empty_search_response.json(), [])
         self.assertEqual(missing_response.status_code, 404)
 
+    def test_memory_record_curation_can_exclude_restore_and_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            memory_dir = base / "memory"
+            store = LocalJsonVectorMemoryStore(
+                memory_dir,
+                embedding_model=LocalHashEmbeddingModel(),
+            )
+            store.upsert(_record("memory-modeler-001", dataset="nasa_ims_bearing"))
+            app = create_app(runs_dir=base / "runs", memory_dir=memory_dir)
+
+            exclude_response = _patch(
+                app,
+                "/memory/records/memory-modeler-001/curation",
+                json={
+                    "action": "exclude",
+                    "reason": "Benchmark excludes contaminated memory.",
+                    "reviewer": "test_runner",
+                },
+            )
+            reusable_after_exclude = _get(
+                app,
+                "/memory/records",
+                params={"target_agent": "modeler", "reusable_only": True},
+            )
+            restore_response = _patch(
+                app,
+                "/memory/records/memory-modeler-001/curation",
+                json={
+                    "action": "restore",
+                    "reason": "Memory accepted after review.",
+                    "reviewer": "test_runner",
+                },
+            )
+            reusable_after_restore = _get(
+                app,
+                "/memory/records",
+                params={"target_agent": "modeler", "reusable_only": True},
+            )
+            delete_response = _delete(
+                app,
+                "/memory/records/memory-modeler-001",
+                params={"reason": "Remove benchmark-only memory."},
+            )
+            missing_after_delete = _get(app, "/memory/records/memory-modeler-001")
+
+        self.assertEqual(exclude_response.status_code, 200)
+        excluded = exclude_response.json()["record"]
+        self.assertFalse(excluded["reusable_as_context"])
+        self.assertTrue(excluded["exclude_from_context"])
+        self.assertIn("manual_exclude", excluded["tags"])
+        self.assertEqual(reusable_after_exclude.status_code, 200)
+        self.assertEqual(reusable_after_exclude.json(), [])
+        self.assertEqual(restore_response.status_code, 200)
+        restored = restore_response.json()["record"]
+        self.assertTrue(restored["reusable_as_context"])
+        self.assertFalse(restored["exclude_from_context"])
+        self.assertIn("manual_restore", restored["tags"])
+        self.assertEqual(reusable_after_restore.status_code, 200)
+        self.assertEqual(
+            [item["memory_record_id"] for item in reusable_after_restore.json()],
+            ["memory-modeler-001"],
+        )
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertEqual(delete_response.json()["action"], "delete")
+        self.assertEqual(missing_after_delete.status_code, 404)
+
 
 def _record(
     memory_record_id: str,
@@ -141,6 +208,30 @@ def _get(app, path: str, **kwargs) -> httpx.Response:
             base_url="http://testserver",
         ) as client:
             return await client.get(path, **kwargs)
+
+    return asyncio.run(request())
+
+
+def _patch(app, path: str, **kwargs) -> httpx.Response:
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.patch(path, **kwargs)
+
+    return asyncio.run(request())
+
+
+def _delete(app, path: str, **kwargs) -> httpx.Response:
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.delete(path, **kwargs)
 
     return asyncio.run(request())
 

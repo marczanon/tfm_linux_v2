@@ -104,7 +104,12 @@ MemoryUsageAuditAssessment = Literal[
     "not_applicable",
 ]
 
-AgentToolName = Literal["evidence_lookup", "threshold_analysis"]
+AgentToolName = Literal[
+    "evidence_lookup",
+    "temporal_health_lookup",
+    "degradation_metrics_lookup",
+    "threshold_analysis",
+]
 
 AgentToolAgent = Literal[
     "supervisor",

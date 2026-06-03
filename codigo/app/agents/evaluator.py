@@ -17,6 +17,7 @@ from codigo.app.services.agent_memory import (
     memory_usage_json_template,
     validate_retrieved_memory_usage,
 )
+from codigo.app.services.agent_tools import agent_tool_catalog
 from codigo.app.services.llm import (
     JSONLLMClient,
     LLMCallError,
@@ -31,6 +32,17 @@ MAX_FALSE_POSITIVE_RATE = 0.10
 MIN_DEGRADATION_DETECTION_RATE = 0.50
 MAX_DEGRADATION_FALSE_ALARM_RATE = 0.25
 MIN_DEGRADATION_TREND_SPEARMAN = 0.00
+RUN_TO_FAILURE_EVALUATOR_TOOLS = {
+    "temporal_health_lookup",
+    "degradation_metrics_lookup",
+}
+RUN_TO_FAILURE_GUARDRAILS = {
+    "isolated_spike_not_failure",
+    "sustained_alert_required",
+    "rul_not_estimated",
+    "proxy_labels_not_official",
+    "f1_auxiliary_only",
+}
 
 
 def decide_evaluation_action(
@@ -107,6 +119,7 @@ def decide_evaluation_action_deterministic(state: TFMStateModel) -> EvaluationDe
             if _uses_temporal_degradation_profile(state)
             else MAX_FALSE_POSITIVE_RATE
         ),
+        **_temporal_operational_decision_fields(state, approved),
     )
 
 
@@ -237,6 +250,9 @@ def _evaluator_messages(
                     "Metricas disponibles:",
                     json.dumps(_metrics_summary_for_llm(state.metrics), indent=2, ensure_ascii=True),
                     "",
+                    "Herramientas agenticas disponibles:",
+                    json.dumps(_evaluator_tool_catalog_for_llm(), indent=2, ensure_ascii=True),
+                    "",
                     "Memoria recuperada para el evaluador:",
                     json.dumps(
                         memory_context_for_llm(memory_context),
@@ -315,6 +331,7 @@ def _evaluator_json_template(
             if _uses_temporal_degradation_profile(state)
             else MAX_FALSE_POSITIVE_RATE
         ),
+        **_temporal_operational_decision_fields(state, approved),
     }
     template.update(memory_usage_json_template(memory_context))
     return template
@@ -363,6 +380,18 @@ def _metrics_summary_for_llm(metrics: MetricsReport | None) -> dict[str, Any]:
     return summary
 
 
+def _evaluator_tool_catalog_for_llm() -> list[dict[str, Any]]:
+    return [
+        {
+            "tool_name": spec.tool_name,
+            "effect": spec.effect,
+            "description": spec.description,
+            "input_schema": spec.input_schema,
+        }
+        for spec in agent_tool_catalog(agent_name="evaluator")
+    ]
+
+
 def _validate_evaluation_decision_bounds(
     state: TFMStateModel,
     decision: EvaluationDecision,
@@ -374,6 +403,7 @@ def _validate_evaluation_decision_bounds(
             raise ValueError("run-to-failure evaluation must not require recall threshold")
         if decision.max_false_positive_rate is not None:
             raise ValueError("run-to-failure evaluation must not require binary FPR threshold")
+        _validate_temporal_operational_decision(state, decision)
     else:
         if decision.min_recall_required != MIN_RECALL_REQUIRED:
             raise ValueError(f"min_recall_required must be {MIN_RECALL_REQUIRED}")
@@ -398,6 +428,134 @@ def _validate_evaluation_decision_bounds(
     )
 
 
+def _temporal_operational_decision_fields(
+    state: TFMStateModel,
+    approved: bool,
+) -> dict[str, Any]:
+    if not _uses_temporal_degradation_profile(state):
+        return {}
+    return {
+        "tool_names": [
+            "temporal_health_lookup",
+            "degradation_metrics_lookup",
+        ],
+        "evidence_refs": _temporal_evaluation_evidence_refs(state),
+        "operational_assessment": _temporal_operational_assessment(state, approved),
+        "temporal_debate_points": _temporal_debate_points(state, approved),
+        "temporal_guardrail_checks": sorted(RUN_TO_FAILURE_GUARDRAILS),
+    }
+
+
+def _temporal_evaluation_evidence_refs(state: TFMStateModel) -> list[str]:
+    refs = [
+        "tool:temporal_health_lookup",
+        "tool:degradation_metrics_lookup",
+        "temporal:first_persistent_alert",
+        "temporal:isolated_alert_points",
+        "temporal:longest_alert_streak",
+        "temporal:rul_not_estimated",
+        "metric:mean_lead_time_to_failure",
+        "metric:mean_false_alarm_rate_nominal",
+        "metric:mean_score_trend_spearman",
+        f"label_source:{state.project_context.label_source}",
+    ]
+    return sorted(set(refs))
+
+
+def _temporal_operational_assessment(
+    state: TFMStateModel,
+    approved: bool,
+) -> str:
+    if state.metrics is None:
+        return (
+            "No hay metricas temporales; la deteccion no es defendible "
+            "operacionalmente y debe tratarse como incompleta."
+        )
+    status = "defendible con cautelas" if approved else "no defendible todavia"
+    return (
+        f"La deteccion run-to-failure es {status}: se juzga por aviso sostenido, "
+        "lead time, falsas alarmas nominales y tendencia del score. Un pico "
+        "aislado no equivale a fallo; RUL no esta estimado y las etiquetas proxy "
+        "no son ground truth oficial por ventana."
+    )
+
+
+def _temporal_debate_points(
+    state: TFMStateModel,
+    approved: bool,
+) -> list[str]:
+    points = [
+        "Distinguir pico aislado de aviso sostenido antes de interpretar riesgo.",
+        "Comprobar que el lead time medio existe sin presentar RUL estimado.",
+        "Valorar falsas alarmas nominales frente a utilidad industrial.",
+        "Tratar F1, recall y precision como metricas auxiliares/proxy.",
+    ]
+    if state.project_context.label_source in {"none", "temporal_proxy", "synthetic"}:
+        points.append(
+            "Declarar que las etiquetas por ventana son proxy o experimentales, no oficiales."
+        )
+    if not approved:
+        points.append(
+            "Solicitar nueva estrategia si deteccion temprana, tendencia o falsas alarmas no son suficientes."
+        )
+    return points
+
+
+def _validate_temporal_operational_decision(
+    state: TFMStateModel,
+    decision: EvaluationDecision,
+) -> None:
+    missing_tools = sorted(RUN_TO_FAILURE_EVALUATOR_TOOLS - set(decision.tool_names))
+    if missing_tools:
+        raise ValueError(
+            "run-to-failure evaluator decision must use tools: "
+            + ", ".join(missing_tools)
+        )
+    refs = set(decision.evidence_refs)
+    required_tool_refs = {f"tool:{name}" for name in RUN_TO_FAILURE_EVALUATOR_TOOLS}
+    missing_tool_refs = sorted(required_tool_refs - refs)
+    if missing_tool_refs:
+        raise ValueError(
+            "run-to-failure evaluator decision must cite tool refs: "
+            + ", ".join(missing_tool_refs)
+        )
+    if not any(
+        ref.startswith("temporal:") or ref.startswith("metric:mean_")
+        for ref in refs
+    ):
+        raise ValueError(
+            "run-to-failure evaluator decision must cite temporal or degradation evidence"
+        )
+    if decision.operational_assessment is None:
+        raise ValueError(
+            "run-to-failure evaluator decision requires operational_assessment"
+        )
+    assessment = decision.operational_assessment.lower()
+    if "rul" not in assessment:
+        raise ValueError("operational_assessment must mention RUL limitation")
+    if "pico" not in assessment and "spike" not in assessment:
+        raise ValueError("operational_assessment must address isolated spikes")
+    if "sosten" not in assessment and "persistent" not in assessment:
+        raise ValueError("operational_assessment must address sustained alerts")
+    debate_text = " ".join(decision.temporal_debate_points).lower()
+    for word in ["pico", "sosten", "falsas", "proxy"]:
+        if word not in debate_text:
+            raise ValueError(
+                "temporal_debate_points must debate spike, sustained alert, "
+                "false alarms and proxy labels"
+            )
+    missing_guardrails = sorted(
+        RUN_TO_FAILURE_GUARDRAILS - set(decision.temporal_guardrail_checks)
+    )
+    if missing_guardrails:
+        raise ValueError(
+            "run-to-failure evaluator decision missing guardrail checks: "
+            + ", ".join(missing_guardrails)
+        )
+    if any("rul estimado" in point.lower() for point in decision.temporal_debate_points):
+        raise ValueError("temporal_debate_points cannot claim estimated RUL")
+
+
 def _profile_specific_rules(state: TFMStateModel) -> list[str]:
     if _uses_temporal_degradation_profile(state):
         return [
@@ -418,6 +576,27 @@ def _profile_specific_rules(state: TFMStateModel) -> list[str]:
             (
                 "- Declara como limitacion cualquier label_source none, "
                 "temporal_proxy o synthetic."
+            ),
+            (
+                "- tool_names debe incluir temporal_health_lookup y "
+                "degradation_metrics_lookup."
+            ),
+            (
+                "- evidence_refs debe citar las herramientas usadas y al menos "
+                "una metrica temporal o referencia temporal."
+            ),
+            (
+                "- operational_assessment debe juzgar si la deteccion es "
+                "defendible industrialmente, no solo numericamente correcta."
+            ),
+            (
+                "- temporal_debate_points debe debatir pico aislado, aviso "
+                "sostenido, falsas alarmas nominales y etiquetas proxy."
+            ),
+            (
+                "- temporal_guardrail_checks debe incluir isolated_spike_not_failure, "
+                "sustained_alert_required, rul_not_estimated, "
+                "proxy_labels_not_official y f1_auxiliary_only."
             ),
         ]
     return [

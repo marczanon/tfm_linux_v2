@@ -202,3 +202,87 @@ Documentos iniciales:
 - `68_fase7_hito8_monitorizacion_estado_salud.md`: segundo bloque del panel
   run-to-failure; extiende `temporal_series` con `health_index`, `risk_index` y
   `health_state` por ventana y por trayectoria para monitorizacion operacional.
+- `69_fase7_cierre_base_run_to_failure.md`: checklist de cierre de la base del
+  perfil principal `run_to_failure_degradation`, priorizando retoques frontend,
+  cola de activos, comparacion visual de modelos, interpretacion agentica,
+  politica de salud/RUL y validacion antes de pasar a industrializacion SaaS.
+- `70_fase7_hito9_panel_control_run_to_failure.md`: implementacion del primer
+  retoque de cierre del perfil; convierte `Visualizacion` en panel de control
+  run-to-failure con metricas temporales primarias, estado de motor, tira de
+  ventanas, bandas de estado y PCA como diagnostico secundario.
+- `71_fase8_hoja_ruta_agentica_run_to_failure.md`: hoja de ruta de Fase 8 para
+  convertir `run_to_failure_degradation` en el centro agentico del TFM,
+  ampliando herramientas, contratos, debate, memoria, frontend e informes para
+  que Qwen/LLM gobierne runs temporales dentro de guardarrailes estrictos.
+- `72_fase8_hito1_evidence_pack_temporal_agentes.md`: implementacion del primer
+  hito de Fase 8; extiende `evidence_lookup` con la seccion `temporal`, refs
+  citables y contexto especifico para que `cleaner` participe en la base
+  agentica run-to-failure.
+- `73_fase8_hito2_herramientas_temporales_agenticas.md`: implementacion del
+  segundo hito de Fase 8; anade `temporal_health_lookup` y
+  `degradation_metrics_lookup` como herramientas read-only para que los agentes
+  consulten salud temporal y metricas de degradacion con refs citables.
+- `74_fase8_hito3_modeler_estratega_run_to_failure.md`: implementacion del
+  tercer hito de Fase 8; extiende `ModelingDecisionStrategy` para que el
+  `modeler` declare herramientas, objetivos, refs y politica de alerta cuando
+  gobierna una run `run_to_failure_degradation`.
+- `75_fase8_hito4_evaluador_operacional_debate_temporal.md`: implementacion
+  del cuarto hito de Fase 8; extiende `EvaluationDecision` para que el
+  `evaluator` audite defendibilidad operacional, debate temporal y guardarrails
+  como RUL no estimado, picos aislados y etiquetas proxy.
+- `76_fase8_hito5_recomendacion_agentica_frontend.md`: implementacion del
+  quinto hito de Fase 8; extiende `GET /runs/{run_id}/visualization` y el
+  frontend para mostrar recomendacion operacional agentica con confianza,
+  evidencia, herramientas, cautelas, guardarrails y contexto del `modeler`.
+- `77_fase8_hito6_postmortem_memoria_temporal.md`: implementacion del sexto
+  hito de Fase 8; adapta `DecisionEpisode` y `MemoryCandidate` al perfil
+  `run_to_failure_degradation`, genera memoria de `modeler` en el grafo y
+  conserva metricas temporales, herramientas, guardarrails y cautelas en
+  candidatos indexables.
+- `78_fase8_hoja_ruta_memoria_rag_avanzada.md`: investigacion y hoja de ruta
+  para llevar la memoria agentica a un nivel superior, aclarando el estado
+  actual como RAG vectorial local con embeddings Qwen, sus limites frente a una
+  base vectorial industrial y los hitos de cockpit, observabilidad, Qdrant,
+  reranking, hybrid search, quality gate y consolidacion.
+- `79_fase8_memoria_m1_cockpit_frontend.md`: implementacion del primer hito de
+  memoria RAG avanzada; convierte la vista de memoria persistida en un cockpit
+  frontend con ciclo de estados, distribuciones, runtime, registros citados y
+  detalle enriquecido de cada recuerdo, sin cambiar el backend read-only.
+- `80_fase8_memoria_m2_observabilidad_retrieval.md`: implementacion del segundo
+  hito de memoria RAG avanzada; persiste `memory_query.json`, enriquece
+  `retrieved_memory_context.json` como artefacto trazable, anade eventos runtime
+  de consulta/retorno/uso/rechazo y muestra backend, embeddings, scores y
+  recuerdos usados o ignorados en el cockpit frontend.
+- `81_fase8_memoria_m3_modeler_transversal_gobierno.md`: implementacion del
+  tercer hito de memoria RAG avanzada; lleva RAG a la decision inicial del
+  `modeler`, mantiene el diseno como memoria multiagente y anade curacion
+  manual de recuerdos desde API/frontend para excluir, restaurar o borrar
+  memoria tras pruebas o antes de benchmarks.
+- `82_fase8_memoria_m4_pre_benchmark_efecto_memoria.md`: implementacion del
+  hito M4-pre de memoria RAG avanzada; anade un benchmark offline sobre
+  snapshots persistidos para medir retrieval, citas, memoria ignorada, uso
+  invalido y deltas frente a baseline, incluyendo un primer smoke real CWRU
+  donde `structurer` y `evaluator` citan memoria sin cambio numerico de
+  metricas.
+- `83_fase8_memoria_m4_1_quality_gate_benchmark_controlado.md`: implementacion
+  de M4.1; anade `memory_quality_gate.py`, clasifica recuerdos recuperados como
+  `pass`, `caution` o `exclude_candidate`, extiende el benchmark con variantes
+  controladas `memory_off/memory_full/memory_filtered` y deja fuera la memoria
+  consolidada para no coartar futuras reflexiones agenticas.
+- `84_fase8_memoria_m4_2_qdrant_backend_opcional.md`: implementacion de M4.2;
+  anade `QdrantVectorMemoryStore`, mantiene JSON como baseline, incorpora
+  `get_default_vector_memory_store(...)` para seleccionar backend por entorno y
+  valida Qdrant con tests HTTP mockeados antes de un smoke real.
+- `85_fase8_memoria_m4_3_migracion_qdrant_smoke.md`: implementacion de M4.3;
+  anade servicio y CLI de migracion JSON -> Qdrant, profile Docker
+  `memory-qdrant`, Query API de Qdrant con fallback y un smoke real que migra
+  20 recuerdos con solapamiento de retrieval 1.0 frente al baseline reembebido.
+- `86_fase8_memoria_m4_4_run_qdrant_retrieval_smoke.md`: comprobacion M4.4;
+  adapta los runners para usar `get_default_vector_memory_store(...)`, ejecuta
+  una run CWRU con `TFM_MEMORY_BACKEND=qdrant`, confirma artefactos con
+  `retrieval_backend=qdrant_vector_memory_store` y clasifica la run como
+  `retrieval_only` en el benchmark de efecto de memoria.
+- `87_cierre_sesion_2026_06_03_recap_para_continuar.md`: handoff de cierre de
+  sesion para retomar el 2026-06-04; resume la base run-to-failure, el avance
+  de memoria RAG/Qdrant, el estado exacto de M4.4, documentos/artefactos clave y
+  el siguiente paso M4.5 con Qwen/LLM + Qdrant.

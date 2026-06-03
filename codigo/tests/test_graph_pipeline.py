@@ -156,13 +156,14 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertIn("report_debate", artifact_names)
         self.assertIn("report_debate_report", artifact_names)
 
-    def test_memory_aware_graph_writes_structurer_and_evaluator_memory_artifacts(self):
+    def test_memory_aware_graph_writes_agent_decision_memory_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             calls: list[str] = []
             paths = _paths(base)
             executors = _successful_executors(paths, calls)
             memory_output = base / "reports"
+            events = []
             state = create_initial_cwru_state(
                 thread_id="cwru-graph-memory-test",
                 run_id="run-memory-001",
@@ -177,6 +178,7 @@ class GraphPipelineTests(unittest.TestCase):
                 state,
                 executors=executors,
                 agents=agents,
+                runtime_recorder=AgentRuntimeRecorder("run-memory-001", events.append),
                 memory_config=PipelineMemoryConfig(
                     memory_store=_FakeMemoryStore(),
                     output_root=memory_output,
@@ -188,19 +190,79 @@ class GraphPipelineTests(unittest.TestCase):
             structurer_candidate_exists = Path(
                 artifacts_by_name["structurer_memory_candidate"].path
             ).exists()
+            structurer_query_exists = Path(
+                artifacts_by_name["structurer_memory_query"].path
+            ).exists()
+            structurer_context_exists = Path(
+                artifacts_by_name["structurer_retrieved_memory_context"].path
+            ).exists()
+            modeler_candidate_exists = Path(
+                artifacts_by_name["modeler_memory_candidate"].path
+            ).exists()
+            modeler_query_exists = Path(
+                artifacts_by_name["modeler_memory_query"].path
+            ).exists()
+            modeler_context_exists = Path(
+                artifacts_by_name["modeler_retrieved_memory_context"].path
+            ).exists()
+            evaluator_query_exists = Path(
+                artifacts_by_name["evaluator_memory_query"].path
+            ).exists()
+            evaluator_context_exists = Path(
+                artifacts_by_name["evaluator_retrieved_memory_context"].path
+            ).exists()
             evaluator_candidate_exists = Path(
                 artifacts_by_name["evaluator_memory_candidate"].path
             ).exists()
+            structurer_query = json.loads(
+                Path(artifacts_by_name["structurer_memory_query"].path).read_text(
+                    encoding="utf-8"
+                )
+            )
 
         self.assertEqual(validated.current_stage, "completed")
+        self.assertIn("structurer_memory_query", artifacts_by_name)
         self.assertIn("structurer_retrieved_memory_context", artifacts_by_name)
         self.assertIn("structurer_decision_episode", artifacts_by_name)
         self.assertIn("structurer_memory_candidate", artifacts_by_name)
+        self.assertIn("modeler_decision_episode", artifacts_by_name)
+        self.assertIn("modeler_memory_candidate", artifacts_by_name)
+        self.assertIn("modeler_memory_query", artifacts_by_name)
+        self.assertIn("modeler_retrieved_memory_context", artifacts_by_name)
+        self.assertIn("evaluator_memory_query", artifacts_by_name)
         self.assertIn("evaluator_retrieved_memory_context", artifacts_by_name)
         self.assertIn("evaluator_decision_episode", artifacts_by_name)
         self.assertIn("evaluator_memory_candidate", artifacts_by_name)
         self.assertTrue(structurer_candidate_exists)
+        self.assertTrue(structurer_query_exists)
+        self.assertTrue(structurer_context_exists)
+        self.assertTrue(modeler_candidate_exists)
+        self.assertTrue(modeler_query_exists)
+        self.assertTrue(modeler_context_exists)
+        self.assertTrue(evaluator_query_exists)
+        self.assertTrue(evaluator_context_exists)
         self.assertTrue(evaluator_candidate_exists)
+        self.assertEqual(structurer_query["target_agent"], "structurer")
+        self.assertEqual(structurer_query["top_k"], 3)
+        retrieval_event_types = [
+            event.payload.get("retrieval_event")
+            for event in events
+            if event.kind == "memory_retrieval" and event.agent_name == "structurer"
+        ]
+        self.assertIn("retrieval_requested", retrieval_event_types)
+        self.assertIn("retrieval_returned", retrieval_event_types)
+        self.assertIn("retrieval_used", retrieval_event_types)
+        modeler_retrieval_event_types = [
+            event.payload.get("retrieval_event")
+            for event in events
+            if event.kind == "memory_retrieval" and event.agent_name == "modeler"
+        ]
+        self.assertIn("retrieval_requested", modeler_retrieval_event_types)
+        self.assertIn("retrieval_returned", modeler_retrieval_event_types)
+        self.assertIn(
+            "retrieval_rejected_by_agent",
+            modeler_retrieval_event_types,
+        )
         structurer_decision = json.loads(
             [
                 message.content
@@ -643,6 +705,7 @@ class _FakeMemoryStore:
 def _memory_record(query: AgentMemoryQuery) -> ReasoningMemoryRecord:
     collection_by_agent = {
         "structurer": "structurer_memory",
+        "modeler": "modeler_memory",
         "evaluator": "evaluator_memory",
     }
     return ReasoningMemoryRecord(

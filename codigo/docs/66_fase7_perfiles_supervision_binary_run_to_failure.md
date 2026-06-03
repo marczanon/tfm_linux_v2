@@ -857,6 +857,31 @@ Estado 2026-06-03:
 - no se introduce prediccion RUL real: el campo temporal restante solo se usa
   cuando viene del dataset/replay.
 
+### Documento de cierre de base
+
+Estado 2026-06-03:
+
+- se crea `codigo/docs/69_fase7_cierre_base_run_to_failure.md` como checklist
+  de lo que falta para dar por preparada la base del perfil
+  `run_to_failure_degradation`;
+- el siguiente paso logico queda fijado como retoque del panel frontend
+  run-to-failure: estado de salud como vista principal, bandas temporales,
+  advertencias proxy/RUL, cola de runs/activos y lectura agentica operacional.
+
+### Paso 9.1: panel de control en Visualizacion
+
+Estado 2026-06-03:
+
+- implementado en
+  `codigo/docs/70_fase7_hito9_panel_control_run_to_failure.md`;
+- `RunVisualizationData` expone contexto de perfil, modelo, familias metricas,
+  `primary_metrics`, `auxiliary_metrics` y explicacion de la PCA;
+- para `run_to_failure_degradation`, la pestana muestra primero metricas
+  temporales y estado operacional del motor;
+- Precision/Recall/F1/FPR pasan a metricas binarias auxiliares/proxy;
+- la PCA se conserva como diagnostico 2D, pero se declara que su frontera es
+  una elipse visual aproximada y no la frontera real del detector temporal.
+
 ## Riesgos y guardarrailes
 
 - No crear un runner `nasa_runner.py`.

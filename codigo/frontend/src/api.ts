@@ -16,6 +16,8 @@ import type {
   RunSnapshot,
   AgentMemoryTarget,
   MemoryCollectionSummary,
+  MemoryCurationRequest,
+  MemoryCurationResponse,
   MemoryRecordSummary,
   MemoryRole,
   ReasoningMemoryRecord,
@@ -187,6 +189,36 @@ export async function getMemoryRecord(
 ): Promise<ReasoningMemoryRecord> {
   return apiRequest<ReasoningMemoryRecord>(
     `/memory/records/${encodeURIComponent(memoryRecordId)}`,
+  );
+}
+
+export async function curateMemoryRecord(
+  memoryRecordId: string,
+  payload: MemoryCurationRequest,
+): Promise<MemoryCurationResponse> {
+  return apiRequest<MemoryCurationResponse>(
+    `/memory/records/${encodeURIComponent(memoryRecordId)}/curation`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function deleteMemoryRecord(
+  memoryRecordId: string,
+  reason: string | null = null,
+): Promise<MemoryCurationResponse> {
+  const query = new URLSearchParams();
+  if (reason) {
+    query.set("reason", reason);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<MemoryCurationResponse>(
+    `/memory/records/${encodeURIComponent(memoryRecordId)}${suffix}`,
+    {
+      method: "DELETE",
+    },
   );
 }
 

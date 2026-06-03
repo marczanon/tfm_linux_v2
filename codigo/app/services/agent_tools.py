@@ -12,8 +12,11 @@ from codigo.app.schemas.reasoning import (
     AgentToolSpec,
 )
 from codigo.app.schemas.state import TFMStateModel
+from codigo.app.services.run_visualization import build_temporal_series_from_predictions
 
 EVIDENCE_LOOKUP_TOOL = "evidence_lookup"
+TEMPORAL_HEALTH_LOOKUP_TOOL = "temporal_health_lookup"
+DEGRADATION_METRICS_LOOKUP_TOOL = "degradation_metrics_lookup"
 THRESHOLD_ANALYSIS_TOOL = "threshold_analysis"
 
 EVIDENCE_LOOKUP_SECTIONS = {
@@ -21,6 +24,7 @@ EVIDENCE_LOOKUP_SECTIONS = {
     "paths",
     "configs",
     "metrics",
+    "temporal",
     "evaluation",
     "artifacts",
     "errors",
@@ -31,6 +35,7 @@ DEFAULT_EVIDENCE_LOOKUP_SECTIONS = [
     "project_context",
     "configs",
     "metrics",
+    "temporal",
     "evaluation",
     "artifacts",
     "errors",
@@ -38,6 +43,28 @@ DEFAULT_EVIDENCE_LOOKUP_SECTIONS = [
 ]
 
 DEFAULT_THRESHOLD_QUANTILES = [0.90, 0.95, 0.975, 0.99, 1.0]
+DEFAULT_TEMPORAL_RUN_LIMIT = 5
+MAX_TEMPORAL_RUN_LIMIT = 20
+
+DEGRADATION_METRIC_NAMES = [
+    "degradation_available",
+    "degradation_n_runs",
+    "degradation_detected_before_failure_rate",
+    "degradation_mean_lead_time_to_failure",
+    "degradation_mean_false_alarm_rate_nominal",
+    "degradation_mean_score_trend_spearman",
+    "degradation_missed_runs",
+    "degradation_mean_initial_final_separation",
+]
+
+DEGRADATION_METRIC_ALIASES = {
+    "degradation_detected_before_failure_rate": "detected_before_failure_rate",
+    "degradation_mean_lead_time_to_failure": "mean_lead_time_to_failure",
+    "degradation_mean_false_alarm_rate_nominal": "mean_false_alarm_rate_nominal",
+    "degradation_mean_score_trend_spearman": "mean_score_trend_spearman",
+    "degradation_missed_runs": "missed_runs",
+    "degradation_mean_initial_final_separation": "mean_initial_final_separation",
+}
 
 ALL_TOOL_AGENTS: list[AgentToolAgent] = [
     "supervisor",
@@ -57,7 +84,12 @@ def agent_tool_catalog(
 ) -> list[AgentToolSpec]:
     """Devuelve las herramientas declaradas, filtradas por agente si procede."""
 
-    specs = [_evidence_lookup_spec(), _threshold_analysis_spec()]
+    specs = [
+        _evidence_lookup_spec(),
+        _temporal_health_lookup_spec(),
+        _degradation_metrics_lookup_spec(),
+        _threshold_analysis_spec(),
+    ]
     if agent_name is None:
         return specs
     return [spec for spec in specs if agent_name in spec.allowed_agents]
@@ -92,6 +124,16 @@ def run_agent_tool_request(
     if request.tool_name == EVIDENCE_LOOKUP_TOOL:
         try:
             return _run_evidence_lookup(state, request)
+        except ValueError as exc:
+            return _failed_observation(request, str(exc))
+    if request.tool_name == TEMPORAL_HEALTH_LOOKUP_TOOL:
+        try:
+            return _run_temporal_health_lookup(state, request)
+        except ValueError as exc:
+            return _failed_observation(request, str(exc))
+    if request.tool_name == DEGRADATION_METRICS_LOOKUP_TOOL:
+        try:
+            return _run_degradation_metrics_lookup(state, request)
         except ValueError as exc:
             return _failed_observation(request, str(exc))
     if request.tool_name == THRESHOLD_ANALYSIS_TOOL:
@@ -143,8 +185,12 @@ def build_state_evidence_catalog(state: TFMStateModel) -> dict[str, Any]:
         for name, value in metrics.get("extra", {}).items():
             if value is not None:
                 refs.append(f"metric_extra:{name}")
+                refs.extend(_metric_extra_evidence_aliases(name))
     else:
         refs.append("metrics:missing")
+    temporal_evidence = _temporal_evidence_pack(state)
+    refs.extend(temporal_evidence["evidence_refs"])
+    details["temporal_evidence"] = temporal_evidence
     if state.evaluation is None:
         refs.append("evaluation:missing")
         details["evaluation"] = None
@@ -222,6 +268,54 @@ def _evidence_lookup_spec() -> AgentToolSpec:
     )
 
 
+def _temporal_health_lookup_spec() -> AgentToolSpec:
+    return AgentToolSpec(
+        tool_name=TEMPORAL_HEALTH_LOOKUP_TOOL,
+        description=(
+            "Consulta el estado temporal run-to-failure: salud actual, primer "
+            "pico, aviso sostenido, episodios, racha maxima y fallo historico."
+        ),
+        allowed_agents=ALL_TOOL_AGENTS,
+        effect="read_only",
+        input_schema={
+            "run_limit": (
+                f"integer between 1 and {MAX_TEMPORAL_RUN_LIMIT}, default "
+                f"{DEFAULT_TEMPORAL_RUN_LIMIT}"
+            ),
+        },
+        output_schema={
+            "summary": "human readable temporal health observation",
+            "evidence_refs": "closed list of temporal refs the agent may cite",
+            "payload": "focused temporal health evidence",
+        },
+        human_summary_template=(
+            "{agent_name} consulta salud temporal mediante temporal_health_lookup."
+        ),
+    )
+
+
+def _degradation_metrics_lookup_spec() -> AgentToolSpec:
+    return AgentToolSpec(
+        tool_name=DEGRADATION_METRICS_LOOKUP_TOOL,
+        description=(
+            "Consulta metricas principales del perfil run-to-failure y el "
+            "contexto de etiquetas sin tratar F1 como criterio principal."
+        ),
+        allowed_agents=ALL_TOOL_AGENTS,
+        effect="read_only",
+        input_schema={},
+        output_schema={
+            "summary": "human readable degradation metrics observation",
+            "evidence_refs": "closed list of metric refs the agent may cite",
+            "payload": "focused degradation metric evidence",
+        },
+        human_summary_template=(
+            "{agent_name} consulta metricas temporales mediante "
+            "degradation_metrics_lookup."
+        ),
+    )
+
+
 def _threshold_analysis_spec() -> AgentToolSpec:
     return AgentToolSpec(
         tool_name=THRESHOLD_ANALYSIS_TOOL,
@@ -277,6 +371,98 @@ def _run_evidence_lookup(
     )
 
 
+def _run_temporal_health_lookup(
+    state: TFMStateModel,
+    request: AgentToolRequest,
+) -> AgentToolObservation:
+    run_limit = _temporal_run_limit(request.arguments.get("run_limit"))
+    catalog = build_state_evidence_catalog(state)
+    temporal = catalog["temporal_evidence"]
+    runs = temporal["runs_sample"][:run_limit]
+    payload = {
+        "analysis_type": "temporal_health_lookup",
+        "available": temporal["available"],
+        "run_id": state.run_id,
+        "dataset": catalog["dataset"],
+        "supervision_profile": temporal["supervision_profile"],
+        "label_context": temporal["label_context"],
+        "series": temporal["series"],
+        "primary_run": None if not runs else runs[0],
+        "runs": runs,
+        "run_limit": run_limit,
+        "n_runs_returned": len(runs),
+        "n_runs_total": (
+            None
+            if temporal["series"] is None
+            else temporal["series"].get("n_runs_total")
+        ),
+        "warnings": temporal["warnings"],
+        "interpretation_guardrail": (
+            "temporal_health_lookup observa salud temporal. No estima RUL, no "
+            "aprueba runs y no convierte un pico aislado en fallo real."
+        ),
+    }
+    refs = _temporal_health_refs(catalog)
+    refs.append(f"tool:{TEMPORAL_HEALTH_LOOKUP_TOOL}")
+    summary = _temporal_health_summary(payload)
+    return AgentToolObservation(
+        observation_id=f"{request.request_id}:observation:001",
+        request_id=request.request_id,
+        run_id=request.run_id,
+        agent_name=request.agent_name,
+        tool_name=request.tool_name,
+        status="success",
+        summary=summary,
+        evidence_refs=sorted(set(refs)),
+        payload=payload,
+    )
+
+
+def _run_degradation_metrics_lookup(
+    state: TFMStateModel,
+    request: AgentToolRequest,
+) -> AgentToolObservation:
+    catalog = build_state_evidence_catalog(state)
+    temporal = catalog["temporal_evidence"]
+    metrics = temporal["metrics"]
+    payload = {
+        "analysis_type": "degradation_metrics_lookup",
+        "available": metrics["available"],
+        "run_id": state.run_id,
+        "dataset": catalog["dataset"],
+        "supervision_profile": temporal["supervision_profile"],
+        "label_context": temporal["label_context"],
+        "metric_families": metrics["metric_families"],
+        "primary_metrics": metrics["aliases"],
+        "raw_metrics": metrics["raw"],
+        "primary_names": metrics["primary_names"],
+        "binary_metric_guardrail": (
+            "F1, recall y precision pueden existir como proxy auxiliar, pero "
+            "no son el criterio principal del perfil run-to-failure."
+        ),
+        "warnings": _degradation_metric_warnings(temporal),
+        "interpretation_guardrail": (
+            "degradation_metrics_lookup observa metricas temporales; no elige "
+            "modelo, no aprueba la run y no presenta etiquetas proxy como "
+            "oficiales."
+        ),
+    }
+    refs = _degradation_metric_refs(catalog)
+    refs.append(f"tool:{DEGRADATION_METRICS_LOOKUP_TOOL}")
+    summary = _degradation_metrics_summary(payload)
+    return AgentToolObservation(
+        observation_id=f"{request.request_id}:observation:001",
+        request_id=request.request_id,
+        run_id=request.run_id,
+        agent_name=request.agent_name,
+        tool_name=request.tool_name,
+        status="success",
+        summary=summary,
+        evidence_refs=sorted(set(refs)),
+        payload=payload,
+    )
+
+
 def _run_threshold_analysis(
     state: TFMStateModel,
     request: AgentToolRequest,
@@ -312,7 +498,7 @@ def _run_threshold_analysis(
         evidence_refs.extend(
             ref
             for ref in build_state_evidence_catalog(state)["allowed_evidence_refs"]
-            if ref.startswith("metric:")
+            if ref.startswith("metric:") or ref.startswith("metric_extra:")
         )
     return AgentToolObservation(
         observation_id=f"{request.request_id}:observation:001",
@@ -350,6 +536,8 @@ def _selected_evidence_payload(
         }
     if "metrics" in include:
         payload["metrics"] = catalog.get("metrics")
+    if "temporal" in include:
+        payload["temporal"] = catalog.get("temporal_evidence")
     if "evaluation" in include:
         payload["evaluation"] = catalog.get("evaluation")
         payload["limitations"] = [
@@ -380,6 +568,9 @@ def _selected_evidence_refs(
                 f"dataset:{catalog['dataset']}",
                 f"label_mode:{catalog['label_mode']}",
                 f"objective:{catalog['objective']}",
+                f"supervision_profile:{catalog['project_context'].get('supervision_profile')}",
+                f"label_source:{catalog['project_context'].get('label_source')}",
+                f"label_granularity:{catalog['project_context'].get('label_granularity')}",
             ]
         )
     if "configs" in include:
@@ -392,7 +583,28 @@ def _selected_evidence_refs(
         refs.update(
             ref
             for ref in catalog["allowed_evidence_refs"]
-            if ref.startswith("metric:") or ref == "metrics:missing"
+            if ref.startswith("metric:")
+            or ref.startswith("metric_extra:")
+            or ref == "metrics:missing"
+        )
+    if "temporal" in include:
+        refs.update(
+            ref
+            for ref in catalog["allowed_evidence_refs"]
+            if ref.startswith("temporal:")
+            or ref.startswith("supervision_profile:")
+            or ref.startswith("label_source:")
+            or ref.startswith("label_granularity:")
+            or ref.startswith("metric:degradation_")
+            or ref.startswith("metric_extra:degradation_")
+            or ref in {
+                "metric:detected_before_failure_rate",
+                "metric:mean_lead_time_to_failure",
+                "metric:mean_false_alarm_rate_nominal",
+                "metric:mean_score_trend_spearman",
+                "metric:missed_runs",
+                "metric:mean_initial_final_separation",
+            }
         )
     if "evaluation" in include:
         refs.update(
@@ -467,6 +679,376 @@ def _dataset_policy_summary(state: TFMStateModel) -> dict[str, Any]:
         ),
         "notes": state.project_context.notes,
     }
+
+
+def _temporal_evidence_pack(state: TFMStateModel) -> dict[str, Any]:
+    artifact = _predictions_artifact(state)
+    metrics = _degradation_metrics_payload(state)
+    should_read_temporal_predictions = (
+        artifact is not None
+        and (
+            state.project_context.supervision_profile == "run_to_failure_degradation"
+            or metrics["available"]
+            or metrics.get("metric_families") == "run_to_failure_degradation"
+            or (
+                isinstance(metrics.get("metric_families"), str)
+                and "run_to_failure_degradation" in metrics["metric_families"]
+            )
+        )
+    )
+    temporal_series = (
+        None
+        if not should_read_temporal_predictions
+        else build_temporal_series_from_predictions(artifact.path, max_points=250)
+    )
+    run_summaries = (
+        []
+        if temporal_series is None
+        else [_temporal_run_summary(run) for run in temporal_series.runs[:5]]
+    )
+    warnings = _temporal_evidence_warnings(
+        state,
+        temporal_series=temporal_series,
+        predictions_available=artifact is not None,
+        run_summaries=run_summaries,
+    )
+    refs = _temporal_evidence_refs(
+        state,
+        metrics=metrics,
+        temporal_series=temporal_series,
+        run_summaries=run_summaries,
+        predictions_available=artifact is not None,
+    )
+    return {
+        "available": bool(temporal_series is not None and temporal_series.available),
+        "supervision_profile": state.project_context.supervision_profile,
+        "label_context": {
+            "label_mode": state.project_context.label_mode,
+            "label_source": state.project_context.label_source,
+            "label_granularity": state.project_context.label_granularity,
+            "proxy_warning": state.project_context.label_source
+            in {"none", "temporal_proxy", "synthetic"},
+        },
+        "cleaner_context": _cleaner_temporal_context(state),
+        "metrics": metrics,
+        "series": (
+            None
+            if temporal_series is None
+            else {
+                "available": temporal_series.available,
+                "x_axis": temporal_series.x_axis,
+                "n_runs_total": temporal_series.n_runs_total,
+                "n_points_total": temporal_series.n_points_total,
+                "warnings": temporal_series.warnings,
+            }
+        ),
+        "primary_run": None if not run_summaries else run_summaries[0],
+        "runs_sample": run_summaries,
+        "n_runs_returned": len(run_summaries),
+        "warnings": warnings,
+        "agent_guidance": _temporal_agent_guidance(),
+        "evidence_refs": sorted(set(refs)),
+    }
+
+
+def _degradation_metrics_payload(state: TFMStateModel) -> dict[str, Any]:
+    extra = {} if state.metrics is None else state.metrics.extra
+    raw = {
+        name: extra.get(name)
+        for name in DEGRADATION_METRIC_NAMES
+        if extra.get(name) is not None
+    }
+    aliases = {
+        alias: extra.get(name)
+        for name, alias in DEGRADATION_METRIC_ALIASES.items()
+        if extra.get(name) is not None
+    }
+    return {
+        "available": bool(extra.get("degradation_available")),
+        "metric_families": extra.get("metric_families"),
+        "raw": raw,
+        "aliases": aliases,
+        "primary_names": [
+            "detected_before_failure_rate",
+            "mean_lead_time_to_failure",
+            "mean_false_alarm_rate_nominal",
+            "mean_score_trend_spearman",
+            "missed_runs",
+        ],
+    }
+
+
+def _temporal_run_summary(run: Any) -> dict[str, Any]:
+    return {
+        "run_id": run.run_id,
+        "x_axis": run.x_axis,
+        "n_windows": run.n_points_total,
+        "n_points_sampled": run.n_points_sampled,
+        "threshold": run.threshold,
+        "current": {
+            "x": run.current_x,
+            "time": run.current_time,
+            "time_to_failure_seconds": run.current_time_to_failure_seconds,
+            "health_state": run.current_health_state,
+            "health_index": run.current_health_index,
+            "risk_index": run.current_risk_index,
+            "reason": run.current_state_reason,
+        },
+        "first_spike": {
+            "x": run.first_alert_x,
+            "time": run.first_alert_time,
+            "time_to_failure_seconds": run.first_alert_time_to_failure_seconds,
+        },
+        "first_persistent_alert": {
+            "x": run.first_persistent_alert_x,
+            "time": run.first_persistent_alert_time,
+            "time_to_failure_seconds": (
+                run.first_persistent_alert_time_to_failure_seconds
+            ),
+            "min_consecutive_windows": run.persistent_alert_min_windows,
+        },
+        "episodes": {
+            "alert_points": run.alert_points,
+            "warning_points": run.warning_points,
+            "critical_points": run.critical_points,
+            "isolated_alert_points": run.isolated_alert_points,
+            "alert_episodes": run.alert_episodes,
+            "longest_alert_streak": run.longest_alert_streak,
+        },
+        "failure": {
+            "x": run.failure_x,
+            "time": run.failure_time,
+            "reference": run.failure_reference,
+        },
+    }
+
+
+def _cleaner_temporal_context(state: TFMStateModel) -> dict[str, Any]:
+    return {
+        "role": "signal_quality_gate_for_temporal_monitoring",
+        "main_channel": state.project_context.main_channel,
+        "target_sample_rate_hz": state.project_context.target_sample_rate_hz,
+        "profile_path": state.profile_path,
+        "clean_path": state.clean_path,
+        "selected_channel": (
+            None
+            if state.cleaning_config is None
+            else state.cleaning_config.selected_channel
+        ),
+        "normalization": (
+            None if state.cleaning_config is None else state.cleaning_config.normalization
+        ),
+        "why_it_matters": (
+            "El cleaner fija canal, frecuencia y calidad de senal; esas "
+            "decisiones condicionan continuidad temporal, comparabilidad de "
+            "ventanas y estabilidad del score de degradacion."
+        ),
+    }
+
+
+def _temporal_agent_guidance() -> dict[str, str]:
+    return {
+        "cleaner": (
+            "Razonar sobre canal, remuestreo, no finitos y normalizacion como "
+            "precondiciones de una trayectoria temporal estable."
+        ),
+        "modeler": (
+            "Elegir modelo y politica de score por deteccion temprana, "
+            "persistencia, tendencia y coste de falsas alarmas, no por F1."
+        ),
+        "evaluator": (
+            "Separar pico aislado, aviso sostenido y fallo historico; no aprobar "
+            "solo por un umbral puntual."
+        ),
+        "report_writer": (
+            "Explicar el resultado como monitorizacion run-to-failure con "
+            "etiquetas proxy si aplica."
+        ),
+        "report_verifier": (
+            "Bloquear afirmaciones de RUL o etiquetas oficiales no soportadas."
+        ),
+    }
+
+
+def _temporal_health_refs(catalog: dict[str, Any]) -> list[str]:
+    return [
+        ref
+        for ref in catalog["allowed_evidence_refs"]
+        if ref.startswith("temporal:")
+        or ref.startswith("supervision_profile:")
+        or ref.startswith("label_source:")
+        or ref.startswith("label_granularity:")
+        or ref.startswith("artifact:")
+    ]
+
+
+def _degradation_metric_refs(catalog: dict[str, Any]) -> list[str]:
+    return [
+        ref
+        for ref in catalog["allowed_evidence_refs"]
+        if ref.startswith("metric:degradation_")
+        or ref.startswith("metric_extra:degradation_")
+        or ref.startswith("supervision_profile:")
+        or ref.startswith("label_source:")
+        or ref.startswith("label_granularity:")
+        or ref in {
+            "metric:detected_before_failure_rate",
+            "metric:mean_lead_time_to_failure",
+            "metric:mean_false_alarm_rate_nominal",
+            "metric:mean_score_trend_spearman",
+            "metric:missed_runs",
+            "metric:mean_initial_final_separation",
+        }
+    ]
+
+
+def _temporal_health_summary(payload: dict[str, Any]) -> str:
+    if not payload["available"]:
+        return (
+            "temporal_health_lookup no encontro una serie temporal disponible; "
+            "la observacion queda limitada a contexto y advertencias."
+        )
+    primary = payload.get("primary_run") or {}
+    current = primary.get("current") or {}
+    persistent = primary.get("first_persistent_alert") or {}
+    return (
+        "temporal_health_lookup observo estado "
+        f"{current.get('health_state')} con primer aviso sostenido en "
+        f"{persistent.get('x')} y {payload['n_runs_returned']} run(s) devuelta(s)."
+    )
+
+
+def _degradation_metrics_summary(payload: dict[str, Any]) -> str:
+    if not payload["available"]:
+        return (
+            "degradation_metrics_lookup no encontro metricas temporales "
+            "disponibles para el perfil run-to-failure."
+        )
+    metrics = payload["primary_metrics"]
+    lead_time = metrics.get("mean_lead_time_to_failure")
+    false_alarm = metrics.get("mean_false_alarm_rate_nominal")
+    trend = metrics.get("mean_score_trend_spearman")
+    return (
+        "degradation_metrics_lookup devolvio metricas temporales primarias: "
+        f"lead_time={lead_time}, falsas_alarmas={false_alarm}, "
+        f"tendencia={trend}."
+    )
+
+
+def _degradation_metric_warnings(temporal: dict[str, Any]) -> list[str]:
+    warnings = list(temporal["warnings"])
+    if not temporal["metrics"]["available"]:
+        warnings.append("Faltan metricas temporales de degradacion.")
+    if temporal["label_context"]["proxy_warning"]:
+        warnings.append(
+            "Las metricas se apoyan en etiquetas proxy o experimentales; no "
+            "deben presentarse como ground truth oficial por ventana."
+        )
+    return list(dict.fromkeys(warnings))
+
+
+def _temporal_evidence_warnings(
+    state: TFMStateModel,
+    *,
+    temporal_series: Any | None,
+    predictions_available: bool,
+    run_summaries: list[dict[str, Any]],
+) -> list[str]:
+    warnings: list[str] = []
+    is_temporal_profile = (
+        state.project_context.supervision_profile == "run_to_failure_degradation"
+    )
+    if not is_temporal_profile:
+        warnings.append(
+            "El perfil actual no es run_to_failure_degradation; la evidencia "
+            "temporal es auxiliar o no aplicable."
+        )
+    if state.project_context.label_source in {"none", "temporal_proxy", "synthetic"}:
+        warnings.append(
+            "Las etiquetas por ventana no son oficiales; deben tratarse como "
+            "proxy o evidencia experimental."
+        )
+    if is_temporal_profile:
+        warnings.append(
+            "RUL no esta estimado en este hito; solo se expone tiempo a fallo "
+            "historico cuando existe en el replay."
+        )
+    if not predictions_available:
+        warnings.append(
+            "No hay artefacto de predicciones; no se puede resumir la trayectoria."
+        )
+    if temporal_series is not None:
+        warnings.extend(temporal_series.warnings)
+    if run_summaries:
+        first = run_summaries[0]
+        first_spike = first["first_spike"]["x"]
+        persistent = first["first_persistent_alert"]["x"]
+        isolated = first["episodes"]["isolated_alert_points"]
+        if first_spike is not None and persistent is None:
+            warnings.append(
+                "Existe primer pico de alerta pero no aviso sostenido con la "
+                "persistencia minima configurada."
+            )
+        if isolated:
+            warnings.append(
+                "Hay picos aislados; no deben interpretarse como fallo real sin "
+                "persistencia temporal."
+            )
+    return warnings
+
+
+def _temporal_evidence_refs(
+    state: TFMStateModel,
+    *,
+    metrics: dict[str, Any],
+    temporal_series: Any | None,
+    run_summaries: list[dict[str, Any]],
+    predictions_available: bool,
+) -> list[str]:
+    refs: list[str] = ["temporal:cleaner_signal_quality_context"]
+    if state.project_context.supervision_profile == "run_to_failure_degradation":
+        refs.append("temporal:run_to_failure_profile")
+        refs.append("temporal:rul_not_estimated")
+    else:
+        refs.append("temporal:not_run_to_failure_profile")
+    if predictions_available:
+        refs.append("temporal:predictions_available")
+    else:
+        refs.append("temporal:predictions_missing")
+    if temporal_series is None or not temporal_series.available:
+        refs.append("temporal:unavailable")
+    else:
+        refs.extend(
+            [
+                "temporal:series_available",
+                "temporal:current_health_state",
+                "temporal:alert_episodes",
+                "temporal:longest_alert_streak",
+                "temporal:failure_reference",
+            ]
+        )
+    for name in metrics.get("raw", {}):
+        refs.append(f"metric_extra:{name}")
+        refs.extend(_metric_extra_evidence_aliases(name))
+    if run_summaries:
+        first = run_summaries[0]
+        if first["first_spike"]["x"] is not None:
+            refs.extend(["temporal:first_spike", "temporal:first_alert"])
+        if first["first_persistent_alert"]["x"] is not None:
+            refs.append("temporal:first_persistent_alert")
+        if first["episodes"]["isolated_alert_points"]:
+            refs.append("temporal:isolated_alert_points")
+    return refs
+
+
+def _metric_extra_evidence_aliases(name: str) -> list[str]:
+    refs: list[str] = []
+    if name.startswith("degradation_"):
+        refs.append(f"metric:{name}")
+    alias = DEGRADATION_METRIC_ALIASES.get(name)
+    if alias is not None:
+        refs.append(f"metric:{alias}")
+    return refs
 
 
 def _predictions_artifact(state: TFMStateModel):
@@ -724,6 +1306,19 @@ def _near_threshold_limit(raw: object) -> int:
     if raw < 1 or raw > 20:
         raise ValueError(
             "threshold_analysis near_threshold_limit must be between 1 and 20"
+        )
+    return raw
+
+
+def _temporal_run_limit(raw: object) -> int:
+    if raw is None:
+        return DEFAULT_TEMPORAL_RUN_LIMIT
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError("temporal_health_lookup run_limit must be an integer")
+    if raw < 1 or raw > MAX_TEMPORAL_RUN_LIMIT:
+        raise ValueError(
+            "temporal_health_lookup run_limit must be between 1 and "
+            f"{MAX_TEMPORAL_RUN_LIMIT}"
         )
     return raw
 

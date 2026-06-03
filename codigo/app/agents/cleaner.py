@@ -87,6 +87,7 @@ def _should_use_llm(
 
 def _cleaner_messages(state: TFMStateModel) -> list[LLMMessage]:
     profile_summary = _profile_summary_for_llm(state.profile_path)
+    temporal_context = _temporal_context_for_llm(state)
     return [
         LLMMessage(
             role="system",
@@ -103,6 +104,9 @@ def _cleaner_messages(state: TFMStateModel) -> list[LLMMessage]:
                 [
                     "Contexto ligero:",
                     json.dumps(_state_summary_for_llm(state), indent=2, ensure_ascii=True),
+                    "",
+                    "Contexto temporal del perfil:",
+                    json.dumps(temporal_context, indent=2, ensure_ascii=True),
                     "",
                     "Resumen del perfil:",
                     json.dumps(profile_summary, indent=2, ensure_ascii=True),
@@ -123,6 +127,11 @@ def _cleaner_messages(state: TFMStateModel) -> list[LLMMessage]:
                     (
                         "- expected_artifact_path debe apuntar al directorio de "
                         "senales limpias del dataset."
+                    ),
+                    (
+                        "- Si supervision_profile es run_to_failure_degradation, "
+                        "tu rationale debe considerar continuidad temporal, canal "
+                        "y estabilidad del score posterior."
                     ),
                     f"- decision_id debe ser: {state.run_id}:cleaner:{_cleaner_turn(state):03d}",
                 ]
@@ -159,10 +168,37 @@ def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
         "run_id": state.run_id,
         "current_stage": state.current_stage,
         "dataset": state.project_context.dataset,
+        "objective": state.project_context.objective,
+        "label_mode": state.project_context.label_mode,
+        "supervision_profile": state.project_context.supervision_profile,
+        "label_source": state.project_context.label_source,
+        "label_granularity": state.project_context.label_granularity,
         "main_channel": state.project_context.main_channel,
         "target_sample_rate_hz": state.project_context.target_sample_rate_hz,
         "manifest_path": state.manifest_path,
         "profile_path": state.profile_path,
+    }
+
+
+def _temporal_context_for_llm(state: TFMStateModel) -> dict[str, Any]:
+    return {
+        "role": "signal_quality_gate_for_temporal_monitoring",
+        "is_run_to_failure": (
+            state.project_context.supervision_profile == "run_to_failure_degradation"
+        ),
+        "main_channel": state.project_context.main_channel,
+        "target_sample_rate_hz": state.project_context.target_sample_rate_hz,
+        "label_source": state.project_context.label_source,
+        "label_granularity": state.project_context.label_granularity,
+        "cleaner_responsibility": (
+            "Seleccionar canal, remuestreo y tratamiento de no finitos sin "
+            "romper continuidad temporal ni alterar la comparabilidad entre "
+            "ventanas."
+        ),
+        "guardrail": (
+            "El cleaner no decide fallos ni RUL; prepara senales fiables para "
+            "que modeler/evaluator razonen sobre degradacion."
+        ),
     }
 
 

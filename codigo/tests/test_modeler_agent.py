@@ -1,6 +1,7 @@
 import unittest
 
 from codigo.app.agents.modeler import (
+    build_modeler_memory_query,
     decide_modeling_action,
     decide_modeling_retry_action,
 )
@@ -264,53 +265,313 @@ class ModelerAgentTests(unittest.TestCase):
         )
 
     def test_deterministic_modeler_uses_temporal_health_indicator_policy(self):
-        state_dict = create_initial_cwru_state(
-            thread_id="nasa-modeler-temporal-test",
-            run_id="run-modeler-nasa-temporal-001",
-        )
-        state_dict["project_context"] = ProjectContext(
-            dataset="nasa_ims_bearing",
-            machine_type="rotating_machinery",
-            signal_type="vibration",
-            objective="run_to_failure_degradation",
-            target_sample_rate_hz=20000,
-            main_channel="channel_1",
-            label_mode="degradation",
-            supervision_profile="run_to_failure_degradation",
-            label_granularity="proxy_temporal",
-            label_source="temporal_proxy",
-        ).model_dump(mode="json")
-        state = validate_state(state_dict)
+        state = _temporal_state("run-modeler-nasa-temporal-001")
 
         decision = decide_modeling_action(state)
 
         self.assertEqual(decision.modeling_config.model_name, "pca_reconstruction_error")
         self.assertEqual(decision.decision_strategy.strategy_type, "feature_model_fit")
         self.assertIn("tendencia", decision.decision_strategy.hypothesis)
+        self.assertIn(
+            "temporal_health_lookup",
+            decision.decision_strategy.tool_names,
+        )
+        self.assertIn(
+            "degradation_metrics_lookup",
+            decision.decision_strategy.tool_names,
+        )
+        self.assertIn(
+            "mean_lead_time_to_failure",
+            decision.decision_strategy.optimization_targets,
+        )
+        self.assertIn("sostenido", decision.decision_strategy.alert_policy)
+        self.assertIn(
+            "tool:temporal_health_lookup",
+            decision.decision_strategy.evidence_refs,
+        )
         self.assertIn("F1", decision.rationale)
         self.assertEqual(
             decision.expected_model_path,
             "codigo/models/nasa_ims_bearing/pca_reconstruction_error.joblib",
         )
 
-    def test_temporal_modeler_rejects_threshold_only_strategy(self):
-        state_dict = create_initial_cwru_state(
-            thread_id="nasa-modeler-temporal-test",
-            run_id="run-modeler-nasa-temporal-invalid-001",
+    def test_modeler_memory_query_targets_modeler_initial_decision(self):
+        state = _temporal_state("run-modeler-memory-query-001")
+
+        query = build_modeler_memory_query(state, top_k=4, min_similarity=0.2)
+
+        self.assertEqual(query.target_agent, "modeler")
+        self.assertEqual(query.dataset, "nasa_ims_bearing")
+        self.assertEqual(query.top_k, 4)
+        self.assertEqual(query.min_similarity, 0.2)
+        self.assertIn("run_to_failure_degradation", query.query_text)
+        self.assertIn("lead time", query.query_text)
+
+    def test_llm_initial_modeler_can_use_retrieved_memory(self):
+        state = _temporal_state("run-modeler-memory-001")
+        memory_context = _memory_context_for_initial_modeler(state.run_id)
+        memory_id = memory_context.items[0].record.memory_record_id
+        client = FakeLLMClient(
+            {
+                "agent_name": "modeler",
+                "decision_id": "run-modeler-memory-001:modeler:001",
+                "rationale": (
+                    "Use PCA and cite prior boundary memory so isolated early "
+                    "critical spikes are not treated as confirmed failure."
+                ),
+                "confidence": 0.9,
+                "decision_strategy": {
+                    "strategy_type": "feature_model_fit",
+                    "hypothesis": (
+                        "Prioritize a temporal health indicator with sustained "
+                        "alerts, lead time and nominal false-alarm control."
+                    ),
+                    "evidence_refs": [
+                        "tool:temporal_health_lookup",
+                        "tool:degradation_metrics_lookup",
+                        "temporal:first_persistent_alert",
+                        "metric:mean_lead_time_to_failure",
+                        f"memory:{memory_id}",
+                    ],
+                    "risk_notes": [
+                        "A critical isolated window can revert to nominal in the next window.",
+                        "F1 is auxiliary under the run-to-failure profile.",
+                    ],
+                    "tool_names": [
+                        "temporal_health_lookup",
+                        "degradation_metrics_lookup",
+                    ],
+                    "optimization_targets": [
+                        "detected_before_failure_rate",
+                        "mean_lead_time_to_failure",
+                        "mean_false_alarm_rate_nominal",
+                        "mean_score_trend_spearman",
+                    ],
+                    "alert_policy": (
+                        "Escalate only with persistent alert evidence; keep "
+                        "isolated spikes as warning evidence, not final failure."
+                    ),
+                },
+                "modeling_config": {
+                    "model_name": "pca_reconstruction_error",
+                    "random_state": 42,
+                    "hyperparameters": {
+                        "n_components": 0.95,
+                        "svd_solver": "full",
+                        "whiten": False,
+                        "threshold_quantile": 0.99,
+                    },
+                },
+                "train_split": "train",
+                "validation_split": "validation",
+                "expected_model_path": (
+                    "codigo/models/nasa_ims_bearing/pca_reconstruction_error.joblib"
+                ),
+                "comparison_candidates": [
+                    {
+                        "alternative_id": "isolation_forest_temporal_candidate",
+                        "rationale": "Compare a tree baseline for anomaly score geometry.",
+                        "modeling_config": {
+                            "model_name": "isolation_forest",
+                            "random_state": 42,
+                            "hyperparameters": {
+                                "n_estimators": 100,
+                                "max_samples": "auto",
+                                "contamination": "auto",
+                                "max_features": 1.0,
+                                "bootstrap": False,
+                                "n_jobs": 1,
+                                "threshold_quantile": 0.99,
+                            },
+                        },
+                    }
+                ],
+                "memory_context_id": memory_context.context_id,
+                "used_memory_context": True,
+                "memory_record_ids": [memory_id],
+                "memory_usage_summary": (
+                    "Use the retrieved boundary case to require sustained "
+                    "alert evidence before treating a window as confirmed failure."
+                ),
+                "memory_record_uses": [
+                    {
+                        "memory_record_id": memory_id,
+                        "usage": "adapted",
+                        "influence_summary": (
+                            "Preserve early warning but avoid declaring failure "
+                            "from a single critical spike."
+                        ),
+                        "risk_mitigation": (
+                            "Evaluate persistent alert streaks, lead time and "
+                            "nominal false alarms together."
+                        ),
+                    }
+                ],
+            }
         )
-        state_dict["project_context"] = ProjectContext(
-            dataset="nasa_ims_bearing",
-            machine_type="rotating_machinery",
-            signal_type="vibration",
-            objective="run_to_failure_degradation",
-            target_sample_rate_hz=20000,
-            main_channel="channel_1",
-            label_mode="degradation",
-            supervision_profile="run_to_failure_degradation",
-            label_granularity="proxy_temporal",
-            label_source="temporal_proxy",
-        ).model_dump(mode="json")
-        state = validate_state(state_dict)
+
+        decision = decide_modeling_action(
+            state,
+            llm_client=client,
+            use_llm=True,
+            memory_context=memory_context,
+        )
+
+        prompt = "\n".join(message.content for message in client.messages)
+        self.assertTrue(decision.used_memory_context)
+        self.assertEqual(decision.memory_context_id, memory_context.context_id)
+        self.assertEqual(decision.memory_record_ids, [memory_id])
+        self.assertIn("Memoria recuperada para el modelador", prompt)
+        self.assertIn(memory_id, prompt)
+
+    def test_llm_temporal_modeler_accepts_agentic_strategy_with_tools(self):
+        state = _temporal_state("run-modeler-nasa-temporal-llm-001")
+        client = FakeLLMClient(
+            {
+                "agent_name": "modeler",
+                "decision_id": "run-modeler-nasa-temporal-llm-001:modeler:001",
+                "rationale": (
+                    "Use PCA as interpretable temporal health score after "
+                    "consulting temporal health and degradation metrics."
+                ),
+                "confidence": 0.89,
+                "decision_strategy": {
+                    "strategy_type": "feature_model_fit",
+                    "hypothesis": (
+                        "Prioritize a stable reconstruction-error trajectory "
+                        "for early warning, lead time and nominal false alarms."
+                    ),
+                    "evidence_refs": [
+                        "tool:temporal_health_lookup",
+                        "tool:degradation_metrics_lookup",
+                        "temporal:first_persistent_alert",
+                        "temporal:longest_alert_streak",
+                        "metric:mean_lead_time_to_failure",
+                        "metric:mean_false_alarm_rate_nominal",
+                        "metric:mean_score_trend_spearman",
+                    ],
+                    "risk_notes": [
+                        "temporal_proxy labels are not official per-window ground truth.",
+                        "F1 remains auxiliary for this profile.",
+                    ],
+                    "tool_names": [
+                        "temporal_health_lookup",
+                        "degradation_metrics_lookup",
+                    ],
+                    "optimization_targets": [
+                        "detected_before_failure_rate",
+                        "mean_lead_time_to_failure",
+                        "mean_false_alarm_rate_nominal",
+                        "mean_score_trend_spearman",
+                    ],
+                    "alert_policy": (
+                        "Treat threshold as auxiliary; separate pico aislado "
+                        "from aviso sostenido and compare sustained alerts "
+                        "against trend and nominal false alarms."
+                    ),
+                },
+                "modeling_config": {
+                    "model_name": "pca_reconstruction_error",
+                    "random_state": 42,
+                    "hyperparameters": {
+                        "n_components": 0.95,
+                        "svd_solver": "full",
+                        "whiten": False,
+                        "threshold_quantile": 0.99,
+                    },
+                },
+                "train_split": "train",
+                "validation_split": "validation",
+                "expected_model_path": (
+                    "codigo/models/nasa_ims_bearing/pca_reconstruction_error.joblib"
+                ),
+                "comparison_candidates": [
+                    {
+                        "alternative_id": "isolation_forest_temporal_candidate",
+                        "rationale": "Compare tree isolation as alternative score.",
+                        "expected_effect": (
+                            "Check earlier alerts versus nominal false alarms."
+                        ),
+                        "modeling_config": {
+                            "model_name": "isolation_forest",
+                            "random_state": 42,
+                            "hyperparameters": {
+                                "n_estimators": 200,
+                                "max_samples": "auto",
+                                "contamination": "auto",
+                                "max_features": 1.0,
+                                "bootstrap": False,
+                                "n_jobs": 1,
+                                "threshold_quantile": 0.99,
+                            },
+                        },
+                    },
+                    {
+                        "alternative_id": "one_class_svm_temporal_candidate",
+                        "rationale": "Compare non-linear margin sensitivity.",
+                        "expected_effect": (
+                            "Check sensitivity to degradation trend with nu/gamma."
+                        ),
+                        "modeling_config": {
+                            "model_name": "one_class_svm",
+                            "random_state": 42,
+                            "hyperparameters": {
+                                "kernel": "rbf",
+                                "nu": 0.05,
+                                "gamma": "scale",
+                                "shrinking": True,
+                                "tol": 0.001,
+                                "max_iter": -1,
+                                "threshold_quantile": 0.99,
+                            },
+                        },
+                    },
+                ],
+            }
+        )
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(decision.modeling_config.model_name, "pca_reconstruction_error")
+        self.assertIn("temporal_health_lookup", decision.decision_strategy.tool_names)
+        self.assertIn(
+            "mean_false_alarm_rate_nominal",
+            decision.decision_strategy.optimization_targets,
+        )
+        self.assertIn("aviso sostenido", decision.decision_strategy.alert_policy)
+        self.assertEqual(len(decision.comparison_candidates), 2)
+
+    def test_llm_temporal_modeler_receives_tool_catalog_in_prompt(self):
+        state = _temporal_state("run-modeler-nasa-temporal-prompt-001")
+        client = FakeLLMClient(
+            {
+                "agent_name": "modeler",
+                "decision_id": "run-modeler-nasa-temporal-prompt-001:modeler:001",
+                "rationale": "Invalid on purpose to inspect the prompt.",
+                "confidence": 0.9,
+                "modeling_config": {
+                    "model_name": "local_outlier_factor",
+                    "random_state": 42,
+                    "hyperparameters": {},
+                },
+                "train_split": "train",
+                "validation_split": "validation",
+                "expected_model_path": "bad",
+            }
+        )
+
+        decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        prompt = client.messages[1].content
+        self.assertIn("Herramientas agenticas disponibles", prompt)
+        self.assertIn("temporal_health_lookup", prompt)
+        self.assertIn("degradation_metrics_lookup", prompt)
+        self.assertIn("optimization_targets", prompt)
+        self.assertIn("alert_policy", prompt)
+
+    def test_temporal_modeler_rejects_threshold_only_strategy(self):
+        state = _temporal_state("run-modeler-nasa-temporal-invalid-001")
         client = FakeLLMClient(
             {
                 "agent_name": "modeler",
@@ -824,6 +1085,61 @@ def _memory_context_for_modeler_retry(run_id: str) -> RetrievedMemoryContext:
     )
 
 
+def _memory_context_for_initial_modeler(run_id: str) -> RetrievedMemoryContext:
+    query = AgentMemoryQuery(
+        query_id=f"{run_id}:modeler:001:memory_query",
+        target_agent="modeler",
+        query_text="run to failure sustained alert lead time isolated spike",
+        dataset="nasa_ims_bearing",
+        run_id=run_id,
+        decision_id=f"{run_id}:modeler:001",
+        top_k=3,
+    )
+    record = ReasoningMemoryRecord(
+        memory_record_id="memory-isolated-spike-001",
+        collection_name="modeler_memory",
+        target_agent="modeler",
+        source_type="decision_episode",
+        run_id="historic-run-to-failure",
+        decision_id="historic-run-to-failure:modeler:001",
+        dataset="nasa_ims_bearing",
+        source_agent_name="modeler",
+        outcome="partially_supported",
+        human_verdict="partially_correct",
+        memory_role="boundary_case",
+        reusable_as_context=True,
+        summary="A single critical window is not enough to declare failure.",
+        content=(
+            "An isolated critical anomaly score can return to nominal in the "
+            "next temporal window; require sustained alert evidence and lead "
+            "time analysis before treating the sequence as confirmed failure."
+        ),
+        metrics={
+            "mean_lead_time_to_failure": 3600.0,
+            "mean_false_alarm_rate_nominal": 0.12,
+        },
+        tags=[
+            "isolated_spike_not_failure",
+            "lead_time",
+            "sustained_alert",
+        ],
+    )
+    return RetrievedMemoryContext(
+        context_id=f"{query.query_id}:retrieved_memory_context",
+        query=query,
+        items=[
+            RetrievedMemoryItem(
+                record=record,
+                similarity=0.92,
+                retrieval_use="boundary_context",
+                rank=1,
+            )
+        ],
+        retrieval_backend="test_memory_store",
+        embedding_model="local_hash_embedding:v1",
+    )
+
+
 def _episode_memory_context_for_modeler_retry(run_id: str) -> RetrievedMemoryContext:
     query = AgentMemoryQuery(
         query_id=f"{run_id}:modeler_retry:001:memory_query",
@@ -875,6 +1191,26 @@ def _episode_memory_context_for_modeler_retry(run_id: str) -> RetrievedMemoryCon
         retrieval_backend="test_memory_store",
         embedding_model="local_hash_embedding:v1",
     )
+
+
+def _temporal_state(run_id: str):
+    state_dict = create_initial_cwru_state(
+        thread_id="nasa-modeler-temporal-test",
+        run_id=run_id,
+    )
+    state_dict["project_context"] = ProjectContext(
+        dataset="nasa_ims_bearing",
+        machine_type="rotating_machinery",
+        signal_type="vibration",
+        objective="run_to_failure_degradation",
+        target_sample_rate_hz=20000,
+        main_channel="channel_1",
+        label_mode="degradation",
+        supervision_profile="run_to_failure_degradation",
+        label_granularity="proxy_temporal",
+        label_source="temporal_proxy",
+    ).model_dump(mode="json")
+    return validate_state(state_dict)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Any
 from codigo.app.schemas.agent_decisions import (
     EvaluationDecision,
     ModelingAlternative,
+    ModelingDecision,
     ModelingRetryDecision,
     StructuringAlternative,
     StructuringDecision,
@@ -118,6 +119,57 @@ def build_modeling_retry_memory_candidate(
     )
 
 
+def build_modeling_decision_episode(
+    *,
+    state: TFMStateModel,
+    decision: ModelingDecision,
+    execution_result_summary: str | None = None,
+    outcome: ReasoningOutcome = "supported",
+    memory_context: RetrievedMemoryContext | None = None,
+) -> DecisionEpisode:
+    """Construye un episodio reutilizable a partir de una decision modeladora."""
+
+    retrieved_memory_ids = _retrieved_memory_ids([], memory_context)
+    return DecisionEpisode(
+        episode_id=f"{state.run_id}:modeler:decision_episode:{_safe_id(decision.decision_id)}",
+        run_id=state.run_id,
+        decision_id=decision.decision_id,
+        agent_name=decision.agent_name,
+        target_agent="modeler",
+        decision_type="modeling",
+        dataset=state.project_context.dataset,
+        context_summary=_modeling_context_summary(state, decision),
+        options_considered=_modeling_options(decision),
+        chosen_action=_modeling_action(decision),
+        expected_effect=_modeling_expected_effect(decision),
+        evidence_used=_modeling_evidence(decision, memory_context),
+        retrieved_memory_record_ids=retrieved_memory_ids,
+        execution_result_summary=execution_result_summary,
+        after_metrics=_metrics_dict(state.metrics),
+        tradeoffs_observed=_modeling_tradeoffs(state, decision),
+        failure_modes=_modeling_failure_modes(outcome),
+        outcome=outcome,
+        lesson_learned=_modeling_lesson(state, decision),
+        reusable_lessons=_modeling_reusable_lessons(state, decision),
+        when_to_reuse=_modeling_when_to_reuse(state, decision),
+        when_not_to_reuse=_modeling_when_not_to_reuse(state),
+        risk_if_misused=_modeling_risk_if_misused(state),
+    )
+
+
+def build_modeling_memory_candidate(
+    episode: DecisionEpisode,
+    *,
+    reusable_as_context: bool,
+) -> MemoryCandidate:
+    """Destila un episodio de modelado inicial en candidato indexable."""
+
+    return memory_candidate_from_decision_episode(
+        episode,
+        reusable_as_context=reusable_as_context,
+    )
+
+
 def build_structuring_decision_episode(
     *,
     state: TFMStateModel,
@@ -196,17 +248,17 @@ def build_evaluation_decision_episode(
             "Aceptar solo ejecuciones que cumplen el protocolo local o pedir "
             "nueva configuracion cuando las metricas no son suficientes."
         ),
-        evidence_used=_evaluation_evidence(memory_context),
+        evidence_used=_evaluation_evidence(decision, memory_context),
         retrieved_memory_record_ids=retrieved_memory_ids,
         execution_result_summary=decision.evaluation.summary,
         after_metrics=metrics,
         tradeoffs_observed=_evaluation_tradeoffs(state.metrics, decision),
         failure_modes=_evaluation_failure_modes(state.metrics, decision),
-        outcome="supported" if state.metrics is not None else "inconclusive",
+        outcome=_evaluation_outcome(state, decision),
         lesson_learned=_evaluation_lesson(decision),
         reusable_lessons=_evaluation_reusable_lessons(decision),
         when_to_reuse=_evaluation_when_to_reuse(state, decision),
-        when_not_to_reuse=_evaluation_when_not_to_reuse(),
+        when_not_to_reuse=_evaluation_when_not_to_reuse(state),
         risk_if_misused=(
             "Puede convertir una advertencia historica en aprobacion si no se "
             "respetan metricas, umbrales y politica de etiquetado actuales."
@@ -265,12 +317,16 @@ def write_decision_memory_artifacts(
 def _metrics_dict(metrics: MetricsReport | None) -> dict[str, float | None]:
     if metrics is None:
         return {}
-    return {
+    values: dict[str, float | None] = {
         "precision": metrics.precision,
         "recall": metrics.recall,
         "f1_score": metrics.f1_score,
         "false_positive_rate": metrics.false_positive_rate,
     }
+    for key, value in metrics.extra.items():
+        if key.startswith("degradation_") and isinstance(value, (int, float)):
+            values[key] = float(value)
+    return values
 
 
 def _context_summary(
@@ -390,6 +446,190 @@ def _retrieved_memory_ids(
     if memory_context is None:
         return decision_memory_ids
     return [item.record.memory_record_id for item in memory_context.items]
+
+
+def _modeling_context_summary(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> str:
+    strategy = decision.decision_strategy
+    return (
+        f"Decision del modelador para {state.project_context.dataset}. "
+        f"Perfil={state.project_context.supervision_profile}. "
+        f"Modelo={decision.modeling_config.model_name}. "
+        f"Estrategia={strategy.strategy_type}. Hipotesis: {strategy.hypothesis}"
+        + (
+            ""
+            if strategy.alert_policy is None
+            else f" Politica de alerta: {strategy.alert_policy}"
+        )
+        + (
+            ""
+            if not strategy.optimization_targets
+            else " Objetivos: " + ", ".join(strategy.optimization_targets) + "."
+        )
+    )
+
+
+def _modeling_options(decision: ModelingDecision) -> list[DecisionOption]:
+    options = [
+        _option_from_modeling_config(
+            option_id="chosen_modeling_config",
+            config=decision.modeling_config,
+            description="Configuracion elegida por el modelador.",
+            expected_effect=_modeling_expected_effect(decision),
+            selected=True,
+        )
+    ]
+    options.extend(_option_from_alternative(alt) for alt in decision.comparison_candidates)
+    return [option for option in options if option is not None]
+
+
+def _modeling_action(decision: ModelingDecision) -> str:
+    config = decision.modeling_config
+    return (
+        f"Use model_name={config.model_name}, train_split={decision.train_split}, "
+        f"validation_split={decision.validation_split or 'none'}, "
+        f"hyperparameters={json.dumps(config.hyperparameters, sort_keys=True)}."
+    )
+
+
+def _modeling_expected_effect(decision: ModelingDecision) -> str:
+    strategy = decision.decision_strategy
+    if strategy.optimization_targets:
+        return "Optimizar " + ", ".join(strategy.optimization_targets) + "."
+    if decision.comparison_candidates:
+        return "Comparar la familia elegida con alternativas soportadas."
+    return "Entrenar un detector reproducible y generar score de anomalia."
+
+
+def _modeling_evidence(
+    decision: ModelingDecision,
+    memory_context: RetrievedMemoryContext | None,
+) -> list[str]:
+    evidence = ["features_artifact", "supported_model_families"]
+    strategy = decision.decision_strategy
+    evidence.extend(strategy.tool_names)
+    evidence.extend(strategy.evidence_refs)
+    if memory_context is not None and memory_context.items:
+        evidence.append("retrieved_memory_context")
+    return list(dict.fromkeys(evidence))
+
+
+def _modeling_tradeoffs(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> list[str]:
+    strategy = decision.decision_strategy
+    tradeoffs = [
+        f"model_family:{decision.modeling_config.model_name}",
+        f"strategy:{strategy.strategy_type}",
+    ]
+    tradeoffs.extend(strategy.risk_notes)
+    tradeoffs.extend(f"target:{target}" for target in strategy.optimization_targets)
+    if strategy.alert_policy is not None:
+        tradeoffs.append("alert_policy_declared")
+    if state.project_context.supervision_profile == "run_to_failure_degradation":
+        tradeoffs.extend(
+            [
+                "run_to_failure_modeling_strategy",
+                "score_trend_over_binary_f1",
+            ]
+        )
+        if "temporal_health_lookup" in strategy.tool_names:
+            tradeoffs.append("temporal_health_tool_used")
+        if "degradation_metrics_lookup" in strategy.tool_names:
+            tradeoffs.append("degradation_metrics_tool_used")
+    return sorted(set(tradeoffs))
+
+
+def _modeling_failure_modes(outcome: ReasoningOutcome) -> list[str]:
+    if outcome in {"contradicted", "overcorrected"}:
+        return ["modeling_choice_contradicted_by_downstream_evidence"]
+    if outcome == "inconclusive":
+        return ["requires_downstream_evaluation"]
+    return []
+
+
+def _modeling_lesson(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> str:
+    profile = state.project_context.supervision_profile
+    strategy = decision.decision_strategy
+    return (
+        f"El modelador eligio {decision.modeling_config.model_name} para "
+        f"{profile} con estrategia {strategy.strategy_type}. "
+        f"Hipotesis: {strategy.hypothesis}"
+    )
+
+
+def _modeling_reusable_lessons(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> list[str]:
+    config = decision.modeling_config
+    strategy = decision.decision_strategy
+    lessons = [
+        "modeling_decisions_require_downstream_evaluation",
+        f"model_family_{config.model_name}",
+        f"strategy_{strategy.strategy_type}",
+    ]
+    threshold = config.hyperparameters.get("threshold_quantile")
+    if isinstance(threshold, (int, float)):
+        lessons.append(f"threshold_quantile_{threshold}")
+    lessons.extend(f"target_{target}" for target in strategy.optimization_targets)
+    if state.project_context.supervision_profile == "run_to_failure_degradation":
+        lessons.extend(
+            [
+                "run_to_failure_modeling_requires_temporal_metrics",
+                "f1_is_auxiliary_for_temporal_profile",
+            ]
+        )
+        if strategy.alert_policy is not None:
+            lessons.append("temporal_alert_policy_must_be_explicit")
+    return sorted(set(lessons))
+
+
+def _modeling_when_to_reuse(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> list[str]:
+    return [
+        f"dataset={state.project_context.dataset}",
+        f"supervision_profile={state.project_context.supervision_profile}",
+        f"model_name={decision.modeling_config.model_name}",
+        f"strategy={decision.decision_strategy.strategy_type}",
+        "the modeler needs prior evidence about model family and alert policy",
+    ]
+
+
+def _modeling_when_not_to_reuse(state: TFMStateModel) -> list[str]:
+    conditions = [
+        f"dataset is not comparable with {state.project_context.dataset}",
+        "feature set, split policy or label source changed without review",
+    ]
+    if state.project_context.supervision_profile == "run_to_failure_degradation":
+        conditions.extend(
+            [
+                "current task requires real RUL estimation rather than historic lead time",
+                "failure metadata or temporal proxy policy changed",
+            ]
+        )
+    return conditions
+
+
+def _modeling_risk_if_misused(state: TFMStateModel) -> str:
+    if state.project_context.supervision_profile == "run_to_failure_degradation":
+        return (
+            "Puede trasladar una politica temporal a otro activo sin comprobar "
+            "lead time historico, falsas alarmas nominales, etiquetas proxy y "
+            "ausencia de RUL estimado."
+        )
+    return (
+        "Puede reutilizar una familia de modelo sin revisar features, split, "
+        "etiquetas y umbral operativo del contexto actual."
+    )
 
 
 def _structuring_context_summary(
@@ -564,13 +804,21 @@ def _evaluation_context_summary(
     decision: EvaluationDecision,
 ) -> str:
     metrics = _metrics_dict(state.metrics)
+    temporal_metrics = _temporal_metric_summary(metrics)
     return (
         f"Decision del evaluador para {state.project_context.dataset}. "
+        f"Perfil={state.project_context.supervision_profile}. "
         f"Metricas: precision={_fmt(metrics.get('precision'))}, "
         f"recall={_fmt(metrics.get('recall'))}, "
         f"F1={_fmt(metrics.get('f1_score'))}, "
         f"FPR={_fmt(metrics.get('false_positive_rate'))}. "
-        f"Aprobada={decision.evaluation.approved}. Razonamiento: {decision.rationale}"
+        + ("" if temporal_metrics is None else f"Metricas temporales: {temporal_metrics}. ")
+        + f"Aprobada={decision.evaluation.approved}. Razonamiento: {decision.rationale}"
+        + (
+            ""
+            if decision.operational_assessment is None
+            else f" Assessment operacional: {decision.operational_assessment}"
+        )
     )
 
 
@@ -601,12 +849,15 @@ def _evaluation_action(decision: EvaluationDecision) -> str:
 
 
 def _evaluation_evidence(
+    decision: EvaluationDecision,
     memory_context: RetrievedMemoryContext | None,
 ) -> list[str]:
     evidence = ["metrics_report", "evaluation_thresholds", "evaluation_protocol"]
+    evidence.extend(decision.tool_names)
+    evidence.extend(decision.evidence_refs)
     if memory_context is not None and memory_context.items:
         evidence.append("retrieved_memory_context")
-    return evidence
+    return list(dict.fromkeys(evidence))
 
 
 def _evaluation_tradeoffs(
@@ -627,6 +878,8 @@ def _evaluation_tradeoffs(
             tradeoffs.append("false_positive_rate_above_allowed")
     if decision.evaluation.approved:
         tradeoffs.append("metrics_satisfy_local_protocol")
+    if decision.temporal_guardrail_checks:
+        tradeoffs.extend(decision.temporal_guardrail_checks)
     return tradeoffs or ["no_blocking_metric_tradeoff"]
 
 
@@ -637,6 +890,21 @@ def _evaluation_failure_modes(
     if decision.evaluation.approved:
         return []
     return _evaluation_tradeoffs(metrics, decision)
+
+
+def _evaluation_outcome(
+    state: TFMStateModel,
+    decision: EvaluationDecision,
+) -> ReasoningOutcome:
+    if state.metrics is None:
+        return "inconclusive"
+    if (
+        state.project_context.supervision_profile == "run_to_failure_degradation"
+        and decision.evaluation.approved
+        and (decision.evaluation.limitations or decision.temporal_guardrail_checks)
+    ):
+        return "partially_supported"
+    return "supported"
 
 
 def _evaluation_lesson(decision: EvaluationDecision) -> str:
@@ -652,6 +920,10 @@ def _evaluation_reusable_lessons(decision: EvaluationDecision) -> list[str]:
         lessons.append("approval_requires_protocol_compliance")
     else:
         lessons.append("rejection_can_be_correct_even_after_partial_improvement")
+    if decision.temporal_guardrail_checks:
+        lessons.append("temporal_guardrails_are_binding")
+    if decision.operational_assessment is not None:
+        lessons.append("operational_defensibility_must_be_documented")
     return lessons
 
 
@@ -659,20 +931,55 @@ def _evaluation_when_to_reuse(
     state: TFMStateModel,
     decision: EvaluationDecision,
 ) -> list[str]:
-    return [
+    conditions = [
         f"dataset={state.project_context.dataset}",
         f"min_recall_required={decision.min_recall_required}",
         f"max_false_positive_rate={decision.max_false_positive_rate}",
         "the evaluator needs prior evidence about metric trade-offs",
+        f"supervision_profile={state.project_context.supervision_profile}",
     ]
+    if state.project_context.supervision_profile == "run_to_failure_degradation":
+        conditions.extend(
+            [
+                f"label_source={state.project_context.label_source}",
+                f"label_granularity={state.project_context.label_granularity}",
+                "the evaluator needs prior temporal guardrails for run-to-failure",
+            ]
+        )
+    return conditions
 
 
-def _evaluation_when_not_to_reuse() -> list[str]:
-    return [
+def _evaluation_when_not_to_reuse(state: TFMStateModel) -> list[str]:
+    conditions = [
         "labels, temporal split or metric definitions changed",
         "NASA IMS real is being evaluated without a defended labeling policy",
         "human review marks the prior judgment as unsafe or excluded",
     ]
+    if state.project_context.supervision_profile == "run_to_failure_degradation":
+        conditions.extend(
+            [
+                "current task requires real RUL estimation rather than historic lead time",
+                "alert policy no longer separates isolated spike from sustained alert",
+                "official per-window labels replace temporal proxy labels",
+            ]
+        )
+    return conditions
+
+
+def _temporal_metric_summary(metrics: dict[str, float | None]) -> str | None:
+    names = [
+        "degradation_detected_before_failure_rate",
+        "degradation_mean_lead_time_to_failure",
+        "degradation_mean_false_alarm_rate_nominal",
+        "degradation_mean_score_trend_spearman",
+        "degradation_missed_runs",
+    ]
+    values = [
+        f"{name}={_fmt(metrics.get(name))}"
+        for name in names
+        if name in metrics
+    ]
+    return None if not values else ", ".join(values)
 
 
 def _modeling_risks(config: ModelingConfig) -> list[str]:

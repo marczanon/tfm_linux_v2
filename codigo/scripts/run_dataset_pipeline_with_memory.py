@@ -19,8 +19,8 @@ from codigo.app.services.run_persistence import DEFAULT_RUNS_DIR, extract_decisi
 from codigo.app.services.vector_memory import (
     DEFAULT_OLLAMA_EMBEDDING_MODEL,
     LocalHashEmbeddingModel,
-    LocalJsonVectorMemoryStore,
     OllamaEmbeddingProvider,
+    get_default_vector_memory_store,
 )
 from codigo.app.services.reasoning_memory_index import DEFAULT_MEMORY_DIR
 
@@ -103,7 +103,7 @@ def _memory_config(
     else:
         embedding_provider = LocalHashEmbeddingModel(dimension=args.hash_dimension)
     return PipelineMemoryConfig(
-        memory_store=LocalJsonVectorMemoryStore(
+        memory_store=get_default_vector_memory_store(
             args.memory_dir,
             embedding_model=embedding_provider,
         ),

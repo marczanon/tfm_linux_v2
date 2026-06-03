@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field, NonNegativeInt
 
@@ -13,6 +14,7 @@ from codigo.app.schemas.reasoning import (
     HumanReasoningVerdict,
     MemoryRole,
     MemorySourceType,
+    ReasoningMemoryRecord,
     ReasoningOutcome,
 )
 
@@ -52,3 +54,20 @@ class MemoryRecordSummary(StrictBaseModel):
     source_path: str | None = Field(default=None, min_length=1)
     tags: list[str] = Field(default_factory=list)
     created_at: datetime
+
+
+class MemoryCurationRequest(StrictBaseModel):
+    """Operacion manual de gobierno sobre un recuerdo persistido."""
+
+    action: Literal["exclude", "restore"]
+    reason: str = Field(min_length=1, max_length=500)
+    reviewer: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class MemoryCurationResponse(StrictBaseModel):
+    """Resultado de excluir, restaurar o borrar memoria."""
+
+    memory_record_id: str = Field(min_length=1)
+    action: Literal["exclude", "restore", "delete"]
+    reason: str | None = None
+    record: ReasoningMemoryRecord | None = None

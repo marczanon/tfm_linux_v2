@@ -16,7 +16,10 @@ from codigo.app.agents.evaluator import (
     decide_evaluation_action,
     retrieve_evaluator_memory_context,
 )
-from codigo.app.agents.modeler import decide_modeling_action
+from codigo.app.agents.modeler import (
+    decide_modeling_action,
+    retrieve_modeler_memory_context,
+)
 from codigo.app.agents.report_writer import (
     decide_report_action,
     decide_report_revision_action,
@@ -67,7 +70,7 @@ from codigo.app.schemas.agent_decisions import (
     StructuringDecision,
     SupervisorDecision,
 )
-from codigo.app.schemas.reasoning import RetrievedMemoryContext
+from codigo.app.schemas.reasoning import AgentMemoryQuery, RetrievedMemoryContext
 from codigo.app.schemas.state import (
     ArtifactRef,
     DatasetProfileSummary,
@@ -79,6 +82,8 @@ from codigo.app.schemas.state import (
 from codigo.app.services.decision_memory import (
     build_evaluation_decision_episode,
     build_evaluation_memory_candidate,
+    build_modeling_decision_episode,
+    build_modeling_memory_candidate,
     build_structuring_decision_episode,
     build_structuring_memory_candidate,
     write_decision_memory_artifacts,
@@ -135,6 +140,7 @@ class PipelineMemoryConfig:
     memory_store: VectorMemoryStore | None = None
     output_root: Path | str = Path("codigo/reports")
     structurer_top_k: int = 3
+    modeler_top_k: int = 3
     evaluator_top_k: int = 3
     min_similarity: float = 0.0
     generate_decision_memory: bool = True
@@ -201,11 +207,21 @@ def build_cwru_pipeline(
     )
     graph.add_node(
         "modeling_agent",
-        lambda state: _modeler_node(state, agent_runner, runtime_recorder),
+        lambda state: _modeler_node(
+            state,
+            agent_runner,
+            memory_runner,
+            runtime_recorder,
+        ),
     )
     graph.add_node(
         "modeling_executor",
-        lambda state: _modeling_node(state, runner, runtime_recorder),
+        lambda state: _modeling_node(
+            state,
+            runner,
+            memory_runner,
+            runtime_recorder,
+        ),
     )
     graph.add_node(
         "evaluator",
@@ -453,22 +469,30 @@ def _structurer_node(
 ) -> TFMState:
     model = validate_state(state)
     memory_context = _retrieve_structurer_context(model, memory_config)
-    _emit_memory_event(
-        runtime_recorder,
-        model=model,
-        agent_name="structurer",
-        memory_context=memory_context,
-    )
-    memory_context_path = _write_memory_context_artifact(
+    memory_artifact_paths = _write_memory_retrieval_artifacts(
         model,
         "structurer",
         memory_context,
         memory_config,
     )
+    _emit_memory_event(
+        runtime_recorder,
+        model=model,
+        agent_name="structurer",
+        memory_context=memory_context,
+        artifact_paths=memory_artifact_paths,
+    )
     decision = _call_agent_with_optional_memory(
         agents.structurer,
         model,
         memory_context,
+    )
+    _emit_memory_usage_event(
+        runtime_recorder,
+        model=model,
+        agent_name="structurer",
+        decision=decision,
+        memory_context=memory_context,
     )
     _emit_decision_event(
         runtime_recorder,
@@ -496,7 +520,7 @@ def _structurer_node(
     memory_artifacts = _memory_context_artifacts(
         "structurer",
         memory_context,
-        memory_context_path,
+        memory_artifact_paths,
     )
     updated["messages"] = [
         *updated["messages"],
@@ -554,10 +578,36 @@ def _structuring_node(
 def _modeler_node(
     state: TFMState,
     agents: PipelineAgents,
+    memory_config: PipelineMemoryConfig | None,
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
-    decision = agents.modeler(model)
+    memory_context = _retrieve_modeler_context(model, memory_config)
+    memory_artifact_paths = _write_memory_retrieval_artifacts(
+        model,
+        "modeler",
+        memory_context,
+        memory_config,
+    )
+    _emit_memory_event(
+        runtime_recorder,
+        model=model,
+        agent_name="modeler",
+        memory_context=memory_context,
+        artifact_paths=memory_artifact_paths,
+    )
+    decision = _call_agent_with_optional_memory(
+        agents.modeler,
+        model,
+        memory_context,
+    )
+    _emit_memory_usage_event(
+        runtime_recorder,
+        model=model,
+        agent_name="modeler",
+        decision=decision,
+        memory_context=memory_context,
+    )
     _emit_decision_event(
         runtime_recorder,
         model=model,
@@ -575,9 +625,20 @@ def _modeler_node(
                 candidate.model_dump(mode="json")
                 for candidate in decision.comparison_candidates
             ],
+            "used_memory_context": decision.used_memory_context,
+            "memory_usage_summary": decision.memory_usage_summary,
+            "memory_record_uses": [
+                item.model_dump(mode="json")
+                for item in decision.memory_record_uses
+            ],
         },
     )
     updated = model.to_langgraph_state()
+    memory_artifacts = _memory_context_artifacts(
+        "modeler",
+        memory_context,
+        memory_artifact_paths,
+    )
     updated["messages"] = [
         *updated["messages"],
         StateMessage(
@@ -585,6 +646,10 @@ def _modeler_node(
             name="modeler",
             content=decision.model_dump_json(),
         ).model_dump(mode="json"),
+    ]
+    updated["artifacts"] = [
+        *updated["artifacts"],
+        *[artifact.model_dump(mode="json") for artifact in memory_artifacts],
     ]
     updated["modeling_config"] = decision.modeling_config.model_dump(mode="json")
     updated["current_stage"] = "modeling"
@@ -595,6 +660,7 @@ def _modeler_node(
 def _modeling_node(
     state: TFMState,
     executors: PipelineExecutors,
+    memory_config: PipelineMemoryConfig | None,
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
@@ -610,13 +676,20 @@ def _modeling_node(
 
     config = model.modeling_config or DEFAULT_MODELING_CONFIG
     result = executors.modeling(features_path=features_path, config=config)
-    return _apply_result(
+    updated = _apply_result(
         model,
         result,
         next_stage="evaluation",
         next_node="supervisor",
         extra_updates={"modeling_config": config.model_dump(mode="json")},
         runtime_recorder=runtime_recorder,
+    )
+    if result.status != "success":
+        return updated
+    return _append_modeling_decision_memory_artifacts(
+        updated,
+        result,
+        memory_config,
     )
 
 
@@ -659,22 +732,30 @@ def _evaluator_agent_node(
 ) -> TFMState:
     model = validate_state(state)
     memory_context = _retrieve_evaluator_context(model, memory_config)
-    _emit_memory_event(
-        runtime_recorder,
-        model=model,
-        agent_name="evaluator",
-        memory_context=memory_context,
-    )
-    memory_context_path = _write_memory_context_artifact(
+    memory_artifact_paths = _write_memory_retrieval_artifacts(
         model,
         "evaluator",
         memory_context,
         memory_config,
     )
+    _emit_memory_event(
+        runtime_recorder,
+        model=model,
+        agent_name="evaluator",
+        memory_context=memory_context,
+        artifact_paths=memory_artifact_paths,
+    )
     decision = _call_agent_with_optional_memory(
         agents.evaluator,
         model,
         memory_context,
+    )
+    _emit_memory_usage_event(
+        runtime_recorder,
+        model=model,
+        agent_name="evaluator",
+        decision=decision,
+        memory_context=memory_context,
     )
     _emit_decision_event(
         runtime_recorder,
@@ -700,7 +781,7 @@ def _evaluator_agent_node(
     memory_artifacts = _memory_context_artifacts(
         "evaluator",
         memory_context,
-        memory_context_path,
+        memory_artifact_paths,
     )
     updated["messages"] = [
         *updated["messages"],
@@ -901,6 +982,20 @@ def _retrieve_structurer_context(
     )
 
 
+def _retrieve_modeler_context(
+    model: TFMStateModel,
+    memory_config: PipelineMemoryConfig | None,
+) -> RetrievedMemoryContext | None:
+    if memory_config is None or memory_config.memory_store is None:
+        return None
+    return retrieve_modeler_memory_context(
+        model,
+        memory_store=memory_config.memory_store,
+        top_k=memory_config.modeler_top_k,
+        min_similarity=memory_config.min_similarity,
+    )
+
+
 def _retrieve_evaluator_context(
     model: TFMStateModel,
     memory_config: PipelineMemoryConfig | None,
@@ -1097,45 +1192,92 @@ def _accepts_memory_context(agent: Callable[..., Any]) -> bool:
     )
 
 
-def _write_memory_context_artifact(
+def _write_memory_retrieval_artifacts(
     model: TFMStateModel,
     agent_name: str,
     memory_context: RetrievedMemoryContext | None,
     memory_config: PipelineMemoryConfig | None,
-) -> str | None:
+) -> dict[str, str]:
     if memory_context is None or memory_config is None:
-        return None
+        return {}
     output_dir = _agent_memory_output_dir(model, agent_name, memory_config)
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "retrieved_memory_context.json"
-    path.write_text(
+    query_path = output_dir / "memory_query.json"
+    context_path = output_dir / "retrieved_memory_context.json"
+    query_path.write_text(
+        json.dumps(memory_context.query.model_dump(mode="json"), indent=2),
+        encoding="utf-8",
+    )
+    context_path.write_text(
         json.dumps(memory_context.model_dump(mode="json"), indent=2),
         encoding="utf-8",
     )
-    return path.as_posix()
+    return {
+        "query_path": query_path.as_posix(),
+        "context_path": context_path.as_posix(),
+    }
 
 
 def _memory_context_artifacts(
     agent_name: str,
     memory_context: RetrievedMemoryContext | None,
-    memory_context_path: str | None,
+    artifact_paths: dict[str, str],
 ) -> list[ArtifactRef]:
-    if memory_context is None or memory_context_path is None:
+    if memory_context is None or not artifact_paths:
         return []
-    return [
-        ArtifactRef(
-            name=f"{agent_name}_retrieved_memory_context",
-            artifact_type="config",
-            path=memory_context_path,
-            producer=agent_name,
-            description=f"Contexto RAG recuperado para el agente {agent_name}.",
-            metadata={
-                "context_id": memory_context.context_id,
-                "query_id": memory_context.query.query_id,
-                "n_items": len(memory_context.items),
-            },
+    query_path = artifact_paths.get("query_path")
+    context_path = artifact_paths.get("context_path")
+    artifacts: list[ArtifactRef] = []
+    if query_path is not None:
+        artifacts.append(
+            ArtifactRef(
+                name=f"{agent_name}_memory_query",
+                artifact_type="config",
+                path=query_path,
+                producer=agent_name,
+                description=f"Consulta RAG emitida para el agente {agent_name}.",
+                metadata=_memory_query_metadata(memory_context.query),
+            )
         )
-    ]
+    if context_path is not None:
+        artifacts.append(
+            ArtifactRef(
+                name=f"{agent_name}_retrieved_memory_context",
+                artifact_type="config",
+                path=context_path,
+                producer=agent_name,
+                description=f"Contexto RAG recuperado para el agente {agent_name}.",
+                metadata={
+                    "context_id": memory_context.context_id,
+                    "query_id": memory_context.query.query_id,
+                    "n_items": len(memory_context.items),
+                    "retrieval_backend": memory_context.retrieval_backend,
+                    "embedding_model": memory_context.embedding_model,
+                    "top_memory_record_ids": ",".join(
+                        item.record.memory_record_id for item in memory_context.items[:5]
+                    ),
+                    "top_similarities": ",".join(
+                        f"{item.similarity:.6f}" for item in memory_context.items[:5]
+                    ),
+                },
+            )
+        )
+    return artifacts
+
+
+def _memory_query_metadata(query: AgentMemoryQuery) -> dict[str, Any]:
+    return {
+        "query_id": query.query_id,
+        "target_agent": query.target_agent,
+        "dataset": query.dataset,
+        "run_id": query.run_id,
+        "decision_id": query.decision_id,
+        "top_k": query.top_k,
+        "min_similarity": query.min_similarity,
+        "allowed_memory_roles": ",".join(query.allowed_memory_roles),
+        "excluded_verdicts": ",".join(query.excluded_verdicts),
+        "human_review_mode": query.human_review_mode,
+    }
 
 
 def _append_structuring_decision_memory_artifacts(
@@ -1172,6 +1314,43 @@ def _append_structuring_decision_memory_artifacts(
     return _append_artifacts(
         model,
         _decision_memory_artifact_refs("structurer", artifacts),
+    )
+
+
+def _append_modeling_decision_memory_artifacts(
+    state: TFMState,
+    result: ModelingResult,
+    memory_config: PipelineMemoryConfig | None,
+) -> TFMState:
+    if memory_config is None or not memory_config.generate_decision_memory:
+        return state
+    model = validate_state(state)
+    decision = _latest_modeling_decision(model)
+    if decision is None:
+        return state
+    memory_context = _latest_memory_context(model, "modeler")
+    episode = build_modeling_decision_episode(
+        state=model,
+        decision=decision,
+        execution_result_summary=(
+            f"{result.message} model_path={result.model_path}; "
+            f"predictions_path={result.predictions_path}."
+        ),
+        outcome="supported",
+        memory_context=memory_context,
+    )
+    candidate = build_modeling_memory_candidate(
+        episode,
+        reusable_as_context=memory_config.reusable_as_context,
+    )
+    artifacts = write_decision_memory_artifacts(
+        episode=episode,
+        candidate=candidate,
+        output_dir=_agent_memory_output_dir(model, "modeler", memory_config),
+    )
+    return _append_artifacts(
+        model,
+        _decision_memory_artifact_refs("modeler", artifacts),
     )
 
 
@@ -1267,6 +1446,13 @@ def _latest_structuring_decision(model: TFMStateModel) -> StructuringDecision | 
     return None
 
 
+def _latest_modeling_decision(model: TFMStateModel) -> ModelingDecision | None:
+    for message in reversed(model.messages):
+        if message.role == "agent" and message.name == "modeler":
+            return ModelingDecision.model_validate_json(message.content)
+    return None
+
+
 def _latest_evaluation_decision(model: TFMStateModel) -> EvaluationDecision | None:
     for message in reversed(model.messages):
         if message.role == "agent" and message.name == "evaluator":
@@ -1334,6 +1520,7 @@ def _emit_memory_event(
     model: TFMStateModel,
     agent_name: str,
     memory_context: RetrievedMemoryContext | None,
+    artifact_paths: dict[str, str] | None = None,
 ) -> None:
     if memory_context is None:
         _emit_runtime_event(
@@ -1347,19 +1534,52 @@ def _emit_memory_event(
             agent_name=agent_name,
             payload={
                 "state": _state_runtime_payload(model),
+                "retrieval_event": "retrieval_unavailable",
                 "available": False,
+                "reason": "memory disabled or no memory store configured",
                 "items": [],
             },
         )
         return
+    _emit_runtime_event(
+        runtime_recorder,
+        kind="memory_retrieval",
+        source="memory",
+        title=f"Consulta RAG para {agent_name}",
+        summary=(
+            f"Consulta {memory_context.query.query_id} con top_k="
+            f"{memory_context.query.top_k} y min_similarity="
+            f"{memory_context.query.min_similarity:.3f}."
+        ),
+        stage=model.current_stage,
+        node=f"{agent_name}_memory",
+        agent_name=agent_name,
+        memory_context_id=memory_context.context_id,
+        payload={
+            "state": _state_runtime_payload(model),
+            "retrieval_event": "retrieval_requested",
+            "available": True,
+            "query": memory_context.query.model_dump(mode="json"),
+            "query_artifact_path": (artifact_paths or {}).get("query_path"),
+        },
+    )
     items = [
         {
             "rank": item.rank,
             "similarity": round(item.similarity, 6),
             "retrieval_use": item.retrieval_use,
             "memory_record_id": item.record.memory_record_id,
+            "collection_name": item.record.collection_name,
+            "target_agent": item.record.target_agent,
+            "source_type": item.record.source_type,
+            "dataset": item.record.dataset,
+            "source_path": item.record.source_path,
+            "embedding_model": item.record.embedding_model,
+            "embedding_dimension": item.record.embedding_dimension,
+            "vector_id": item.record.vector_id,
             "memory_role": item.record.memory_role,
             "human_verdict": item.record.human_verdict,
+            "outcome": item.record.outcome,
             "run_id": item.record.run_id,
             "summary": item.record.summary,
             "tags": item.record.tags[:8],
@@ -1380,11 +1600,72 @@ def _emit_memory_event(
         memory_record_ids=record_ids,
         payload={
             "state": _state_runtime_payload(model),
+            "retrieval_event": "retrieval_returned",
             "available": True,
             "query_id": memory_context.query.query_id,
+            "query": memory_context.query.model_dump(mode="json"),
             "retrieval_backend": memory_context.retrieval_backend,
             "embedding_model": memory_context.embedding_model,
+            "context_artifact_path": (artifact_paths or {}).get("context_path"),
             "items": items,
+        },
+    )
+
+
+def _emit_memory_usage_event(
+    runtime_recorder: AgentRuntimeRecorder | None,
+    *,
+    model: TFMStateModel,
+    agent_name: str,
+    decision: Any,
+    memory_context: RetrievedMemoryContext | None,
+) -> None:
+    if memory_context is None:
+        return
+    retrieved_ids = [item.record.memory_record_id for item in memory_context.items]
+    cited_ids = list(getattr(decision, "memory_record_ids", []) or [])
+    cited_set = set(cited_ids)
+    ignored_ids = [memory_id for memory_id in retrieved_ids if memory_id not in cited_set]
+    used_memory = bool(getattr(decision, "used_memory_context", False))
+    if used_memory:
+        retrieval_event = "retrieval_used"
+        title = f"Memoria usada por {agent_name}"
+        summary = (
+            f"{len(cited_ids)} de {len(retrieved_ids)} recuerdos recuperados "
+            "fueron citados por el agente."
+        )
+    else:
+        retrieval_event = "retrieval_rejected_by_agent"
+        title = f"Memoria no usada por {agent_name}"
+        summary = (
+            f"El agente recibio {len(retrieved_ids)} recuerdos pero no declaro "
+            "uso de memoria en su decision."
+        )
+    _emit_runtime_event(
+        runtime_recorder,
+        kind="memory_retrieval",
+        source="memory",
+        title=title,
+        summary=summary,
+        stage=model.current_stage,
+        node=f"{agent_name}_memory",
+        agent_name=agent_name,
+        decision_id=getattr(decision, "decision_id", None),
+        memory_context_id=memory_context.context_id,
+        memory_record_ids=cited_ids,
+        payload={
+            "state": _state_runtime_payload(model),
+            "retrieval_event": retrieval_event,
+            "used_memory_context": used_memory,
+            "memory_context_id": memory_context.context_id,
+            "retrieved_memory_record_ids": retrieved_ids,
+            "cited_memory_record_ids": cited_ids,
+            "ignored_memory_record_ids": ignored_ids,
+            "memory_usage_summary": getattr(decision, "memory_usage_summary", None),
+            "memory_record_uses": [
+                item.model_dump(mode="json")
+                for item in getattr(decision, "memory_record_uses", [])
+            ],
         },
     )
 

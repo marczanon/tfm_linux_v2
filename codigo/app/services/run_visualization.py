@@ -12,6 +12,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from codigo.app.schemas.api_visualization import (
+    AgentOperationalRecommendation,
     HealthState,
     ProjectionBoundary,
     ProjectionPoint,
@@ -26,13 +27,52 @@ from codigo.app.services.run_persistence import DEFAULT_RUNS_DIR, load_run_snaps
 from codigo.app.services.run_registry import get_run_artifacts
 
 
-METRIC_LABELS: dict[str, tuple[str, bool]] = {
-    "precision": ("Precision", True),
-    "recall": ("Recall", True),
-    "f1_score": ("F1", True),
-    "false_positive_rate": ("FPR", False),
-    "roc_auc": ("ROC-AUC", True),
-    "pr_auc": ("PR-AUC", True),
+METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
+    "precision": ("Precision", True, "ratio", None),
+    "recall": ("Recall", True, "ratio", None),
+    "f1_score": ("F1", True, "ratio", None),
+    "false_positive_rate": ("FPR", False, "ratio", None),
+    "roc_auc": ("ROC-AUC", True, "ratio", None),
+    "pr_auc": ("PR-AUC", True, "ratio", None),
+}
+
+DEGRADATION_METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
+    "detected_before_failure_rate": (
+        "Deteccion antes de fallo",
+        True,
+        "ratio",
+        "Proporcion de trayectorias detectadas antes del fallo historico.",
+    ),
+    "mean_lead_time_to_failure": (
+        "Lead time medio",
+        True,
+        "seconds",
+        "Tiempo medio disponible entre primer aviso y fallo historico.",
+    ),
+    "mean_false_alarm_rate_nominal": (
+        "Falsas alarmas nominales",
+        False,
+        "ratio",
+        "Alertas durante el tramo nominal o temprano de la trayectoria.",
+    ),
+    "mean_score_trend_spearman": (
+        "Tendencia del score",
+        True,
+        "score",
+        "Correlacion entre score de anomalia y avance de vida relativa.",
+    ),
+    "missed_runs": (
+        "Fallos perdidos",
+        False,
+        "count",
+        "Trayectorias que llegaron a fallo sin alerta previa.",
+    ),
+    "mean_initial_final_separation": (
+        "Separacion inicio-final",
+        True,
+        "score",
+        "Diferencia media entre score inicial y score final.",
+    ),
 }
 
 FEATURE_METADATA_COLUMNS = {
@@ -93,6 +133,7 @@ TEMPORAL_AXIS_PRIORITY: list[TemporalXAxis] = [
     "time_since_start_seconds",
     "window_index",
 ]
+PERSISTENT_ALERT_MIN_WINDOWS = 3
 
 
 def build_run_visualization(
@@ -107,8 +148,38 @@ def build_run_visualization(
     snapshot = load_run_snapshot(run_id, runs_dir)
     artifacts = get_run_artifacts(run_id, runs_dir)
     source_paths = _artifact_paths(artifacts)
-    metrics = _metrics(snapshot.metrics_path)
+    summary_metrics = _safe_dict(_read_json(Path(snapshot.metrics_path)))
+    full_metrics = _full_metrics(summary_metrics, source_paths)
+    run_context = _run_context(snapshot.state_path, summary_metrics, full_metrics)
+    metrics = _binary_metrics(summary_metrics)
+    primary_metrics, auxiliary_metrics = _visualization_metric_groups(
+        run_context["supervision_profile"],
+        run_context["metric_families"],
+        metrics,
+        full_metrics,
+    )
     warnings: list[str] = []
+    common_payload = {
+        "run_id": snapshot.run_id,
+        "dataset": snapshot.dataset,
+        "supervision_profile": run_context["supervision_profile"],
+        "label_source": run_context["label_source"],
+        "label_granularity": run_context["label_granularity"],
+        "model_name": run_context["model_name"],
+        "metric_families": run_context["metric_families"],
+        "metrics": metrics,
+        "primary_metrics": primary_metrics,
+        "auxiliary_metrics": auxiliary_metrics,
+        "binary_metric_context": run_context["binary_metric_context"],
+        "projection_role": _projection_role(run_context["supervision_profile"]),
+        "projection_explanation": _projection_explanation(
+            run_context["supervision_profile"]
+        ),
+        "agent_recommendation": _agent_recommendation(
+            snapshot.state_path,
+            run_context["supervision_profile"],
+        ),
+    }
 
     features_path = source_paths.get("features")
     predictions_path = source_paths.get("predictions")
@@ -118,9 +189,7 @@ def build_run_visualization(
             "La proyeccion 2D requiere al menos el artefacto de features."
         )
         return RunVisualizationData(
-            run_id=snapshot.run_id,
-            dataset=snapshot.dataset,
-            metrics=metrics,
+            **common_payload,
             projection_available=False,
             temporal_series=temporal_series,
             source_paths=source_paths,
@@ -137,9 +206,7 @@ def build_run_visualization(
     except (OSError, ValueError, pd.errors.ParserError) as exc:
         warnings.append(f"No se pudo construir la proyeccion 2D: {exc}")
         return RunVisualizationData(
-            run_id=snapshot.run_id,
-            dataset=snapshot.dataset,
-            metrics=metrics,
+            **common_payload,
             projection_available=False,
             temporal_series=temporal_series,
             source_paths=source_paths,
@@ -147,9 +214,7 @@ def build_run_visualization(
         )
 
     return RunVisualizationData(
-        run_id=snapshot.run_id,
-        dataset=snapshot.dataset,
-        metrics=metrics,
+        **common_payload,
         projection_available=True,
         projection_points=projection["points"],
         projection_boundary=projection["boundary"],
@@ -161,11 +226,20 @@ def build_run_visualization(
     )
 
 
-def _metrics(metrics_path: str) -> list[VisualizationMetric]:
-    payload = _read_json(Path(metrics_path))
-    data = payload if isinstance(payload, dict) else {}
+def build_temporal_series_from_predictions(
+    predictions_path: str | None,
+    *,
+    max_points: int = 900,
+) -> TemporalSeriesData:
+    """Construye la serie temporal reutilizable por UI y herramientas agenticas."""
+
+    bounded_max_points = max(50, min(max_points, 2500))
+    return _safe_temporal_series(predictions_path, bounded_max_points)
+
+
+def _binary_metrics(data: dict[str, Any]) -> list[VisualizationMetric]:
     metrics: list[VisualizationMetric] = []
-    for name, (label, higher_is_better) in METRIC_LABELS.items():
+    for name, (label, higher_is_better, value_kind, note) in METRIC_LABELS.items():
         value = data.get(name)
         metrics.append(
             VisualizationMetric(
@@ -173,9 +247,304 @@ def _metrics(metrics_path: str) -> list[VisualizationMetric]:
                 label=label,
                 value=None if value is None else float(value),
                 higher_is_better=higher_is_better,
+                metric_family="binary_classification",
+                value_kind=value_kind,
+                note=note,
             )
         )
     return metrics
+
+
+def _visualization_metric_groups(
+    supervision_profile: str | None,
+    metric_families: list[str],
+    binary_metrics: list[VisualizationMetric],
+    full_metrics: dict[str, Any],
+) -> tuple[list[VisualizationMetric], list[VisualizationMetric]]:
+    degradation_metrics = _degradation_metrics(full_metrics)
+    is_run_to_failure = (
+        supervision_profile == "run_to_failure_degradation"
+        or "run_to_failure_degradation" in metric_families
+    )
+    if is_run_to_failure:
+        return degradation_metrics, binary_metrics
+    return binary_metrics, degradation_metrics
+
+
+def _degradation_metrics(full_metrics: dict[str, Any]) -> list[VisualizationMetric]:
+    payload = full_metrics.get("degradation_metrics")
+    data = payload if isinstance(payload, dict) else {}
+    if data.get("available") is False:
+        return []
+
+    metrics: list[VisualizationMetric] = []
+    for name, (
+        label,
+        higher_is_better,
+        value_kind,
+        note,
+    ) in DEGRADATION_METRIC_LABELS.items():
+        value = data.get(name)
+        if value is None:
+            continue
+        metrics.append(
+            VisualizationMetric(
+                name=name,
+                label=label,
+                value=float(value),
+                higher_is_better=higher_is_better,
+                metric_family="run_to_failure_degradation",
+                value_kind=value_kind,
+                note=note,
+            )
+        )
+    return metrics
+
+
+def _full_metrics(
+    summary_metrics: dict[str, Any],
+    source_paths: dict[str, str],
+) -> dict[str, Any]:
+    candidates = [
+        source_paths.get("metrics"),
+        summary_metrics.get("metrics_path"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            payload = _read_json(Path(candidate))
+            if isinstance(payload, dict):
+                return payload
+    return {}
+
+
+def _run_context(
+    state_path: str,
+    summary_metrics: dict[str, Any],
+    full_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    state = _safe_dict(_read_json(Path(state_path)))
+    project_context = _safe_dict(state.get("project_context"))
+    modeling_config = _safe_dict(state.get("modeling_config"))
+    binary_context = _safe_dict(full_metrics.get("binary_metric_context"))
+    metric_families = _metric_families(summary_metrics, full_metrics)
+
+    return {
+        "supervision_profile": _optional_str(
+            project_context.get("supervision_profile")
+        ),
+        "label_source": _optional_str(
+            project_context.get("label_source") or binary_context.get("label_source")
+        ),
+        "label_granularity": _optional_str(
+            project_context.get("label_granularity")
+            or binary_context.get("label_granularity")
+        ),
+        "model_name": _optional_str(modeling_config.get("model_name")),
+        "metric_families": metric_families,
+        "binary_metric_context": {
+            str(key): str(value)
+            for key, value in binary_context.items()
+            if value is not None
+        },
+    }
+
+
+def _metric_families(
+    summary_metrics: dict[str, Any],
+    full_metrics: dict[str, Any],
+) -> list[str]:
+    full_value = full_metrics.get("metric_families")
+    if isinstance(full_value, list):
+        return [str(item) for item in full_value if str(item).strip()]
+
+    extra = _safe_dict(summary_metrics.get("extra"))
+    summary_value = extra.get("metric_families")
+    if isinstance(summary_value, str):
+        return [
+            item.strip()
+            for item in summary_value.split(",")
+            if item.strip()
+        ]
+    if isinstance(summary_value, list):
+        return [str(item) for item in summary_value if str(item).strip()]
+    return []
+
+
+def _projection_role(supervision_profile: str | None) -> str:
+    if supervision_profile == "binary_fault_classification":
+        return "primary"
+    return "diagnostic"
+
+
+def _projection_explanation(supervision_profile: str | None) -> str:
+    if supervision_profile == "run_to_failure_degradation":
+        return (
+            "Mapa PCA diagnostico: proyecta las ventanas de NASA/run-to-failure "
+            "desde sus features y colorea predicciones. La elipse no es la "
+            "frontera real del modelo ni la metrica principal; el criterio "
+            "principal en este perfil es temporal."
+        )
+    return (
+        "Mapa PCA 2D de ventanas/features. La frontera es una aproximacion "
+        "visual sobre predicciones normales; el umbral real se aplica en el "
+        "espacio original del modelo."
+    )
+
+
+def _agent_recommendation(
+    state_path: str | None,
+    supervision_profile: str | None,
+) -> AgentOperationalRecommendation:
+    state = _safe_dict(_read_json(Path(state_path))) if state_path else {}
+    decisions = _agent_decisions_from_state(state)
+    evaluator = _latest_decision(decisions, "evaluator")
+    modeler = _latest_decision(decisions, "modeler")
+    if evaluator is None:
+        return AgentOperationalRecommendation(
+            available=False,
+            status="unavailable",
+            title="Sin recomendacion agentica",
+            summary=(
+                "La run aun no contiene una decision persistida del evaluador."
+            ),
+            modeler_summary=_modeler_strategy_summary(modeler),
+        )
+
+    evaluation = _safe_dict(evaluator.get("evaluation"))
+    approved = evaluation.get("approved")
+    next_action = _optional_str(evaluation.get("next_action"))
+    limitations = [
+        str(item)
+        for item in evaluation.get("limitations", [])
+        if item is not None
+    ]
+    operational_assessment = _optional_str(evaluator.get("operational_assessment"))
+    summary = (
+        operational_assessment
+        or _optional_str(evaluation.get("summary"))
+        or _optional_str(evaluator.get("rationale"))
+        or "Decision agentica persistida sin resumen textual."
+    )
+    is_temporal = supervision_profile == "run_to_failure_degradation"
+    status = _recommendation_status(
+        approved=approved,
+        next_action=next_action,
+        is_temporal=is_temporal,
+        guardrails=evaluator.get("temporal_guardrail_checks"),
+        limitations=limitations,
+    )
+    return AgentOperationalRecommendation(
+        available=True,
+        source_agent="evaluator",
+        decision_id=_optional_str(evaluator.get("decision_id")),
+        status=status,
+        title=_recommendation_title(status, is_temporal=is_temporal),
+        summary=summary,
+        confidence=_optional_float(evaluator.get("confidence")),
+        next_action=next_action,
+        operational_assessment=operational_assessment,
+        evidence_refs=_string_list(evaluator.get("evidence_refs"))[:8],
+        tool_names=_string_list(evaluator.get("tool_names"))[:6],
+        limitations=limitations[:4],
+        debate_points=_string_list(evaluator.get("temporal_debate_points"))[:5],
+        guardrail_checks=_string_list(evaluator.get("temporal_guardrail_checks"))[:8],
+        modeler_summary=_modeler_strategy_summary(modeler),
+    )
+
+
+def _agent_decisions_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = state.get("messages")
+    if not isinstance(messages, list):
+        return []
+    decisions: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in {"agent", "supervisor"}:
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            decisions.append(payload)
+    return decisions
+
+
+def _latest_decision(
+    decisions: list[dict[str, Any]],
+    agent_name: str,
+) -> dict[str, Any] | None:
+    for decision in reversed(decisions):
+        if decision.get("agent_name") == agent_name:
+            return decision
+    return None
+
+
+def _recommendation_status(
+    *,
+    approved: Any,
+    next_action: str | None,
+    is_temporal: bool,
+    guardrails: Any,
+    limitations: list[str],
+) -> str:
+    if next_action in {"retry_with_new_config", "request_human_review"}:
+        return "needs_revision"
+    if next_action == "stop":
+        return "blocked"
+    if approved is False:
+        return "needs_revision"
+    if approved is True:
+        if limitations:
+            return "caution"
+        if is_temporal and not _string_list(guardrails):
+            return "caution"
+        return "approved"
+    return "caution"
+
+
+def _recommendation_title(status: str, *, is_temporal: bool) -> str:
+    if status == "approved":
+        return (
+            "Operacion defendible con cautelas"
+            if is_temporal
+            else "Run aprobada por el evaluador"
+        )
+    if status == "needs_revision":
+        return "Requiere nueva estrategia"
+    if status == "blocked":
+        return "Bloqueada por criterio agentico"
+    if status == "caution":
+        return "Interpretacion con cautela"
+    return "Sin recomendacion agentica"
+
+
+def _modeler_strategy_summary(modeler: dict[str, Any] | None) -> str | None:
+    if modeler is None:
+        return None
+    strategy = _safe_dict(modeler.get("decision_strategy"))
+    model_config = _safe_dict(modeler.get("modeling_config"))
+    model_name = _optional_str(model_config.get("model_name"))
+    hypothesis = _optional_str(strategy.get("hypothesis"))
+    alert_policy = _optional_str(strategy.get("alert_policy"))
+    parts = []
+    if model_name:
+        parts.append(f"Modelo: {model_name}.")
+    if hypothesis:
+        parts.append(hypothesis)
+    if alert_policy:
+        parts.append(f"Politica: {alert_policy}")
+    return " ".join(parts) if parts else _optional_str(modeler.get("rationale"))
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None and str(item).strip()]
 
 
 def _safe_temporal_series(
@@ -295,6 +664,7 @@ def _temporal_run_series(
     latest = ordered.iloc[-1]
     current_health = _health_values(latest, score_min, score_max)
     state_counts = _health_state_counts(ordered, score_min, score_max)
+    first_persistent_alert = state_counts["first_persistent_alert"]
     return TemporalRunSeries(
         run_id=run_id,
         x_axis=x_axis,
@@ -309,8 +679,23 @@ def _temporal_run_series(
             if first_alert is None
             else _optional_float(first_alert.get("time_to_failure_seconds"))
         ),
+        first_persistent_alert_x=(
+            None
+            if first_persistent_alert is None
+            else _optional_float(first_persistent_alert[x_axis])
+        ),
+        first_persistent_alert_time=(
+            None if first_persistent_alert is None else _row_time(first_persistent_alert)
+        ),
+        first_persistent_alert_time_to_failure_seconds=(
+            None
+            if first_persistent_alert is None
+            else _optional_float(first_persistent_alert.get("time_to_failure_seconds"))
+        ),
+        persistent_alert_min_windows=PERSISTENT_ALERT_MIN_WINDOWS,
         failure_x=failure["x"],
         failure_time=failure["time"],
+        failure_reference=failure["reference"],
         score_min=score_min,
         score_max=score_max,
         current_x=_optional_float(latest.get(x_axis)),
@@ -325,6 +710,9 @@ def _temporal_run_series(
         alert_points=state_counts["alert_points"],
         warning_points=state_counts["warning_points"],
         critical_points=state_counts["critical_points"],
+        isolated_alert_points=state_counts["isolated_alert_points"],
+        alert_episodes=state_counts["alert_episodes"],
+        longest_alert_streak=state_counts["longest_alert_streak"],
     )
 
 
@@ -382,16 +770,52 @@ def _health_state_counts(
     data: pd.DataFrame,
     score_min: float | None,
     score_max: float | None,
-) -> dict[str, int]:
+) -> dict[str, int | pd.Series | None]:
     states = [
         _health_values(row, score_min, score_max)["health_state"]
         for _, row in data.iterrows()
     ]
+    alert_flags = [state in {"warning", "critical"} for state in states]
+    alert_runs = _true_runs(alert_flags)
+    persistent_runs = [
+        item
+        for item in alert_runs
+        if item["length"] >= PERSISTENT_ALERT_MIN_WINDOWS
+    ]
+    first_persistent_index = (
+        None if not persistent_runs else persistent_runs[0]["start"]
+    )
     return {
         "alert_points": sum(1 for state in states if state in {"warning", "critical"}),
         "warning_points": sum(1 for state in states if state == "warning"),
         "critical_points": sum(1 for state in states if state == "critical"),
+        "isolated_alert_points": sum(
+            item["length"]
+            for item in alert_runs
+            if item["length"] < PERSISTENT_ALERT_MIN_WINDOWS
+        ),
+        "alert_episodes": len(alert_runs),
+        "longest_alert_streak": (
+            0 if not alert_runs else max(item["length"] for item in alert_runs)
+        ),
+        "first_persistent_alert": (
+            None if first_persistent_index is None else data.iloc[first_persistent_index]
+        ),
     }
+
+
+def _true_runs(flags: list[bool]) -> list[dict[str, int]]:
+    runs: list[dict[str, int]] = []
+    start: int | None = None
+    for index, flag in enumerate(flags):
+        if flag and start is None:
+            start = index
+        elif not flag and start is not None:
+            runs.append({"start": start, "length": index - start})
+            start = None
+    if start is not None:
+        runs.append({"start": start, "length": len(flags) - start})
+    return runs
 
 
 def _health_values(
@@ -482,13 +906,13 @@ def _temporal_failure_marker(
     x_axis: TemporalXAxis,
 ) -> dict[str, float | str | None]:
     if "time_to_failure_seconds" not in data.columns:
-        return {"x": None, "time": None}
+        return {"x": None, "time": None, "reference": "unavailable"}
     times = data["time_to_failure_seconds"].dropna()
     if times.empty:
-        return {"x": None, "time": None}
+        return {"x": None, "time": None, "reference": "unavailable"}
     closest = data.loc[times.abs().idxmin()]
     if x_axis == "relative_life":
-        return {"x": 1.0, "time": _row_time(closest)}
+        return {"x": 1.0, "time": _row_time(closest), "reference": "historic_replay"}
     if x_axis == "time_since_start_seconds":
         starts = pd.to_numeric(
             data.get("time_since_start_seconds"),
@@ -497,8 +921,16 @@ def _temporal_failure_marker(
         failures = starts + data["time_to_failure_seconds"]
         failures = failures.dropna()
         if not failures.empty:
-            return {"x": float(failures.median()), "time": _row_time(closest)}
-    return {"x": _optional_float(closest.get(x_axis)), "time": _row_time(closest)}
+            return {
+                "x": float(failures.median()),
+                "time": _row_time(closest),
+                "reference": "historic_replay",
+            }
+    return {
+        "x": _optional_float(closest.get(x_axis)),
+        "time": _row_time(closest),
+        "reference": "historic_replay",
+    }
 
 
 def _row_time(row: pd.Series) -> str | None:
@@ -675,6 +1107,10 @@ def _read_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _optional_str(value: Any) -> str | None:

@@ -27,17 +27,46 @@ class AgentToolsTests(unittest.TestCase):
         self.assertEqual(spec.tool_name, "evidence_lookup")
         self.assertEqual(spec.effect, "read_only")
         self.assertFalse(spec.produces_artifacts)
+        self.assertIn("temporal", spec.input_schema["include"])
         self.assertIn("modeler", spec.allowed_agents)
+        self.assertIn("cleaner", spec.allowed_agents)
         self.assertIn("report_verifier", spec.allowed_agents)
 
         modeler_tools = agent_tool_catalog(agent_name="modeler")
         self.assertEqual(
             [tool.tool_name for tool in modeler_tools],
-            ["evidence_lookup", "threshold_analysis"],
+            [
+                "evidence_lookup",
+                "temporal_health_lookup",
+                "degradation_metrics_lookup",
+                "threshold_analysis",
+            ],
         )
         verifier_tools = agent_tool_catalog(agent_name="report_verifier")
-        self.assertEqual([tool.tool_name for tool in verifier_tools], ["evidence_lookup"])
+        self.assertEqual(
+            [tool.tool_name for tool in verifier_tools],
+            [
+                "evidence_lookup",
+                "temporal_health_lookup",
+                "degradation_metrics_lookup",
+            ],
+        )
         json.dumps(spec.model_dump(mode="json"))
+
+    def test_catalog_declares_temporal_tools_as_read_only(self):
+        health = get_agent_tool_spec("temporal_health_lookup")
+        metrics = get_agent_tool_spec("degradation_metrics_lookup")
+
+        self.assertEqual(health.effect, "read_only")
+        self.assertEqual(metrics.effect, "read_only")
+        self.assertFalse(health.produces_artifacts)
+        self.assertFalse(metrics.produces_artifacts)
+        self.assertIn("cleaner", health.allowed_agents)
+        self.assertIn("evaluator", metrics.allowed_agents)
+        self.assertIn("run_limit", health.input_schema)
+        self.assertEqual(metrics.input_schema, {})
+        json.dumps(health.model_dump(mode="json"))
+        json.dumps(metrics.model_dump(mode="json"))
 
     def test_catalog_declares_threshold_analysis_as_read_only_diagnostic(self):
         spec = get_agent_tool_spec("threshold_analysis")
@@ -126,7 +155,143 @@ class AgentToolsTests(unittest.TestCase):
         self.assertIn("supervision_profile:run_to_failure_degradation", refs)
         self.assertIn("label_source:temporal_proxy", refs)
         self.assertIn("metric_extra:degradation_mean_lead_time_to_failure", refs)
+        self.assertIn("metric:mean_lead_time_to_failure", refs)
+        self.assertIn("temporal:run_to_failure_profile", refs)
+        self.assertIn("temporal:rul_not_estimated", refs)
+        self.assertIn("temporal:predictions_missing", refs)
         self.assertEqual(catalog["metrics"]["extra"]["degradation_available"], True)
+        self.assertFalse(catalog["temporal_evidence"]["available"])
+
+    def test_cleaner_can_lookup_temporal_evidence_pack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            predictions_path = Path(tmp) / "temporal_predictions.csv"
+            _write_temporal_predictions(predictions_path)
+            request = AgentToolRequest(
+                request_id="run-tools-temporal-001:cleaner:tool:001",
+                run_id="run-tools-temporal-001",
+                agent_name="cleaner",
+                tool_name="evidence_lookup",
+                purpose="Consultar contexto temporal antes de decidir limpieza.",
+                arguments={"include": ["temporal"]},
+            )
+
+            observation = run_agent_tool_request(
+                _temporal_state_with_predictions(predictions_path),
+                request,
+            )
+
+        self.assertEqual(observation.status, "success")
+        self.assertIn("temporal:first_spike", observation.evidence_refs)
+        self.assertIn("temporal:first_persistent_alert", observation.evidence_refs)
+        self.assertIn("temporal:isolated_alert_points", observation.evidence_refs)
+        self.assertIn("metric:mean_lead_time_to_failure", observation.evidence_refs)
+        temporal = observation.payload["temporal"]
+        self.assertTrue(temporal["available"])
+        self.assertEqual(
+            temporal["cleaner_context"]["role"],
+            "signal_quality_gate_for_temporal_monitoring",
+        )
+        self.assertIn("cleaner", temporal["agent_guidance"])
+        primary = temporal["primary_run"]
+        self.assertEqual(primary["run_id"], "bearing_1_test_1")
+        self.assertAlmostEqual(primary["first_spike"]["x"], 0.2)
+        self.assertAlmostEqual(primary["first_persistent_alert"]["x"], 0.6)
+        self.assertEqual(primary["episodes"]["isolated_alert_points"], 1)
+        self.assertEqual(primary["episodes"]["longest_alert_streak"], 3)
+        self.assertIn("RUL no esta estimado", " ".join(temporal["warnings"]))
+        json.dumps(observation.model_dump(mode="json"))
+
+    def test_temporal_health_lookup_returns_focused_health_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            predictions_path = Path(tmp) / "temporal_predictions.csv"
+            _write_temporal_predictions(predictions_path)
+            request = AgentToolRequest(
+                request_id="run-tools-temporal-001:evaluator:tool:health",
+                run_id="run-tools-temporal-001",
+                agent_name="evaluator",
+                tool_name="temporal_health_lookup",
+                purpose="Inspeccionar salud temporal y avisos sostenidos.",
+                arguments={"run_limit": 1},
+            )
+
+            observation = run_agent_tool_request(
+                _temporal_state_with_predictions(predictions_path),
+                request,
+            )
+
+        self.assertEqual(observation.status, "success")
+        self.assertIn("tool:temporal_health_lookup", observation.evidence_refs)
+        self.assertIn("temporal:first_persistent_alert", observation.evidence_refs)
+        self.assertIn("temporal:longest_alert_streak", observation.evidence_refs)
+        payload = observation.payload
+        self.assertEqual(payload["analysis_type"], "temporal_health_lookup")
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["run_limit"], 1)
+        self.assertEqual(payload["n_runs_returned"], 1)
+        self.assertEqual(payload["primary_run"]["current"]["health_state"], "critical")
+        self.assertAlmostEqual(
+            payload["primary_run"]["first_persistent_alert"]["x"],
+            0.6,
+        )
+        self.assertIn("No estima RUL", payload["interpretation_guardrail"])
+        json.dumps(observation.model_dump(mode="json"))
+
+    def test_temporal_health_lookup_returns_missing_series_as_observation(self):
+        request = AgentToolRequest(
+            request_id="run-tools-temporal-001:cleaner:tool:health-missing",
+            run_id="run-tools-temporal-001",
+            agent_name="cleaner",
+            tool_name="temporal_health_lookup",
+            purpose="Comprobar si ya existe serie temporal.",
+        )
+
+        observation = run_agent_tool_request(_temporal_state(), request)
+
+        self.assertEqual(observation.status, "success")
+        self.assertFalse(observation.payload["available"])
+        self.assertIn("temporal:predictions_missing", observation.evidence_refs)
+        self.assertIn("tool:temporal_health_lookup", observation.evidence_refs)
+
+    def test_degradation_metrics_lookup_returns_temporal_metric_payload(self):
+        request = AgentToolRequest(
+            request_id="run-tools-temporal-001:modeler:tool:metrics",
+            run_id="run-tools-temporal-001",
+            agent_name="modeler",
+            tool_name="degradation_metrics_lookup",
+            purpose="Consultar metricas temporales primarias.",
+        )
+
+        observation = run_agent_tool_request(_temporal_state(), request)
+
+        self.assertEqual(observation.status, "success")
+        self.assertIn("tool:degradation_metrics_lookup", observation.evidence_refs)
+        self.assertIn("metric:mean_lead_time_to_failure", observation.evidence_refs)
+        self.assertIn("label_source:temporal_proxy", observation.evidence_refs)
+        payload = observation.payload
+        self.assertEqual(payload["analysis_type"], "degradation_metrics_lookup")
+        self.assertTrue(payload["available"])
+        self.assertEqual(
+            payload["primary_metrics"]["mean_lead_time_to_failure"],
+            300.0,
+        )
+        self.assertIn("no son el criterio principal", payload["binary_metric_guardrail"])
+        self.assertIn("etiquetas proxy", " ".join(payload["warnings"]))
+        json.dumps(observation.model_dump(mode="json"))
+
+    def test_temporal_health_lookup_rejects_invalid_run_limit(self):
+        request = AgentToolRequest(
+            request_id="run-tools-temporal-001:evaluator:tool:bad-health",
+            run_id="run-tools-temporal-001",
+            agent_name="evaluator",
+            tool_name="temporal_health_lookup",
+            purpose="Pedir un limite invalido.",
+            arguments={"run_limit": 0},
+        )
+
+        observation = run_agent_tool_request(_temporal_state(), request)
+
+        self.assertEqual(observation.status, "failed")
+        self.assertIn("run_limit must be between", observation.errors[0])
 
     def test_threshold_analysis_returns_sensitivity_without_recommendation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -273,10 +438,27 @@ def _temporal_state():
     state_dict["metrics"] = MetricsReport(
         extra={
             "degradation_available": True,
+            "degradation_detected_before_failure_rate": 1.0,
             "degradation_mean_lead_time_to_failure": 300.0,
+            "degradation_mean_false_alarm_rate_nominal": 0.2,
+            "degradation_mean_score_trend_spearman": 0.8,
+            "degradation_missed_runs": 0,
         }
     ).model_dump(mode="json")
     return validate_state(state_dict)
+
+
+def _temporal_state_with_predictions(predictions_path: Path):
+    state = _temporal_state().to_langgraph_state()
+    state["artifacts"].append(
+        {
+            "name": "model_predictions",
+            "artifact_type": "predictions",
+            "path": predictions_path.as_posix(),
+            "producer": "modeling_executor",
+        }
+    )
+    return validate_state(state)
 
 
 def _write_predictions(path: Path) -> None:
@@ -290,6 +472,21 @@ def _write_predictions(path: Path) -> None:
         "t2,ft,test,normal,0,0.55,0.50,1",
         "t3,ft,test,fault,1,0.45,0.50,0",
         "t4,ft,test,fault,1,0.80,0.50,1",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_temporal_predictions(path: Path) -> None:
+    lines = [
+        "window_id,run_id,window_index,time_since_start_seconds,"
+        "time_to_failure_seconds,relative_life,split,label,target,"
+        "anomaly_score,threshold,predicted_anomaly",
+        "tw0,bearing_1_test_1,0,0,500,0.0,test,normal,0,0.10,0.60,0",
+        "tw1,bearing_1_test_1,1,100,400,0.2,test,normal,0,0.65,0.60,1",
+        "tw2,bearing_1_test_1,2,200,300,0.4,test,normal,0,0.30,0.60,0",
+        "tw3,bearing_1_test_1,3,300,200,0.6,test,degradation,1,0.70,0.60,1",
+        "tw4,bearing_1_test_1,4,400,100,0.8,test,degradation,1,0.80,0.60,1",
+        "tw5,bearing_1_test_1,5,500,0,1.0,test,degradation,1,0.90,0.60,1",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
 

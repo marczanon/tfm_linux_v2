@@ -11,6 +11,8 @@ services:
     environment:
       TFM_API_HOST: 0.0.0.0
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      TFM_MEMORY_BACKEND: ${TFM_MEMORY_BACKEND:-json}
+      TFM_QDRANT_HOST: ${TFM_QDRANT_HOST:-http://qdrant:6333}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -46,3 +48,16 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+  qdrant:
+    image: qdrant/qdrant:v1.14.1
+    profiles:
+      - memory-qdrant
+    ports:
+      - "${TFM_QDRANT_PORT:-6333}:6333"
+      - "${TFM_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  qdrant_storage:

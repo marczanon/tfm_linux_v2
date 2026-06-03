@@ -53,9 +53,9 @@ from codigo.app.services.run_registry import compare_runs
 from codigo.app.services.vector_memory import (
     DEFAULT_OLLAMA_EMBEDDING_MODEL,
     LocalHashEmbeddingModel,
-    LocalJsonVectorMemoryStore,
     OllamaEmbeddingProvider,
     VectorMemoryStore,
+    get_default_vector_memory_store,
 )
 
 
@@ -232,7 +232,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _memory_store_from_args(args: argparse.Namespace) -> LocalJsonVectorMemoryStore:
+def _memory_store_from_args(args: argparse.Namespace) -> VectorMemoryStore:
     provider = (
         LocalHashEmbeddingModel(dimension=args.hash_dimension)
         if args.embedding_provider == "local_hash"
@@ -242,7 +242,7 @@ def _memory_store_from_args(args: argparse.Namespace) -> LocalJsonVectorMemorySt
             timeout_seconds=args.embedding_timeout_seconds,
         )
     )
-    return LocalJsonVectorMemoryStore(
+    return get_default_vector_memory_store(
         Path(args.memory_dir),
         embedding_model=provider,
     )

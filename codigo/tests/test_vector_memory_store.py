@@ -16,10 +16,13 @@ from codigo.app.schemas.reasoning import (
 )
 from codigo.app.services.vector_memory import (
     DEFAULT_OLLAMA_EMBEDDING_MODEL,
+    DEFAULT_QDRANT_HOST,
     LocalHashEmbeddingModel,
     LocalJsonVectorMemoryStore,
     OllamaEmbeddingProvider,
+    QdrantVectorMemoryStore,
     VectorMemoryStore,
+    get_default_vector_memory_store,
     collection_for_agent,
     get_default_embedding_provider,
     memory_candidate_from_decision_episode,
@@ -43,6 +46,14 @@ class VectorMemoryStoreTests(unittest.TestCase):
 
             self.assertIsInstance(store, VectorMemoryStore)
 
+    def test_qdrant_store_implements_vector_memory_protocol(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+
+        self.assertIsInstance(store, VectorMemoryStore)
+
     def test_default_embedding_provider_uses_qwen3_embedding_06b(self):
         with patch.dict(os.environ, {}, clear=True):
             provider = get_default_embedding_provider()
@@ -65,6 +76,37 @@ class VectorMemoryStoreTests(unittest.TestCase):
         self.assertIsInstance(provider, LocalHashEmbeddingModel)
         self.assertEqual(len(provider.embed("threshold recall")), 32)
 
+    def test_default_vector_memory_store_uses_json_backend_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"TFM_EMBEDDING_PROVIDER": "local_hash"},
+                clear=True,
+            ):
+                store = get_default_vector_memory_store(tmp)
+
+        self.assertIsInstance(store, LocalJsonVectorMemoryStore)
+
+    def test_default_vector_memory_store_can_select_qdrant_backend(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TFM_MEMORY_BACKEND": "qdrant",
+                "TFM_EMBEDDING_PROVIDER": "local_hash",
+                "TFM_EMBEDDING_DIMENSION": "24",
+                "TFM_QDRANT_HOST": "http://qdrant.test",
+                "TFM_QDRANT_TIMEOUT_SECONDS": "7",
+            },
+            clear=True,
+        ):
+            store = get_default_vector_memory_store()
+
+        self.assertIsInstance(store, QdrantVectorMemoryStore)
+        self.assertEqual(store.host, "http://qdrant.test")
+        self.assertEqual(store.timeout_seconds, 7.0)
+        self.assertEqual(store.embedding_model.identifier, "local_hash_embedding:v1")
+        self.assertEqual(DEFAULT_QDRANT_HOST, "http://127.0.0.1:6333")
+
     def test_ollama_embedding_provider_parses_api_embed_response(self):
         provider = OllamaEmbeddingProvider(
             model="qwen3-embedding:0.6b",
@@ -83,6 +125,166 @@ class VectorMemoryStoreTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://ollama.test/api/embed")
         self.assertEqual(provider.model_name, "qwen3-embedding")
         self.assertEqual(provider.version, "0.6b")
+
+    def test_qdrant_store_upsert_sends_record_payload(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+
+        with patch(
+            "codigo.app.services.vector_memory.urllib.request.urlopen",
+            side_effect=[
+                _FakeHTTPResponse({"result": {"status": "green"}}),
+                _FakeHTTPResponse({"result": {"operation_id": 1}}),
+            ],
+        ) as urlopen:
+            stored = store.upsert(_overcorrection_record())
+
+        self.assertEqual(stored.embedding_model, "local_hash_embedding")
+        self.assertEqual(stored.embedding_dimension, 16)
+        self.assertEqual(stored.vector_id, "modeler_memory:memory-overcorrection-001")
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertEqual(requests[0].full_url, "http://qdrant.test/collections/modeler_memory")
+        self.assertIn(
+            "/collections/modeler_memory/points?wait=true",
+            requests[1].full_url,
+        )
+        body = json.loads(requests[1].data.decode("utf-8"))
+        point = body["points"][0]
+        self.assertEqual(
+            point["payload"]["record"]["memory_record_id"],
+            "memory-overcorrection-001",
+        )
+        self.assertEqual(len(point["vector"]), 16)
+
+    def test_qdrant_store_query_merges_agent_and_shared_collections(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        stored = _overcorrection_record().model_copy(
+            update={
+                "embedding_model": "local_hash_embedding",
+                "embedding_version": "v1",
+                "embedding_dimension": 16,
+                "vector_id": "modeler_memory:memory-overcorrection-001",
+            }
+        )
+        shared = _shared_methodology_record().model_copy(
+            update={
+                "embedding_model": "local_hash_embedding",
+                "embedding_version": "v1",
+                "embedding_dimension": 16,
+                "vector_id": "shared_methodology_memory:memory-shared-methodology-001",
+            }
+        )
+
+        with patch(
+            "codigo.app.services.vector_memory.urllib.request.urlopen",
+            side_effect=[
+                _FakeHTTPResponse(
+                    {
+                        "result": [
+                            {
+                                "id": "point-a",
+                                "score": 0.87,
+                                "payload": {"record": stored.model_dump(mode="json")},
+                            }
+                        ]
+                    }
+                ),
+                _FakeHTTPResponse(
+                    {
+                        "result": [
+                            {
+                                "id": "point-b",
+                                "score": 0.74,
+                                "payload": {"record": shared.model_dump(mode="json")},
+                            }
+                        ]
+                    }
+                ),
+            ],
+        ) as urlopen:
+            context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-qdrant",
+                    target_agent="modeler",
+                    query_text="threshold tradeoff methodology",
+                    dataset="nasa_ims_bearing",
+                    min_similarity=0.0,
+                    top_k=3,
+                )
+            )
+
+        self.assertEqual(context.retrieval_backend, "qdrant_vector_memory_store")
+        self.assertEqual(context.embedding_model, "local_hash_embedding:v1")
+        self.assertEqual(
+            [item.record.memory_record_id for item in context.items],
+            ["memory-overcorrection-001", "memory-shared-methodology-001"],
+        )
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertIn("/collections/modeler_memory/points/query", requests[0].full_url)
+        self.assertIn(
+            "/collections/shared_methodology_memory/points/query",
+            requests[1].full_url,
+        )
+
+    def test_qdrant_store_list_and_delete_use_scroll_payloads(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        cleaner = _cleaner_record()
+
+        with patch(
+            "codigo.app.services.vector_memory.urllib.request.urlopen",
+            side_effect=[
+                _FakeHTTPResponse(
+                    {
+                        "result": {
+                            "points": [
+                                {
+                                    "id": "point-cleaner",
+                                    "payload": {
+                                        "record": cleaner.model_dump(mode="json")
+                                    },
+                                }
+                            ],
+                            "next_page_offset": None,
+                        }
+                    }
+                ),
+                _FakeHTTPResponse(
+                    {
+                        "result": {
+                            "points": [
+                                {
+                                    "id": "point-cleaner",
+                                    "payload": {
+                                        "record": cleaner.model_dump(mode="json")
+                                    },
+                                }
+                            ],
+                            "next_page_offset": None,
+                        }
+                    }
+                ),
+                _FakeHTTPResponse({"result": {"operation_id": 2}}),
+            ],
+        ) as urlopen:
+            listed = store.list_records(collection_name="cleaner_memory")
+            deleted = store.delete("memory-cleaner-001")
+
+        self.assertEqual([record.memory_record_id for record in listed], ["memory-cleaner-001"])
+        self.assertEqual(deleted.memory_record_id, "memory-cleaner-001")
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertIn("/collections/cleaner_memory/points/scroll", requests[0].full_url)
+        self.assertIn(
+            "/collections/cleaner_memory/points/delete?wait=true",
+            requests[-1].full_url,
+        )
 
     def test_upsert_persists_embedding_metadata_and_query_retrieves_boundary_case(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,6 +432,36 @@ class VectorMemoryStoreTests(unittest.TestCase):
             )
 
             self.assertEqual(context.items[0].record.memory_record_id, records[0].memory_record_id)
+
+    def test_delete_removes_record_from_collection_without_rebuilding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalJsonVectorMemoryStore(tmp)
+            store.rebuild([_overcorrection_record(), _evaluator_record()])
+
+            deleted = store.delete("memory-overcorrection-001")
+            modeler_context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-after-delete",
+                    target_agent="modeler",
+                    query_text="threshold overcorrection",
+                    min_similarity=0.0,
+                    excluded_verdicts=[],
+                )
+            )
+            evaluator_context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-evaluator-after-delete",
+                    target_agent="evaluator",
+                    query_text="precision recall false positive",
+                    min_similarity=0.0,
+                )
+            )
+
+            self.assertEqual(deleted.memory_record_id, "memory-overcorrection-001")
+            self.assertEqual(modeler_context.items, [])
+            self.assertEqual(len(evaluator_context.items), 1)
+            with self.assertRaises(FileNotFoundError):
+                store.delete("memory-overcorrection-001")
 
     def test_memory_record_from_postmortem_respects_review_policy(self):
         postmortem = AgentReasoningPostmortem(

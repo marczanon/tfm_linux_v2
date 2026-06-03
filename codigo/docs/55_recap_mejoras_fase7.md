@@ -106,6 +106,19 @@ Actualizacion de avance:
   trayectoria, permitiendo monitorizar activos como `nominal`, `watch`,
   `warning` o `critical` sin introducir RUL no soportado. Ver
   `codigo/docs/68_fase7_hito8_monitorizacion_estado_salud.md`.
+- Cierre de base del perfil planificado: se crea
+  `codigo/docs/69_fase7_cierre_base_run_to_failure.md` para priorizar el
+  retocado del panel frontend, cola de activos/runs, comparacion visual,
+  interpretacion agentica operacional, politica de salud/RUL y validacion.
+- Hito 9.1 implementado: la pestana `Visualizacion` pasa a ser perfil-aware
+  para run-to-failure, mostrando metricas temporales como principales, estado
+  operacional del motor, tira de ventanas por estado, bandas de estado en la
+  curva tecnica y PCA/frontera como diagnostico 2D secundario. Ver
+  `codigo/docs/70_fase7_hito9_panel_control_run_to_failure.md`.
+- Fase 8 preparada: se crea
+  `codigo/docs/71_fase8_hoja_ruta_agentica_run_to_failure.md` para convertir
+  `run_to_failure_degradation` en el centro agentico del TFM, antes de ampliar
+  histeresis avanzada, RUL experimental o autoencoders.
 
 ## Metodologia que debe mantenerse
 

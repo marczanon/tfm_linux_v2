@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from codigo.app.schemas.state import (
     ArtifactRef,
     EvaluationResult,
     MetricsReport,
+    StateMessage,
 )
 from codigo.app.services.run_persistence import save_run_snapshot
 from codigo.app.services.run_visualization import build_run_visualization
@@ -59,6 +61,19 @@ class RunVisualizationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertEqual(payload["supervision_profile"], "run_to_failure_degradation")
+        self.assertEqual(payload["label_source"], "temporal_proxy")
+        self.assertEqual(payload["model_name"], "pca_reconstruction_error")
+        self.assertEqual(payload["projection_role"], "diagnostic")
+        self.assertIn("run_to_failure_degradation", payload["metric_families"])
+        primary = {item["name"]: item for item in payload["primary_metrics"]}
+        self.assertEqual(
+            primary["detected_before_failure_rate"]["metric_family"],
+            "run_to_failure_degradation",
+        )
+        self.assertEqual(primary["mean_lead_time_to_failure"]["value_kind"], "seconds")
+        auxiliary = {item["name"]: item["metric_family"] for item in payload["auxiliary_metrics"]}
+        self.assertEqual(auxiliary["f1_score"], "binary_classification")
         temporal = payload["temporal_series"]
         self.assertTrue(temporal["available"])
         self.assertEqual(temporal["x_axis"], "relative_life")
@@ -68,17 +83,55 @@ class RunVisualizationTests(unittest.TestCase):
         self.assertEqual(run["n_points_total"], 8)
         self.assertAlmostEqual(run["first_alert_x"], 0.714, places=3)
         self.assertAlmostEqual(run["first_alert_time_to_failure_seconds"], 300.0)
+        self.assertAlmostEqual(run["first_persistent_alert_x"], 0.571, places=3)
+        self.assertEqual(run["persistent_alert_min_windows"], 3)
         self.assertEqual(run["failure_x"], 1.0)
+        self.assertEqual(run["failure_reference"], "historic_replay")
         self.assertEqual(run["threshold"], 0.6)
         self.assertEqual(run["current_health_state"], "critical")
         self.assertAlmostEqual(run["current_health_index"], 0.0)
         self.assertEqual(run["alert_points"], 4)
         self.assertEqual(run["warning_points"], 2)
         self.assertEqual(run["critical_points"], 2)
+        self.assertEqual(run["isolated_alert_points"], 0)
+        self.assertEqual(run["alert_episodes"], 1)
+        self.assertEqual(run["longest_alert_streak"], 4)
         self.assertTrue(run["points"])
         self.assertEqual(run["points"][0]["health_state"], "nominal")
         self.assertGreater(run["points"][0]["health_index"], 80.0)
         self.assertEqual(run["points"][-1]["health_state"], "critical")
+
+    def test_visualization_endpoint_returns_agent_recommendation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            state = _state_with_temporal_agent_decisions(
+                base,
+                "run-temporal-agent-viz",
+            )
+            save_run_snapshot(state, runs_dir)
+            app = create_app(runs_dir=runs_dir)
+
+            response = _get(
+                app,
+                "/runs/run-temporal-agent-viz/visualization",
+                params={"max_points": 50},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        recommendation = response.json()["agent_recommendation"]
+        self.assertTrue(recommendation["available"])
+        self.assertEqual(recommendation["source_agent"], "evaluator")
+        self.assertEqual(recommendation["status"], "caution")
+        self.assertEqual(recommendation["confidence"], 0.78)
+        self.assertIn("temporal:current_health", recommendation["evidence_refs"])
+        self.assertIn("temporal_health_lookup", recommendation["tool_names"])
+        self.assertIn(
+            "RUL no estimado; solo lead time historico.",
+            recommendation["limitations"],
+        )
+        self.assertTrue(recommendation["guardrail_checks"])
+        self.assertIn("pca_reconstruction_error", recommendation["modeler_summary"])
 
     def test_visualization_service_degrades_when_projection_artifacts_are_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,8 +185,10 @@ def _state_with_visual_artifacts(base: Path, run_id: str):
 def _state_with_temporal_artifacts(base: Path, run_id: str):
     features_path = base / "temporal_features.csv"
     predictions_path = base / "temporal_predictions.csv"
+    metrics_path = base / "temporal_metrics.json"
     _write_temporal_csvs(features_path, predictions_path)
-    state = _state_without_visual_artifacts(base, run_id)
+    _write_temporal_metrics(metrics_path)
+    state = _state_without_visual_artifacts(base, run_id, run_to_failure=True)
     state.artifacts.extend(
         [
             ArtifactRef(
@@ -147,6 +202,96 @@ def _state_with_temporal_artifacts(base: Path, run_id: str):
                 artifact_type="predictions",
                 path=str(predictions_path),
                 producer="modeling_executor",
+            ),
+            ArtifactRef(
+                name="evaluation_metrics",
+                artifact_type="metrics",
+                path=str(metrics_path),
+                producer="evaluation_executor",
+            ),
+        ]
+    )
+    return state
+
+
+def _state_with_temporal_agent_decisions(base: Path, run_id: str):
+    state = _state_with_temporal_artifacts(base, run_id)
+    modeler_decision = {
+        "agent_name": "modeler",
+        "decision_id": f"{run_id}:modeler:001",
+        "rationale": "PCA permite score continuo para degradacion temporal.",
+        "confidence": 0.74,
+        "modeling_config": {
+            "model_name": "pca_reconstruction_error",
+            "hyperparameters": {"threshold_quantile": 0.99},
+        },
+        "decision_strategy": {
+            "strategy_type": "temporal_anomaly_score",
+            "hypothesis": (
+                "El score de reconstruccion debe crecer hacia el tramo final."
+            ),
+            "tool_names": [
+                "temporal_health_lookup",
+                "degradation_metrics_lookup",
+            ],
+            "evidence_refs": [
+                "temporal:current_health",
+                "degradation:mean_lead_time_to_failure",
+            ],
+            "optimization_targets": [
+                "detected_before_failure_rate",
+                "mean_lead_time_to_failure",
+            ],
+            "alert_policy": "primer pico separado de aviso sostenido",
+        },
+    }
+    evaluator_decision = {
+        "agent_name": "evaluator",
+        "decision_id": f"{run_id}:evaluator:001",
+        "rationale": "La deteccion llega antes del fallo historico.",
+        "confidence": 0.78,
+        "tool_names": [
+            "temporal_health_lookup",
+            "degradation_metrics_lookup",
+        ],
+        "evidence_refs": [
+            "temporal:current_health",
+            "temporal:first_persistent_alert",
+            "degradation:mean_lead_time_to_failure",
+        ],
+        "operational_assessment": (
+            "Monitorizacion defendible como replay historico, con aviso "
+            "sostenido antes de fallo."
+        ),
+        "temporal_debate_points": [
+            "El primer pico no debe confundirse con degradacion sostenida.",
+            "El aviso sostenido reduce ruido frente a ventanas aisladas.",
+        ],
+        "temporal_guardrail_checks": [
+            "F1 tratada como metrica auxiliar.",
+            "RUL no estimado por el pipeline actual.",
+        ],
+        "evaluation": {
+            "approved": True,
+            "summary": "Aprobada con cautelas temporales.",
+            "next_action": "continue",
+            "limitations": [
+                "RUL no estimado; solo lead time historico.",
+                "Etiquetas proxy temporales.",
+            ],
+        },
+    }
+    state.messages.extend(
+        [
+            StateMessage(
+                role="agent",
+                name="modeler",
+                content=json.dumps(modeler_decision),
+            ),
+            StateMessage(
+                role="agent",
+                name="evaluator",
+                content=json.dumps(evaluator_decision),
             ),
         ]
     )
@@ -169,12 +314,30 @@ def _state_with_feature_artifact(base: Path, run_id: str):
     return state
 
 
-def _state_without_visual_artifacts(base: Path, run_id: str):
+def _state_without_visual_artifacts(
+    base: Path,
+    run_id: str,
+    *,
+    run_to_failure: bool = False,
+):
     state_dict = create_initial_cwru_state(
         thread_id=f"thread-{run_id}",
         run_id=run_id,
         raw_path=str(base / "raw"),
     )
+    if run_to_failure:
+        state_dict["project_context"].update(
+            {
+                "dataset": "nasa_ims_bearing",
+                "machine_type": "rotating_machinery",
+                "objective": "run_to_failure_degradation",
+                "label_mode": "degradation",
+                "supervision_profile": "run_to_failure_degradation",
+                "label_source": "temporal_proxy",
+                "label_granularity": "proxy_temporal",
+                "main_channel": "channel_1",
+            }
+        )
     state_dict["current_stage"] = "completed"
     state_dict["next_node"] = None
     state_dict["metrics"] = MetricsReport(
@@ -183,7 +346,23 @@ def _state_without_visual_artifacts(base: Path, run_id: str):
         recall=0.92,
         f1_score=0.91,
         false_positive_rate=0.03,
+        extra=(
+            {
+                "metric_families": (
+                    "binary_classification, run_to_failure_degradation"
+                ),
+                "degradation_available": True,
+            }
+            if run_to_failure
+            else {}
+        ),
     ).model_dump(mode="json")
+    if run_to_failure:
+        state_dict["modeling_config"] = {
+            "model_name": "pca_reconstruction_error",
+            "random_state": 42,
+            "hyperparameters": {"threshold_quantile": 0.99},
+        }
     state_dict["evaluation"] = EvaluationResult(
         approved=True,
         summary="Run aprobada.",
@@ -246,6 +425,30 @@ def _write_temporal_csvs(features_path: Path, predictions_path: Path) -> None:
         )
     features_path.write_text("\n".join(features_lines), encoding="utf-8")
     predictions_path.write_text("\n".join(prediction_lines), encoding="utf-8")
+
+
+def _write_temporal_metrics(metrics_path: Path) -> None:
+    metrics_path.write_text(
+        """
+{
+  "metric_families": ["binary_classification", "run_to_failure_degradation"],
+  "binary_metric_context": {
+    "label_source": "temporal_proxy",
+    "label_granularity": "proxy_temporal"
+  },
+  "degradation_metrics": {
+    "available": true,
+    "detected_before_failure_rate": 1.0,
+    "mean_lead_time_to_failure": 300.0,
+    "mean_false_alarm_rate_nominal": 0.125,
+    "mean_score_trend_spearman": 0.91,
+    "missed_runs": 0,
+    "mean_initial_final_separation": 0.42
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
 
 
 def _get(app, path: str, **kwargs) -> httpx.Response:

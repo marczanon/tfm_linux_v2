@@ -39,8 +39,8 @@ from codigo.app.services.vector_memory import (
     DEFAULT_OLLAMA_EMBEDDING_MODEL,
     EmbeddingProvider,
     LocalHashEmbeddingModel,
-    LocalJsonVectorMemoryStore,
     OllamaEmbeddingProvider,
+    get_default_vector_memory_store,
 )
 
 
@@ -48,7 +48,7 @@ def main() -> None:
     args = _parse_args()
     _validate_cwru_only_args(args)
     embedding_provider = _embedding_provider_from_args(args)
-    memory_store = LocalJsonVectorMemoryStore(
+    memory_store = get_default_vector_memory_store(
         args.memory_dir,
         embedding_model=embedding_provider,
     )
@@ -177,8 +177,9 @@ def _agents(args: argparse.Namespace) -> PipelineAgents | None:
             llm_client=client,
             use_llm=True,
         ),
-        modeler=lambda state: decide_modeling_action(
+        modeler=lambda state, memory_context=None: decide_modeling_action(
             state,
+            memory_context=memory_context,
             llm_client=client,
             use_llm=True,
         ),

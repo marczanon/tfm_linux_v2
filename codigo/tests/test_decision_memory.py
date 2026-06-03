@@ -2,13 +2,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codigo.app.schemas.agent_decisions import EvaluationDecision, ModelingRetryDecision
+from codigo.app.schemas.agent_decisions import (
+    EvaluationDecision,
+    ModelingDecision,
+    ModelingRetryDecision,
+)
 from codigo.app.schemas.agent_decisions import StructuringDecision
 from codigo.app.graph.state import create_initial_cwru_state, validate_state
-from codigo.app.schemas.state import EvaluationResult, MetricsReport
+from codigo.app.schemas.state import EvaluationResult, MetricsReport, ProjectContext
 from codigo.app.services.decision_memory import (
     build_evaluation_decision_episode,
     build_evaluation_memory_candidate,
+    build_modeling_decision_episode,
+    build_modeling_memory_candidate,
     build_modeling_retry_decision_episode,
     build_modeling_retry_memory_candidate,
     build_structuring_decision_episode,
@@ -201,6 +207,178 @@ class DecisionMemoryTests(unittest.TestCase):
         self.assertEqual(candidate.target_agent, "evaluator")
         self.assertEqual(candidate.memory_role, "evidence")
         self.assertTrue(candidate.reusable_as_context)
+
+    def test_temporal_modeling_decision_builds_episode_and_candidate(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-memory-test",
+            run_id="run-temporal-modeling-episode-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="proxy_temporal",
+            label_source="temporal_proxy",
+        ).model_dump(mode="json")
+        state_dict["metrics"] = MetricsReport(
+            extra={
+                "degradation_available": True,
+                "degradation_mean_lead_time_to_failure": 300.0,
+                "degradation_mean_false_alarm_rate_nominal": 0.02,
+            },
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        decision = ModelingDecision(
+            decision_id="run-temporal-modeling-episode-001:modeler:001",
+            rationale="Use PCA as a temporal anomaly score baseline.",
+            confidence=0.82,
+            decision_strategy={
+                "strategy_type": "model_family_selection",
+                "hypothesis": (
+                    "PCA reconstruction error should rise as degradation "
+                    "approaches the historical failure point."
+                ),
+                "tool_names": [
+                    "temporal_health_lookup",
+                    "degradation_metrics_lookup",
+                ],
+                "evidence_refs": [
+                    "temporal:first_persistent_alert",
+                    "metric:mean_lead_time_to_failure",
+                ],
+                "optimization_targets": [
+                    "detected_before_failure_rate",
+                    "mean_lead_time_to_failure",
+                    "mean_false_alarm_rate_nominal",
+                ],
+                "alert_policy": "first spike separated from sustained alert",
+            },
+            modeling_config={
+                "model_name": "pca_reconstruction_error",
+                "random_state": 42,
+                "hyperparameters": {"threshold_quantile": 0.99},
+            },
+            expected_model_path="codigo/models/nasa_ims_bearing/pca.joblib",
+        )
+
+        episode = build_modeling_decision_episode(
+            state=state,
+            decision=decision,
+            execution_result_summary="modeling ok",
+        )
+        candidate = build_modeling_memory_candidate(
+            episode,
+            reusable_as_context=True,
+        )
+
+        self.assertEqual(episode.target_agent, "modeler")
+        self.assertEqual(episode.decision_type, "modeling")
+        self.assertIn("temporal_health_lookup", episode.evidence_used)
+        self.assertIn("target:mean_lead_time_to_failure", episode.tradeoffs_observed)
+        self.assertIn("alert_policy_declared", episode.tradeoffs_observed)
+        self.assertIn(
+            "run_to_failure_modeling_requires_temporal_metrics",
+            episode.reusable_lessons,
+        )
+        self.assertEqual(
+            episode.after_metrics["degradation_mean_lead_time_to_failure"],
+            300.0,
+        )
+        self.assertEqual(candidate.target_agent, "modeler")
+        self.assertIn("score_trend_over_binary_f1", candidate.tags)
+        self.assertIn("After metrics", candidate.content)
+        self.assertIn("degradation_mean_lead_time_to_failure", candidate.content)
+
+    def test_temporal_evaluation_episode_preserves_operational_guardrails(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-memory-test",
+            run_id="run-temporal-evaluation-episode-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="proxy_temporal",
+            label_source="temporal_proxy",
+        ).model_dump(mode="json")
+        state_dict["metrics"] = MetricsReport(
+            extra={
+                "degradation_available": True,
+                "degradation_detected_before_failure_rate": 1.0,
+                "degradation_mean_lead_time_to_failure": 300.0,
+                "degradation_mean_false_alarm_rate_nominal": 0.0,
+                "degradation_mean_score_trend_spearman": 0.9,
+            },
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        decision = EvaluationDecision(
+            decision_id="run-temporal-evaluation-episode-001:evaluator:001",
+            rationale="Approve with operational guardrails.",
+            confidence=0.9,
+            evaluation={
+                "approved": True,
+                "summary": "Temporal metrics satisfy the local protocol.",
+                "next_action": "continue",
+                "limitations": ["Proxy labels are not official per-window labels."],
+            },
+            min_recall_required=None,
+            max_false_positive_rate=None,
+            tool_names=["temporal_health_lookup", "degradation_metrics_lookup"],
+            evidence_refs=[
+                "tool:temporal_health_lookup",
+                "metric:mean_lead_time_to_failure",
+            ],
+            operational_assessment=(
+                "Defendible with caveats: pico aislado is not failure, aviso "
+                "sostenido matters and RUL is not estimated."
+            ),
+            temporal_debate_points=[
+                "Debate pico aislado frente a aviso sostenido.",
+                "Debate falsas alarmas nominales y etiquetas proxy.",
+            ],
+            temporal_guardrail_checks=[
+                "isolated_spike_not_failure",
+                "sustained_alert_required",
+                "rul_not_estimated",
+                "proxy_labels_not_official",
+                "f1_auxiliary_only",
+            ],
+        )
+
+        episode = build_evaluation_decision_episode(
+            state=state,
+            decision=decision,
+        )
+
+        self.assertIn("Assessment operacional", episode.context_summary)
+        self.assertIn("temporal_health_lookup", episode.evidence_used)
+        self.assertIn("metric:mean_lead_time_to_failure", episode.evidence_used)
+        self.assertIn("rul_not_estimated", episode.tradeoffs_observed)
+        self.assertIn("temporal_guardrails_are_binding", episode.reusable_lessons)
+        self.assertIn(
+            "supervision_profile=run_to_failure_degradation",
+            episode.when_to_reuse,
+        )
+        candidate = build_evaluation_memory_candidate(
+            episode,
+            reusable_as_context=True,
+        )
+        self.assertEqual(
+            episode.after_metrics["degradation_mean_lead_time_to_failure"],
+            300.0,
+        )
+        self.assertIn("rul_not_estimated", candidate.tags)
+        self.assertIn("degradation_mean_lead_time_to_failure", candidate.content)
 
 
 def _retry_decision() -> ModelingRetryDecision:

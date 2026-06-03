@@ -143,6 +143,9 @@ class ModelingDecisionStrategy(StrictBaseModel):
     )
     evidence_refs: list[str] = Field(default_factory=list)
     risk_notes: list[str] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
+    optimization_targets: list[str] = Field(default_factory=list)
+    alert_policy: str | None = Field(default=None, min_length=1)
 
 
 class ModelingDecision(AgentDecisionBase):
@@ -157,9 +160,21 @@ class ModelingDecision(AgentDecisionBase):
     validation_split: str | None = "validation"
     expected_model_path: str = Field(min_length=1)
     comparison_candidates: list["ModelingAlternative"] = Field(default_factory=list)
+    memory_context_id: str | None = Field(default=None, min_length=1)
+    used_memory_context: bool = False
+    memory_record_ids: list[str] = Field(default_factory=list)
+    memory_usage_summary: str | None = Field(default=None, min_length=1)
+    memory_record_uses: list[MemoryRecordUse] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_strategy_guardrails(self) -> "ModelingDecision":
+        _validate_memory_usage_declaration(
+            used_memory_context=self.used_memory_context,
+            memory_context_id=self.memory_context_id,
+            memory_record_ids=self.memory_record_ids,
+            memory_usage_summary=self.memory_usage_summary,
+            memory_record_uses=self.memory_record_uses,
+        )
         if (
             self.decision_strategy.strategy_type == "threshold_calibration"
             and not _has_different_model_family_candidate(
@@ -250,6 +265,11 @@ class EvaluationDecision(AgentDecisionBase):
     evaluation: EvaluationResult
     min_recall_required: float | None = Field(default=None, ge=0.0, le=1.0)
     max_false_positive_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    tool_names: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    operational_assessment: str | None = Field(default=None, min_length=1)
+    temporal_debate_points: list[str] = Field(default_factory=list)
+    temporal_guardrail_checks: list[str] = Field(default_factory=list)
     memory_context_id: str | None = Field(default=None, min_length=1)
     used_memory_context: bool = False
     memory_record_ids: list[str] = Field(default_factory=list)
