@@ -30,6 +30,7 @@ def write_degradation_predictions(path: Path) -> None:
             _degradation_row("r2", 0.45, 1, 0.40, 0, 550.0, 450.0, "degradation"),
             _degradation_row("r3", 0.70, 1, 0.80, 1, 700.0, 300.0, "degradation"),
             _degradation_row("r4", 0.90, 1, 0.95, 1, 900.0, 100.0, "degradation"),
+            _degradation_row("r5", 0.98, 1, 1.00, 1, 990.0, 10.0, "degradation"),
         ]
     ).to_csv(path, index=False)
 
@@ -123,12 +124,36 @@ class EvaluationExecutorTests(unittest.TestCase):
         self.assertIn("run_to_failure_degradation", metrics["metric_families"])
         self.assertTrue(degradation["available"])
         self.assertEqual(degradation["n_runs"], 1)
-        self.assertEqual(degradation["n_windows"], 5)
+        self.assertEqual(degradation["n_windows"], 6)
+        self.assertEqual(degradation["health_policy_id"], "temporal_health_policy_v1")
+        self.assertEqual(degradation["alert_policy_id"], "alert_persistence_v1")
+        self.assertEqual(
+            degradation["health_indicator_policy_id"],
+            "health_indicator_policy_v1",
+        )
+        self.assertEqual(degradation["persistent_alert_min_windows"], 3)
         self.assertEqual(degradation["detected_runs"], 1)
+        self.assertEqual(degradation["confirmed_degradation_runs"], 1)
+        self.assertEqual(degradation["confirmed_degradation_before_failure_rate"], 1.0)
+        self.assertGreater(degradation["mean_health_index_drop"], 0.0)
+        self.assertEqual(degradation["mean_health_monotonicity"], 1.0)
+        self.assertGreater(degradation["mean_health_robustness"], 0.8)
         self.assertFalse(run_metrics["missed_failure"])
+        self.assertFalse(run_metrics["missed_confirmed_degradation"])
         self.assertEqual(run_metrics["lead_time_to_failure"], 300.0)
+        self.assertEqual(run_metrics["persistent_alert_min_windows"], 3)
+        self.assertEqual(run_metrics["first_persistent_alert_relative_life"], 0.70)
+        self.assertEqual(run_metrics["persistent_lead_time_to_failure"], 300.0)
+        self.assertEqual(run_metrics["longest_alert_streak"], 3)
+        self.assertEqual(
+            run_metrics["health_indicator_status"],
+            "degrading_health_indicator",
+        )
+        self.assertEqual(run_metrics["health_dominant_evidence"], "score_above_threshold")
         self.assertEqual(run_metrics["false_alarm_rate_nominal"], 0.0)
         self.assertAlmostEqual(run_metrics["score_trend_spearman"], 1.0)
+        self.assertIn("Politica de salud temporal", report)
+        self.assertIn("Politica de Health Indicator", report)
         self.assertIn("Evaluacion temporal de degradacion", report)
         self.assertIn("label_source is not present", metrics["binary_metric_context"]["warning"])
 

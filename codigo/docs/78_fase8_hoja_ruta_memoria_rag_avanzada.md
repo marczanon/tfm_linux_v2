@@ -568,8 +568,12 @@ Estado 2026-06-03:
   con `retrieval_backend=qdrant_vector_memory_store`;
 - el benchmark clasifica esa run como `retrieval_only`: Qdrant recupera memoria
   sin uso invalido, pero al no usar LLM no hay citas agenticas;
-- queda pendiente M4.5 para ejecutar una run Qwen/LLM con Qdrant,
-  preferentemente en `run_to_failure_degradation`.
+- M4.5 remigra Qdrant con `qwen3-embedding:0.6b`, expone `--use-llm` en el
+  runner comun y ejecuta `m4-5-qwen-qdrant-nasa-smoke-001` sobre
+  `run_to_failure_degradation`;
+- el benchmark clasifica M4.5 como `memory_used`: el `modeler` recupera 3
+  recuerdos desde `qdrant_vector_memory_store`, los cita y declara uso sin uso
+  invalido, aunque la run queda no aprobada por falsas alarmas altas.
 
 ### Hito M5: Qwen embeddings y reranking
 
@@ -761,7 +765,8 @@ Orden practico para no perder foco:
 6. M4.2 Qdrant opcional.
 7. M4.3 migracion y smoke Qdrant real.
 8. M4.4 run de retrieval real con backend Qdrant.
-9. M4.5 run Qwen/LLM con backend Qdrant.
+9. M4.5 run Qwen/LLM con backend Qdrant. Completado en
+   `88_fase8_memoria_m4_5_qwen_qdrant_citas_agenticas.md`.
 10. M5 Qwen reranking.
 11. M6 hybrid search.
 12. M7 retrieval quality gate avanzado.

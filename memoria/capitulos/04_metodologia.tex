@@ -78,6 +78,42 @@ reranking, busqueda hibrida, consolidacion de episodios y eventualmente una
 base vectorial externa. En todos los casos, la memoria debe informar a Qwen sin
 sustituir el protagonismo deliberativo de los agentes.
 
+\section{Metodologia run-to-failure de Fase 9}
+
+La Fase 9 fija una metodologia especifica para elevar el perfil
+\texttt{run\_to\_failure\_degradation} desde una ejecucion temporal defendible
+hacia un caso local de mantenimiento predictivo agentico. La unidad de analisis
+deja de ser la ventana aislada y pasa a ser la trayectoria completa del activo.
+Por ello, el criterio principal no es F1, sino la deteccion de degradacion
+confirmada antes de fallo, el \texttt{lead time} persistente, las falsas
+alarmas nominales, la tendencia del score y la calidad del Health Indicator.
+
+Esta metodologia introduce politicas versionadas y citables. La politica de
+alerta distingue pico aislado, vigilancia y aviso sostenido; la politica de
+Health Indicator produce una curva de salud causal y metricas de caida,
+monotonicidad y robustez; y la politica de readiness decide si existen datos
+suficientes para modelos temporales avanzados. Los agentes pueden consultar
+estas herramientas y citarlas en sus decisiones, pero las herramientas no
+aprueban runs, no eligen modelos y no estiman RUL.
+
+El principio agentico se mantiene: Qwen/LLM conserva el protagonismo como
+decisor. El sistema le ofrece familias de modelo ejecutables y evidencias
+temporales, pero no fuerza una eleccion. En particular, el autoencoder PyTorch
+denso se incorpora como candidato profesional y reproducible, no como reemplazo
+del agente ni como mejora garantizada. Para seleccionarlo, el modelador debe
+trabajar dentro del perfil run-to-failure, citar la herramienta de readiness,
+usar hiperparametros cerrados y aceptar que el evaluador juzgara el resultado
+con las mismas metricas temporales que PCA, Isolation Forest y One-Class SVM.
+
+Tambien se refuerza la trazabilidad de fallos del LLM. Una salida que no cumple
+un contrato no debe aparecer como una caida opaca a fallback si puede repararse
+mediante una segunda emision estructurada. Por ello, las violaciones de contrato
+se registran como correcciones de guardarrail, mientras que el fallback queda
+reservado para fallos tecnicos del proveedor o JSON irrecuperable. Esta
+distincion es importante en un TFM centrado en agentes: una correccion de
+guardarrail demuestra control metodologico; un fallback tecnico indica que el
+LLM no pudo participar.
+
 \section{Generalización multi-dataset}
 
 Tras consolidar el MVP sobre CWRU, la siguiente extensión metodológica consiste

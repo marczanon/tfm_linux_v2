@@ -63,7 +63,15 @@ def decide_evaluation_action(
                 client,
                 memory_context=memory_context,
             )
-        except (LLMCallError, ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError) as exc:
+            fallback = decide_evaluation_action_deterministic(state)
+            fallback.rationale = (
+                f"{fallback.rationale} Guardrail correction after invalid "
+                f"LLM evaluator decision: {exc}"
+            )
+            fallback.confidence = min(fallback.confidence, 0.82)
+            return fallback
+        except LLMCallError as exc:
             fallback = decide_evaluation_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
             fallback.confidence = min(fallback.confidence, 0.7)
@@ -80,17 +88,32 @@ def decide_evaluation_action_with_llm(
 ) -> EvaluationDecision:
     """Solicita al LLM una EvaluationDecision y valida sus limites."""
 
+    messages = _evaluator_messages(state, memory_context=memory_context)
+    schema = EvaluationDecision.model_json_schema()
     payload = llm_client.complete_json(
-        _evaluator_messages(state, memory_context=memory_context),
-        json_schema=EvaluationDecision.model_json_schema(),
+        messages,
+        json_schema=schema,
     )
-    decision = EvaluationDecision.model_validate(payload)
-    _validate_evaluation_decision_bounds(
-        state,
-        decision,
-        memory_context=memory_context,
-    )
-    return decision
+    try:
+        return _validated_evaluation_decision_from_payload(
+            state,
+            payload,
+            memory_context=memory_context,
+        )
+    except (ValidationError, ValueError) as exc:
+        repaired_payload = llm_client.complete_json(
+            _evaluator_contract_repair_messages(
+                messages,
+                invalid_payload=payload,
+                validation_error=exc,
+            ),
+            json_schema=schema,
+        )
+        return _validated_evaluation_decision_from_payload(
+            state,
+            repaired_payload,
+            memory_context=memory_context,
+        )
 
 
 def decide_evaluation_action_deterministic(state: TFMStateModel) -> EvaluationDecision:
@@ -171,6 +194,26 @@ def build_evaluator_memory_query(
                 state.metrics,
                 "degradation_detected_before_failure_rate",
             ),
+            "degradation_confirmed_degradation_before_failure_rate": _metric_extra_float(
+                state.metrics,
+                "degradation_confirmed_degradation_before_failure_rate",
+            ),
+            "degradation_mean_persistent_lead_time_to_failure": _metric_extra_float(
+                state.metrics,
+                "degradation_mean_persistent_lead_time_to_failure",
+            ),
+            "degradation_mean_health_index_drop": _metric_extra_float(
+                state.metrics,
+                "degradation_mean_health_index_drop",
+            ),
+            "degradation_mean_health_monotonicity": _metric_extra_float(
+                state.metrics,
+                "degradation_mean_health_monotonicity",
+            ),
+            "degradation_mean_health_robustness": _metric_extra_float(
+                state.metrics,
+                "degradation_mean_health_robustness",
+            ),
             "degradation_mean_false_alarm_rate_nominal": _metric_extra_float(
                 state.metrics,
                 "degradation_mean_false_alarm_rate_nominal",
@@ -193,6 +236,49 @@ def build_evaluator_memory_query(
         top_k=top_k,
         min_similarity=min_similarity,
     )
+
+
+def _validated_evaluation_decision_from_payload(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> EvaluationDecision:
+    decision = EvaluationDecision.model_validate(payload)
+    _validate_evaluation_decision_bounds(
+        state,
+        decision,
+        memory_context=memory_context,
+    )
+    return decision
+
+
+def _evaluator_contract_repair_messages(
+    original_messages: list[LLMMessage],
+    *,
+    invalid_payload: dict[str, Any],
+    validation_error: Exception,
+) -> list[LLMMessage]:
+    return [
+        *original_messages,
+        LLMMessage(
+            role="assistant",
+            content=json.dumps(invalid_payload, indent=2, ensure_ascii=True),
+        ),
+        LLMMessage(
+            role="user",
+            content="\n".join(
+                [
+                    "La decision anterior no valida contra los guardarrails del evaluador.",
+                    f"Error de validacion: {validation_error}",
+                    "Corrige solo lo necesario y reemite un unico objeto JSON valido.",
+                    "No relajes umbrales, no inventes evidencia y no cambies decision_id.",
+                    "Para run-to-failure, RUL no esta estimado: no escribas que existe RUL estimado.",
+                    "No incluyas texto fuera del JSON.",
+                ]
+            ),
+        ),
+    ]
 
 
 def retrieve_evaluator_memory_context(
@@ -438,6 +524,7 @@ def _temporal_operational_decision_fields(
         "tool_names": [
             "temporal_health_lookup",
             "degradation_metrics_lookup",
+            "temporal_model_readiness_assessor",
         ],
         "evidence_refs": _temporal_evaluation_evidence_refs(state),
         "operational_assessment": _temporal_operational_assessment(state, approved),
@@ -450,10 +537,25 @@ def _temporal_evaluation_evidence_refs(state: TFMStateModel) -> list[str]:
     refs = [
         "tool:temporal_health_lookup",
         "tool:degradation_metrics_lookup",
+        "tool:temporal_model_readiness_assessor",
         "temporal:first_persistent_alert",
+        "temporal:onset_confirmed",
+        "temporal:health_policy",
+        "temporal:alert_policy",
+        "temporal:health_indicator_policy",
         "temporal:isolated_alert_points",
         "temporal:longest_alert_streak",
         "temporal:rul_not_estimated",
+        "health:indicator_available",
+        "health:monotonicity",
+        "health:robustness",
+        "health:dominant_evidence",
+        "readiness:temporal_model_readiness",
+        "metric:confirmed_degradation_before_failure_rate",
+        "metric:mean_persistent_lead_time_to_failure",
+        "metric:mean_health_index_drop",
+        "metric:mean_health_monotonicity",
+        "metric:mean_health_robustness",
         "metric:mean_lead_time_to_failure",
         "metric:mean_false_alarm_rate_nominal",
         "metric:mean_score_trend_spearman",
@@ -474,7 +576,9 @@ def _temporal_operational_assessment(
     status = "defendible con cautelas" if approved else "no defendible todavia"
     return (
         f"La deteccion run-to-failure es {status}: se juzga por aviso sostenido, "
-        "lead time, falsas alarmas nominales y tendencia del score. Un pico "
+        "lead time persistente, falsas alarmas nominales y tendencia del score "
+        "bajo una politica temporal versionada. El Health Indicator avanzado "
+        "aporta evidencia auxiliar de caida, monotonicidad y robustez. Un pico "
         "aislado no equivale a fallo; RUL no esta estimado y las etiquetas proxy "
         "no son ground truth oficial por ventana."
     )
@@ -486,8 +590,11 @@ def _temporal_debate_points(
 ) -> list[str]:
     points = [
         "Distinguir pico aislado de aviso sostenido antes de interpretar riesgo.",
-        "Comprobar que el lead time medio existe sin presentar RUL estimado.",
+        "Comprobar que el onset confirmado existe sin presentar RUL estimado.",
+        "Distinguir score de anomalia, Health Indicator y estado operacional.",
+        "Revisar monotonicidad y robustez del Health Indicator antes de recomendar operacion.",
         "Valorar falsas alarmas nominales frente a utilidad industrial.",
+        "Citar la politica temporal usada para confirmar alertas sostenidas.",
         "Tratar F1, recall y precision como metricas auxiliares/proxy.",
     ]
     if state.project_context.label_source in {"none", "temporal_proxy", "synthetic"}:
@@ -552,8 +659,27 @@ def _validate_temporal_operational_decision(
             "run-to-failure evaluator decision missing guardrail checks: "
             + ", ".join(missing_guardrails)
         )
-    if any("rul estimado" in point.lower() for point in decision.temporal_debate_points):
+    if any(_claims_estimated_rul(point) for point in decision.temporal_debate_points):
         raise ValueError("temporal_debate_points cannot claim estimated RUL")
+
+
+def _claims_estimated_rul(text: str) -> bool:
+    normalized = text.lower()
+    if "estimated rul" in normalized:
+        return "not estimated" not in normalized and "no estimated" not in normalized
+    if "rul estimado" not in normalized:
+        return False
+    negations = [
+        "sin presentar",
+        "sin estimar",
+        "no presentar",
+        "no esta",
+        "no está",
+        "no se",
+        "no hay",
+        "no existe",
+    ]
+    return not any(negation in normalized for negation in negations)
 
 
 def _profile_specific_rules(state: TFMStateModel) -> list[str]:
@@ -562,8 +688,9 @@ def _profile_specific_rules(state: TFMStateModel) -> list[str]:
             "- min_recall_required debe ser null para perfiles run-to-failure.",
             "- max_false_positive_rate debe ser null para perfiles run-to-failure.",
             (
-                "- approved debe basarse en degradation_metrics: deteccion antes "
-                "de fallo, falsas alarmas nominales y tendencia del score."
+                "- approved debe basarse en degradation_metrics: onset confirmado "
+                "antes de fallo, lead time persistente, falsas alarmas nominales "
+                "y tendencia del score."
             ),
             (
                 "- No suspendas NASA IMS por no tener etiquetas oficiales por "
@@ -577,12 +704,16 @@ def _profile_specific_rules(state: TFMStateModel) -> list[str]:
                 "- Declara como limitacion cualquier label_source none, "
                 "temporal_proxy o synthetic."
             ),
-            (
-                "- tool_names debe incluir temporal_health_lookup y "
-                "degradation_metrics_lookup."
-            ),
-            (
-                "- evidence_refs debe citar las herramientas usadas y al menos "
+        (
+            "- tool_names debe incluir temporal_health_lookup y "
+            "degradation_metrics_lookup."
+        ),
+        (
+            "- Si se menciona autoencoder, LSTM o RUL experimental, exige "
+            "temporal_model_readiness_assessor y refs readiness:*."
+        ),
+        (
+            "- evidence_refs debe citar las herramientas usadas y al menos "
                 "una metrica temporal o referencia temporal."
             ),
             (
@@ -626,13 +757,31 @@ def _metrics_are_approved(metrics: MetricsReport | None) -> bool:
 def _degradation_metrics_are_approved(metrics: MetricsReport | None) -> bool:
     if metrics is None or not _metric_extra_bool(metrics, "degradation_available"):
         return False
-    detection_rate = _metric_extra_float(
+    confirmed_detection_rate = _metric_extra_float(
+        metrics,
+        "degradation_confirmed_degradation_before_failure_rate",
+    )
+    first_spike_detection_rate = _metric_extra_float(
         metrics,
         "degradation_detected_before_failure_rate",
     )
-    mean_lead_time = _metric_extra_float(
+    detection_rate = (
+        confirmed_detection_rate
+        if confirmed_detection_rate is not None
+        else first_spike_detection_rate
+    )
+    persistent_lead_time = _metric_extra_float(
+        metrics,
+        "degradation_mean_persistent_lead_time_to_failure",
+    )
+    first_spike_lead_time = _metric_extra_float(
         metrics,
         "degradation_mean_lead_time_to_failure",
+    )
+    mean_lead_time = (
+        persistent_lead_time
+        if persistent_lead_time is not None
+        else first_spike_lead_time
     )
     false_alarm_rate = _metric_extra_float(
         metrics,
@@ -673,10 +822,16 @@ def _evaluation_summary(state: TFMStateModel, approved: bool) -> str:
         status = "aprobada" if approved else "completada con metricas temporales insuficientes"
         return (
             f"Ejecucion run-to-failure {status}: "
-            "lead_time_medio="
-            f"{_format_metric(_metric_extra_float(state.metrics, 'degradation_mean_lead_time_to_failure'))}, "
+            "onset_confirmado="
+            f"{_format_metric(_metric_extra_float_any(state.metrics, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}, "
+            "lead_time_persistente="
+            f"{_format_metric(_metric_extra_float_any(state.metrics, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}, "
             "FAR_nominal="
             f"{_format_metric(_metric_extra_float(state.metrics, 'degradation_mean_false_alarm_rate_nominal'))}, "
+            "HI_drop="
+            f"{_format_metric(_metric_extra_float(state.metrics, 'degradation_mean_health_index_drop'))}, "
+            "HI_monotonicidad="
+            f"{_format_metric(_metric_extra_float(state.metrics, 'degradation_mean_health_monotonicity'))}, "
             "tendencia_score="
             f"{_format_metric(_metric_extra_float(state.metrics, 'degradation_mean_score_trend_spearman'))}."
         )
@@ -713,7 +868,7 @@ def _evaluation_limitations(
             limitations.append("Faltan metricas temporales de degradacion.")
         elif not approved:
             limitations.append(
-                "Las metricas temporales no cumplen los criterios minimos de alerta temprana, falsas alarmas y tendencia."
+                "Las metricas temporales no cumplen los criterios minimos de onset confirmado, falsas alarmas y tendencia."
             )
         return limitations
     if metrics.recall is None or metrics.false_positive_rate is None:
@@ -728,12 +883,13 @@ def _evaluation_limitations(
 def _evaluation_policy_rationale(state: TFMStateModel) -> str:
     if _uses_temporal_degradation_profile(state):
         return (
-            "Fallback run-to-failure evaluation policy: judge temporal "
-            "degradation metrics such as early detection, nominal false alarms "
-            "and score trend; binary F1 is treated only as auxiliary/proxy."
+            "Deterministic run-to-failure evaluation policy: judge temporal "
+            "degradation metrics such as confirmed onset before failure, "
+            "persistent lead time, nominal false alarms and score trend; binary "
+            "F1 is treated only as auxiliary/proxy."
         )
     return (
-        "Fallback binary evaluation policy: approve only if recall and false "
+        "Deterministic binary evaluation policy: approve only if recall and false "
         "positive rate satisfy the local MVP thresholds; complete the run "
         "with explicit limitations when metrics are below threshold."
     )
@@ -751,6 +907,14 @@ def _metric_extra_float(metrics: MetricsReport | None, key: str) -> float | None
         return None
     if isinstance(value, int | float):
         return float(value)
+    return None
+
+
+def _metric_extra_float_any(metrics: MetricsReport | None, *keys: str) -> float | None:
+    for key in keys:
+        value = _metric_extra_float(metrics, key)
+        if value is not None:
+            return value
     return None
 
 

@@ -4,10 +4,29 @@ from unittest.mock import patch
 from codigo.app.services.llm import (
     DEFAULT_OLLAMA_CHAT_MODEL,
     LLMCallError,
+    LLMMessage,
     OllamaJSONClient,
     get_default_json_llm_client,
     parse_json_object,
 )
+
+
+class FakeOllamaJSONClient(OllamaJSONClient):
+    def __init__(self, responses, *, max_json_repair_attempts=1):
+        super().__init__(
+            model="fake-model",
+            host="http://127.0.0.1:11434",
+            timeout_seconds=1.0,
+            max_json_repair_attempts=max_json_repair_attempts,
+        )
+        object.__setattr__(self, "responses", list(responses))
+        object.__setattr__(self, "requests", [])
+
+    def _chat(self, messages, *, json_schema=None):
+        self.requests.append((messages, json_schema))
+        if not self.responses:
+            raise LLMCallError("no fake responses left")
+        return self.responses.pop(0)
 
 
 class LLMServiceTests(unittest.TestCase):
@@ -24,6 +43,39 @@ class LLMServiceTests(unittest.TestCase):
     def test_parse_json_object_rejects_non_object_json(self):
         with self.assertRaises(LLMCallError):
             parse_json_object("[1, 2, 3]")
+
+    def test_ollama_client_repairs_invalid_json_once_when_schema_is_available(self):
+        client = FakeOllamaJSONClient(
+            [
+                {"message": {"content": '{"ok": true'}},
+                {"message": {"content": '{"ok": true, "value": 5}'}},
+            ]
+        )
+
+        parsed = client.complete_json(
+            [LLMMessage(role="user", content="Devuelve JSON.")],
+            json_schema={"title": "Decision", "type": "object"},
+        )
+
+        self.assertEqual(parsed, {"ok": True, "value": 5})
+        self.assertEqual(len(client.requests), 2)
+        repair_messages = client.requests[1][0]
+        self.assertIn("respuesta anterior no era JSON valido", repair_messages[-1].content)
+        self.assertIn("Esquema JSON de referencia", repair_messages[-1].content)
+
+    def test_ollama_client_does_not_repair_without_enabled_attempts(self):
+        client = FakeOllamaJSONClient(
+            [{"message": {"content": '{"ok": true'}}],
+            max_json_repair_attempts=0,
+        )
+
+        with self.assertRaises(LLMCallError):
+            client.complete_json(
+                [LLMMessage(role="user", content="Devuelve JSON.")],
+                json_schema={"title": "Decision", "type": "object"},
+            )
+
+        self.assertEqual(len(client.requests), 1)
 
     def test_default_ollama_client_disables_thinking_for_strict_json(self):
         with patch.dict(

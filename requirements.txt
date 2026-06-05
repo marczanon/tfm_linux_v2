@@ -12,6 +12,7 @@ scipy>=1.14
 # Modelos base de deteccion de anomalias
 scikit-learn>=1.6
 joblib>=1.4
+torch>=2.3
 
 # Informes y visualizacion tecnica
 matplotlib>=3.9

@@ -409,6 +409,13 @@ activa Qdrant dentro del pipeline. La comprobacion CWRU
 memoria con `retrieval_backend=qdrant_vector_memory_store` y queda clasificada
 como `retrieval_only` en el benchmark. Al ejecutarse sin LLM, no valida todavia
 citas ni deliberacion Qwen; eso queda para M4.5.
+M4.5 se implementa en
+`88_fase8_memoria_m4_5_qwen_qdrant_citas_agenticas.md`: Qdrant se remigra con
+`qwen3-embedding:0.6b`, el runner comun expone `--use-llm` y la run
+`m4-5-qwen-qdrant-nasa-smoke-001` valida Qwen/LLM + Qdrant en
+`run_to_failure_degradation`. El `modeler` recupera 3 recuerdos desde Qdrant,
+los cita y declara uso alineado; la run queda no aprobada por FPR alto, lo que
+se conserva como cautela metodologica.
 
 ### Hito 8.7: suite canonica agentica run-to-failure
 

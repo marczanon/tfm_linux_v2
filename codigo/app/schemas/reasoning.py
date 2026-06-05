@@ -108,6 +108,7 @@ AgentToolName = Literal[
     "evidence_lookup",
     "temporal_health_lookup",
     "degradation_metrics_lookup",
+    "temporal_model_readiness_assessor",
     "threshold_analysis",
 ]
 

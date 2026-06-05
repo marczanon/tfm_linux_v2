@@ -1889,17 +1889,65 @@ def _metrics_from_path(path: str | None) -> MetricsReport | None:
             "degradation_available": degradation.get("available"),
             "degradation_n_runs": degradation.get("n_runs"),
             "degradation_missed_runs": degradation.get("missed_runs"),
+            "degradation_missed_confirmed_degradation_runs": degradation.get(
+                "missed_confirmed_degradation_runs"
+            ),
+            "degradation_health_policy_id": degradation.get("health_policy_id"),
+            "degradation_alert_policy_id": degradation.get("alert_policy_id"),
+            "degradation_health_indicator_policy_id": degradation.get(
+                "health_indicator_policy_id"
+            ),
+            "degradation_persistent_alert_min_windows": degradation.get(
+                "persistent_alert_min_windows"
+            ),
             "degradation_detected_before_failure_rate": degradation.get(
                 "detected_before_failure_rate"
             ),
+            "degradation_confirmed_degradation_before_failure_rate": degradation.get(
+                "confirmed_degradation_before_failure_rate"
+            ),
             "degradation_mean_lead_time_to_failure": degradation.get(
                 "mean_lead_time_to_failure"
+            ),
+            "degradation_mean_persistent_lead_time_to_failure": degradation.get(
+                "mean_persistent_lead_time_to_failure"
             ),
             "degradation_mean_false_alarm_rate_nominal": degradation.get(
                 "mean_false_alarm_rate_nominal"
             ),
             "degradation_mean_score_trend_spearman": degradation.get(
                 "mean_score_trend_spearman"
+            ),
+            "degradation_mean_isolated_alert_points": degradation.get(
+                "mean_isolated_alert_points"
+            ),
+            "degradation_mean_alert_episodes": degradation.get("mean_alert_episodes"),
+            "degradation_mean_longest_alert_streak": degradation.get(
+                "mean_longest_alert_streak"
+            ),
+            "degradation_mean_health_index_drop": degradation.get(
+                "mean_health_index_drop"
+            ),
+            "degradation_mean_health_monotonicity": degradation.get(
+                "mean_health_monotonicity"
+            ),
+            "degradation_mean_health_robustness": degradation.get(
+                "mean_health_robustness"
+            ),
+            "degradation_mean_health_nominal_volatility": degradation.get(
+                "mean_health_nominal_volatility"
+            ),
+            "degradation_mean_health_degradation_trend_strength": degradation.get(
+                "mean_health_degradation_trend_strength"
+            ),
+            "degradation_mean_health_indicator_score": degradation.get(
+                "mean_health_indicator_score"
+            ),
+            "degradation_health_trendability": degradation.get(
+                "health_trendability"
+            ),
+            "degradation_health_prognosability": degradation.get(
+                "health_prognosability"
             ),
         },
     )

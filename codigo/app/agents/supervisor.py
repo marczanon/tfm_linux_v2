@@ -39,7 +39,15 @@ def decide_supervisor_action(
         try:
             client = llm_client or get_default_json_llm_client()
             return decide_supervisor_action_with_llm(state, client)
-        except (LLMCallError, ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError) as exc:
+            fallback = decide_supervisor_action_deterministic(state)
+            fallback.rationale = (
+                f"{fallback.rationale} Guardrail correction after invalid "
+                f"LLM supervisor decision: {exc}"
+            )
+            fallback.confidence = min(fallback.confidence, 0.82)
+            return fallback
+        except LLMCallError as exc:
             fallback = decide_supervisor_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
             fallback.confidence = min(fallback.confidence, 0.7)
@@ -54,13 +62,25 @@ def decide_supervisor_action_with_llm(
 ) -> SupervisorDecision:
     """Solicita una decision al LLM y la valida contra el contrato."""
 
+    messages = _supervisor_messages(state)
+    schema = SupervisorDecision.model_json_schema()
     payload = llm_client.complete_json(
-        _supervisor_messages(state),
-        json_schema=SupervisorDecision.model_json_schema(),
+        messages,
+        json_schema=schema,
     )
-    decision = SupervisorDecision.model_validate(payload)
-    _validate_supervisor_decision_bounds(state, decision)
-    return decision
+    try:
+        return _validated_supervisor_decision_from_payload(state, payload)
+    except (ValidationError, ValueError) as exc:
+        repaired_payload = llm_client.complete_json(
+            _supervisor_contract_repair_messages(
+                state,
+                messages,
+                invalid_payload=payload,
+                validation_error=exc,
+            ),
+            json_schema=schema,
+        )
+        return _validated_supervisor_decision_from_payload(state, repaired_payload)
 
 
 def decide_supervisor_action_deterministic(state: TFMStateModel) -> SupervisorDecision:
@@ -128,6 +148,45 @@ def decide_supervisor_action_deterministic(state: TFMStateModel) -> SupervisorDe
         rationale=f"Stage {state.current_stage!r} is ready; routing to {next_node}.",
         confidence=1.0,
     )
+
+
+def _validated_supervisor_decision_from_payload(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+) -> SupervisorDecision:
+    decision = SupervisorDecision.model_validate(payload)
+    _validate_supervisor_decision_bounds(state, decision)
+    return decision
+
+
+def _supervisor_contract_repair_messages(
+    state: TFMStateModel,
+    original_messages: list[LLMMessage],
+    *,
+    invalid_payload: dict[str, Any],
+    validation_error: Exception,
+) -> list[LLMMessage]:
+    return [
+        *original_messages,
+        LLMMessage(
+            role="assistant",
+            content=json.dumps(invalid_payload, indent=2, ensure_ascii=True),
+        ),
+        LLMMessage(
+            role="user",
+            content="\n".join(
+                [
+                    "La transicion anterior no valida contra el supervisor.",
+                    f"Error de validacion: {validation_error}",
+                    "Corrige solo next_stage, next_node, stop_reason y rationale si procede.",
+                    "No cambies decision_id ni current_stage.",
+                    "Transicion obligatoria:",
+                    _allowed_transition_text(state),
+                    "Reemite exclusivamente un unico objeto JSON valido.",
+                ]
+            ),
+        ),
+    ]
 
 
 def _should_use_llm(

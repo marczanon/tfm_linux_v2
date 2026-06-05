@@ -12,6 +12,24 @@ from codigo.app.services.vector_memory import (
 
 
 class MemoryBackendScriptSelectionTests(unittest.TestCase):
+    def test_dataset_runner_request_from_args_keeps_use_llm(self):
+        args = argparse.Namespace(
+            run_id="m4-5-qwen-llm-qdrant",
+            dataset_id="nasa_ims_bearing",
+            raw_path="codigo/data/raw/nasa_ims_bearing/preextracted",
+            adapter_id="nasa_ims_bearing",
+            dataset_policy_id="nasa_ims_temporal_v1",
+            execution_mode="full",
+            use_memory=True,
+            use_llm=True,
+            allow_synthetic_labels=False,
+        )
+
+        request = run_dataset_pipeline_with_memory._request_from_args(args)
+
+        self.assertTrue(request.use_memory)
+        self.assertTrue(request.use_llm)
+
     def test_dataset_runner_memory_config_can_select_qdrant(self):
         args = argparse.Namespace(
             use_memory=True,

@@ -13,7 +13,6 @@ from sklearn.preprocessing import StandardScaler
 
 from codigo.app.schemas.api_visualization import (
     AgentOperationalRecommendation,
-    HealthState,
     ProjectionBoundary,
     ProjectionPoint,
     RunVisualizationData,
@@ -23,8 +22,18 @@ from codigo.app.schemas.api_visualization import (
     TemporalXAxis,
     VisualizationMetric,
 )
+from codigo.app.schemas.temporal_health import (
+    DEFAULT_TEMPORAL_HEALTH_INDICATOR_POLICY,
+    DEFAULT_TEMPORAL_HEALTH_POLICY,
+    HealthState,
+)
 from codigo.app.services.run_persistence import DEFAULT_RUNS_DIR, load_run_snapshot
 from codigo.app.services.run_registry import get_run_artifacts
+from codigo.app.services.temporal_health_policy import (
+    temporal_alert_summary,
+    temporal_health_indicator_series,
+    temporal_health_values,
+)
 
 
 METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
@@ -43,11 +52,23 @@ DEGRADATION_METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
         "ratio",
         "Proporcion de trayectorias detectadas antes del fallo historico.",
     ),
+    "confirmed_degradation_before_failure_rate": (
+        "Onset confirmado",
+        True,
+        "ratio",
+        "Proporcion de trayectorias con aviso sostenido antes del fallo historico.",
+    ),
     "mean_lead_time_to_failure": (
         "Lead time medio",
         True,
         "seconds",
         "Tiempo medio disponible entre primer aviso y fallo historico.",
+    ),
+    "mean_persistent_lead_time_to_failure": (
+        "Lead time persistente",
+        True,
+        "seconds",
+        "Tiempo medio entre el primer aviso sostenido y el fallo historico.",
     ),
     "mean_false_alarm_rate_nominal": (
         "Falsas alarmas nominales",
@@ -67,11 +88,83 @@ DEGRADATION_METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
         "count",
         "Trayectorias que llegaron a fallo sin alerta previa.",
     ),
+    "missed_confirmed_degradation_runs": (
+        "Onsets perdidos",
+        False,
+        "count",
+        "Trayectorias sin aviso sostenido antes del fallo historico.",
+    ),
     "mean_initial_final_separation": (
         "Separacion inicio-final",
         True,
         "score",
         "Diferencia media entre score inicial y score final.",
+    ),
+    "mean_isolated_alert_points": (
+        "Picos aislados",
+        False,
+        "count",
+        "Ventanas medias de alerta que no alcanzan persistencia minima.",
+    ),
+    "mean_alert_episodes": (
+        "Episodios de alerta",
+        False,
+        "count",
+        "Numero medio de rachas de alerta por trayectoria.",
+    ),
+    "mean_longest_alert_streak": (
+        "Racha maxima",
+        True,
+        "count",
+        "Longitud media de la mayor racha de warning/critical.",
+    ),
+    "mean_health_index_drop": (
+        "Caida Health Index",
+        True,
+        "score",
+        "Diferencia media entre salud inicial y final; mayor implica degradacion mas visible.",
+    ),
+    "mean_health_monotonicity": (
+        "Monotonicidad HI",
+        True,
+        "ratio",
+        "Proporcion media de cambios no positivos del Health Index suavizado.",
+    ),
+    "mean_health_robustness": (
+        "Robustez HI",
+        True,
+        "ratio",
+        "Estabilidad media entre Health Index bruto y suavizado.",
+    ),
+    "mean_health_nominal_volatility": (
+        "Volatilidad nominal HI",
+        False,
+        "score",
+        "Dispersion del Health Index en tramo nominal; menor es mas estable.",
+    ),
+    "mean_health_degradation_trend_strength": (
+        "Fuerza tendencia HI",
+        True,
+        "ratio",
+        "Intensidad de tendencia decreciente del Health Index frente a vida relativa.",
+    ),
+    "mean_health_indicator_score": (
+        "Score HI compuesto",
+        True,
+        "ratio",
+        "Resumen de caida, monotonicidad, robustez y tendencia del Health Index.",
+    ),
+    "health_trendability": (
+        "Trendability HI",
+        True,
+        "ratio",
+        "Consistencia de tendencia entre trayectorias cuando hay varias runs.",
+    ),
+    "health_prognosability": (
+        "Prognosability HI",
+        True,
+        "ratio",
+        "Convergencia del Health Index cerca del fallo cuando hay varias runs.",
     ),
 }
 
@@ -133,7 +226,9 @@ TEMPORAL_AXIS_PRIORITY: list[TemporalXAxis] = [
     "time_since_start_seconds",
     "window_index",
 ]
-PERSISTENT_ALERT_MIN_WINDOWS = 3
+PERSISTENT_ALERT_MIN_WINDOWS = (
+    DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.persistent_alert_min_windows
+)
 
 
 def build_run_visualization(
@@ -654,15 +749,32 @@ def _temporal_run_series(
     scores = ordered["anomaly_score"].dropna()
     score_min = None if scores.empty else float(scores.min())
     score_max = None if scores.empty else float(scores.max())
+    indicator = temporal_health_indicator_series(
+        ordered.to_dict("records"),
+        score_min=score_min,
+        score_max=score_max,
+        health_policy=DEFAULT_TEMPORAL_HEALTH_POLICY,
+        indicator_policy=DEFAULT_TEMPORAL_HEALTH_INDICATOR_POLICY,
+        x_key=x_axis,
+    )
+    indicator_points = indicator["points"]
+    health_metrics = indicator["metrics"]
     sampled = _temporal_sample_indices(ordered, max_points)
     points = [
-        _temporal_point(ordered.iloc[index], x_axis, score_min, score_max)
+        _temporal_point(
+            ordered.iloc[index],
+            x_axis,
+            score_min,
+            score_max,
+            indicator_point=indicator_points[index],
+        )
         for index in sampled
     ]
     first_alert = _first_temporal_alert(ordered)
     failure = _temporal_failure_marker(ordered, x_axis)
     latest = ordered.iloc[-1]
     current_health = _health_values(latest, score_min, score_max)
+    current_indicator = indicator_points[-1]
     state_counts = _health_state_counts(ordered, score_min, score_max)
     first_persistent_alert = state_counts["first_persistent_alert"]
     return TemporalRunSeries(
@@ -693,6 +805,22 @@ def _temporal_run_series(
             else _optional_float(first_persistent_alert.get("time_to_failure_seconds"))
         ),
         persistent_alert_min_windows=PERSISTENT_ALERT_MIN_WINDOWS,
+        onset_confirmed=first_persistent_alert is not None,
+        onset_confirmed_x=(
+            None
+            if first_persistent_alert is None
+            else _optional_float(first_persistent_alert[x_axis])
+        ),
+        onset_confirmed_time=(
+            None if first_persistent_alert is None else _row_time(first_persistent_alert)
+        ),
+        onset_confirmed_time_to_failure_seconds=(
+            None
+            if first_persistent_alert is None
+            else _optional_float(first_persistent_alert.get("time_to_failure_seconds"))
+        ),
+        health_policy_id=DEFAULT_TEMPORAL_HEALTH_POLICY.policy_id,
+        alert_policy_id=DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.policy_id,
         failure_x=failure["x"],
         failure_time=failure["time"],
         failure_reference=failure["reference"],
@@ -704,9 +832,28 @@ def _temporal_run_series(
             latest.get("time_to_failure_seconds")
         ),
         current_risk_index=current_health["risk_index"],
+        current_risk_index_smoothed=current_indicator["risk_index_smoothed"],
         current_health_index=current_health["health_index"],
+        current_health_index_smoothed=current_indicator["health_index_smoothed"],
+        current_health_trend=current_indicator["health_trend"],
         current_health_state=current_health["health_state"],
         current_state_reason=current_health["state_reason"],
+        health_indicator_policy_id=indicator["policy_id"],
+        health_initial_index=health_metrics["initial_health_index"],
+        health_final_index=health_metrics["final_health_index"],
+        health_index_drop=health_metrics["health_index_drop"],
+        health_index_drop_ratio=health_metrics["health_index_drop_ratio"],
+        health_slope=health_metrics["health_slope"],
+        health_trend_spearman=health_metrics["health_trend_spearman"],
+        health_degradation_trend_strength=health_metrics[
+            "health_degradation_trend_strength"
+        ],
+        health_monotonicity=health_metrics["health_monotonicity"],
+        health_robustness=health_metrics["health_robustness"],
+        health_nominal_volatility=health_metrics["health_nominal_volatility"],
+        health_indicator_score=health_metrics["health_indicator_score"],
+        health_dominant_evidence=health_metrics["health_dominant_evidence"],
+        health_indicator_status=health_metrics["health_indicator_status"],
         alert_points=state_counts["alert_points"],
         warning_points=state_counts["warning_points"],
         critical_points=state_counts["critical_points"],
@@ -741,9 +888,15 @@ def _temporal_point(
     x_axis: TemporalXAxis,
     score_min: float | None,
     score_max: float | None,
+    *,
+    indicator_point: dict[str, Any] | None = None,
 ) -> TemporalSeriesPoint:
     run_id = _stable_run_id(row.get("run_id"))
-    health = _health_values(row, score_min, score_max)
+    health = (
+        _health_values(row, score_min, score_max)
+        if indicator_point is None
+        else indicator_point
+    )
     return TemporalSeriesPoint(
         window_id=str(row["window_id"]),
         run_id=run_id,
@@ -760,9 +913,25 @@ def _temporal_point(
         predicted_anomaly=_optional_int(row.get("predicted_anomaly")),
         score_ratio=health["score_ratio"],
         risk_index=health["risk_index"],
+        risk_index_smoothed=health.get("risk_index_smoothed"),
         health_index=health["health_index"],
+        health_index_raw=health.get("health_index_raw"),
+        health_index_smoothed=health.get("health_index_smoothed"),
+        health_trend=health.get("health_trend"),
         health_state=health["health_state"],
         state_reason=health["state_reason"],
+        health_policy_id=str(health["health_policy_id"]),
+        alert_policy_id=str(health["alert_policy_id"]),
+        health_indicator_policy_id=(
+            None
+            if health.get("health_indicator_policy_id") is None
+            else str(health["health_indicator_policy_id"])
+        ),
+        dominant_evidence=(
+            None
+            if health.get("dominant_evidence") is None
+            else str(health["dominant_evidence"])
+        ),
     )
 
 
@@ -771,51 +940,23 @@ def _health_state_counts(
     score_min: float | None,
     score_max: float | None,
 ) -> dict[str, int | pd.Series | None]:
-    states = [
-        _health_values(row, score_min, score_max)["health_state"]
+    states: list[HealthState] = [
+        _health_values(row, score_min, score_max)["health_state"]  # type: ignore[list-item]
         for _, row in data.iterrows()
     ]
-    alert_flags = [state in {"warning", "critical"} for state in states]
-    alert_runs = _true_runs(alert_flags)
-    persistent_runs = [
-        item
-        for item in alert_runs
-        if item["length"] >= PERSISTENT_ALERT_MIN_WINDOWS
-    ]
-    first_persistent_index = (
-        None if not persistent_runs else persistent_runs[0]["start"]
-    )
+    summary = temporal_alert_summary(states, policy=DEFAULT_TEMPORAL_HEALTH_POLICY)
+    first_persistent_index = summary["first_persistent_index"]
     return {
-        "alert_points": sum(1 for state in states if state in {"warning", "critical"}),
-        "warning_points": sum(1 for state in states if state == "warning"),
-        "critical_points": sum(1 for state in states if state == "critical"),
-        "isolated_alert_points": sum(
-            item["length"]
-            for item in alert_runs
-            if item["length"] < PERSISTENT_ALERT_MIN_WINDOWS
-        ),
-        "alert_episodes": len(alert_runs),
-        "longest_alert_streak": (
-            0 if not alert_runs else max(item["length"] for item in alert_runs)
-        ),
+        "alert_points": summary["alert_points"],
+        "warning_points": summary["warning_points"],
+        "critical_points": summary["critical_points"],
+        "isolated_alert_points": summary["isolated_alert_points"],
+        "alert_episodes": summary["alert_episodes"],
+        "longest_alert_streak": summary["longest_alert_streak"],
         "first_persistent_alert": (
             None if first_persistent_index is None else data.iloc[first_persistent_index]
         ),
     }
-
-
-def _true_runs(flags: list[bool]) -> list[dict[str, int]]:
-    runs: list[dict[str, int]] = []
-    start: int | None = None
-    for index, flag in enumerate(flags):
-        if flag and start is None:
-            start = index
-        elif not flag and start is not None:
-            runs.append({"start": start, "length": index - start})
-            start = None
-    if start is not None:
-        runs.append({"start": start, "length": len(flags) - start})
-    return runs
 
 
 def _health_values(
@@ -823,73 +964,12 @@ def _health_values(
     score_min: float | None,
     score_max: float | None,
 ) -> dict[str, float | str | None]:
-    score = _optional_float(row.get("anomaly_score"))
-    threshold = _optional_float(row.get("threshold"))
-    predicted = _optional_int(row.get("predicted_anomaly"))
-    if score is None:
-        return {
-            "score_ratio": None,
-            "risk_index": None,
-            "health_index": None,
-            "health_state": "nominal",
-            "state_reason": "Sin anomaly_score numerico.",
-        }
-
-    score_ratio: float | None = None
-    if threshold is not None and threshold > 0:
-        score_ratio = score / threshold
-        risk_index = _clamp(score_ratio * 70.0, 0.0, 100.0)
-    elif score_min is not None and score_max is not None and score_max > score_min:
-        risk_index = _clamp(
-            ((score - score_min) / (score_max - score_min)) * 100.0,
-            0.0,
-            100.0,
-        )
-    else:
-        risk_index = 0.0
-
-    if predicted == 1:
-        risk_index = max(risk_index, 70.0)
-    health_index = _clamp(100.0 - risk_index, 0.0, 100.0)
-    state = _health_state(row, risk_index, predicted)
-    return {
-        "score_ratio": score_ratio,
-        "risk_index": risk_index,
-        "health_index": health_index,
-        "health_state": state,
-        "state_reason": _health_state_reason(state, score_ratio, predicted),
-    }
-
-
-def _health_state(
-    row: pd.Series,
-    risk_index: float,
-    predicted: int | None,
-) -> HealthState:
-    relative_life = _optional_float(row.get("relative_life"))
-    if predicted == 1 and (risk_index >= 95.0 or (relative_life or 0.0) >= 0.9):
-        return "critical"
-    if predicted == 1 or risk_index >= 70.0:
-        return "warning"
-    if risk_index >= 40.0:
-        return "watch"
-    return "nominal"
-
-
-def _health_state_reason(
-    state: HealthState,
-    score_ratio: float | None,
-    predicted: int | None,
-) -> str:
-    if state == "critical":
-        return "Alerta activa con riesgo muy alto o tramo final de vida."
-    if state == "warning":
-        return "El detector marca anomalia o el score supera el umbral operativo."
-    if state == "watch":
-        return "El score se aproxima al umbral; conviene vigilar tendencia."
-    if score_ratio is not None and predicted == 0:
-        return "Score por debajo del umbral operativo."
-    return "Sin senales de degradacion relevantes."
+    return temporal_health_values(
+        row,
+        score_min=score_min,
+        score_max=score_max,
+        policy=DEFAULT_TEMPORAL_HEALTH_POLICY,
+    )
 
 
 def _first_temporal_alert(data: pd.DataFrame) -> pd.Series | None:
@@ -1135,7 +1215,3 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(upper, value))

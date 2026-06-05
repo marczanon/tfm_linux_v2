@@ -22,6 +22,16 @@ from sklearn.metrics import (
 
 from codigo.app.schemas.executor_results import EvaluationExecutorResult
 from codigo.app.schemas.state import ArtifactRef, PipelineError
+from codigo.app.schemas.temporal_health import (
+    DEFAULT_TEMPORAL_HEALTH_INDICATOR_POLICY,
+    DEFAULT_TEMPORAL_HEALTH_POLICY,
+    HealthState,
+)
+from codigo.app.services.temporal_health_policy import (
+    temporal_alert_summary,
+    temporal_health_indicator_series,
+    temporal_health_population_metrics,
+)
 
 
 REQUIRED_COLUMNS = {
@@ -47,9 +57,15 @@ TEMPORAL_NUMERIC_COLUMNS = [
     "predicted_anomaly",
 ]
 
-NOMINAL_RELATIVE_LIFE_LIMIT = 0.4
-EARLY_RELATIVE_LIFE_LIMIT = 0.33
-LATE_RELATIVE_LIFE_LIMIT = 0.67
+NOMINAL_RELATIVE_LIFE_LIMIT = (
+    DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.nominal_relative_life_limit
+)
+EARLY_RELATIVE_LIFE_LIMIT = (
+    DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.early_relative_life_limit
+)
+LATE_RELATIVE_LIFE_LIMIT = (
+    DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.late_relative_life_limit
+)
 
 
 def generate_evaluation_report(
@@ -234,8 +250,19 @@ def _degradation_metrics(data: pd.DataFrame) -> dict[str, Any]:
     detected_runs = [
         item for item in run_metrics if item["detected_before_failure"] is True
     ]
+    confirmed_runs = [
+        item
+        for item in run_metrics
+        if item["confirmed_degradation_before_failure"] is True
+    ]
     missed_runs = [item for item in run_metrics if item["missed_failure"] is True]
+    missed_confirmed_runs = [
+        item for item in run_metrics if item["missed_confirmed_degradation"] is True
+    ]
     lead_times = [item["lead_time_to_failure"] for item in run_metrics]
+    persistent_lead_times = [
+        item["persistent_lead_time_to_failure"] for item in run_metrics
+    ]
     false_alarm_rates = [
         item["false_alarm_rate_nominal"] for item in run_metrics
     ]
@@ -243,31 +270,109 @@ def _degradation_metrics(data: pd.DataFrame) -> dict[str, Any]:
     separation_values = [
         item["initial_final_separation"] for item in run_metrics
     ]
+    isolated_alert_points = [item["isolated_alert_points"] for item in run_metrics]
+    alert_episodes = [item["alert_episodes"] for item in run_metrics]
+    longest_alert_streaks = [item["longest_alert_streak"] for item in run_metrics]
+    health_index_drops = [item["health_index_drop"] for item in run_metrics]
+    health_monotonicity = [item["health_monotonicity"] for item in run_metrics]
+    health_robustness = [item["health_robustness"] for item in run_metrics]
+    health_nominal_volatility = [
+        item["health_nominal_volatility"] for item in run_metrics
+    ]
+    health_trend_strength = [
+        item["health_degradation_trend_strength"] for item in run_metrics
+    ]
+    health_indicator_scores = [
+        item["health_indicator_score"] for item in run_metrics
+    ]
+    health_population = temporal_health_population_metrics(run_metrics)
     return {
         "available": True,
         "metric_type": "run_to_failure_degradation",
+        "health_policy_id": DEFAULT_TEMPORAL_HEALTH_POLICY.policy_id,
+        "alert_policy_id": DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.policy_id,
+        "health_indicator_policy_id": (
+            DEFAULT_TEMPORAL_HEALTH_INDICATOR_POLICY.policy_id
+        ),
+        "persistent_alert_min_windows": (
+            DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.persistent_alert_min_windows
+        ),
         "n_runs": int(len(run_metrics)),
         "n_windows": int(len(temporal)),
         "detected_runs": int(len(detected_runs)),
+        "confirmed_degradation_runs": int(len(confirmed_runs)),
         "missed_runs": int(len(missed_runs)),
+        "missed_confirmed_degradation_runs": int(len(missed_confirmed_runs)),
         "detected_before_failure_rate": _ratio(len(detected_runs), len(run_metrics)),
+        "confirmed_degradation_before_failure_rate": _ratio(
+            len(confirmed_runs),
+            len(run_metrics),
+        ),
         "median_lead_time_to_failure": _median_defined(lead_times),
         "mean_lead_time_to_failure": _mean_defined(lead_times),
+        "median_persistent_lead_time_to_failure": _median_defined(
+            persistent_lead_times
+        ),
+        "mean_persistent_lead_time_to_failure": _mean_defined(
+            persistent_lead_times
+        ),
         "mean_false_alarm_rate_nominal": _mean_defined(false_alarm_rates),
         "mean_score_trend_spearman": _mean_defined(trend_values),
         "mean_initial_final_separation": _mean_defined(separation_values),
+        "mean_isolated_alert_points": _mean_defined(isolated_alert_points),
+        "mean_alert_episodes": _mean_defined(alert_episodes),
+        "mean_longest_alert_streak": _mean_defined(longest_alert_streaks),
+        "mean_health_index_drop": _mean_defined(health_index_drops),
+        "mean_health_monotonicity": _mean_defined(health_monotonicity),
+        "mean_health_robustness": _mean_defined(health_robustness),
+        "mean_health_nominal_volatility": _mean_defined(health_nominal_volatility),
+        "mean_health_degradation_trend_strength": _mean_defined(
+            health_trend_strength
+        ),
+        "mean_health_indicator_score": _mean_defined(health_indicator_scores),
+        "health_trendability": health_population["health_trendability"],
+        "health_prognosability": health_population["health_prognosability"],
         "run_metrics": run_metrics,
         "notes": [
             "Temporal metrics use anomaly_score and alert chronology; binary "
             "classification metrics remain reported separately.",
             "Nominal false alarm rate uses label=normal when available; "
             f"otherwise relative_life <= {NOMINAL_RELATIVE_LIFE_LIMIT:.2f}.",
+            "Confirmed degradation requires a warning/critical streak with "
+            f"{DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.persistent_alert_min_windows} "
+            "consecutive windows under the declared temporal health policy.",
         ],
     }
 
 
 def _degradation_metrics_for_run(run_id: str, group: pd.DataFrame) -> dict[str, Any]:
     ordered = _temporal_order(group)
+    scores = ordered["anomaly_score"].dropna()
+    score_min = None if scores.empty else _safe_float(scores.min())
+    score_max = None if scores.empty else _safe_float(scores.max())
+    health_indicator = temporal_health_indicator_series(
+        ordered.to_dict("records"),
+        score_min=score_min,
+        score_max=score_max,
+        health_policy=DEFAULT_TEMPORAL_HEALTH_POLICY,
+        indicator_policy=DEFAULT_TEMPORAL_HEALTH_INDICATOR_POLICY,
+    )
+    health_points = health_indicator["points"]
+    health_metrics = health_indicator["metrics"]
+    health_states: list[HealthState] = [
+        str(point["health_state"])  # type: ignore[list-item]
+        for point in health_points
+    ]
+    alert_summary = temporal_alert_summary(
+        health_states,
+        policy=DEFAULT_TEMPORAL_HEALTH_POLICY,
+    )
+    first_persistent_index = alert_summary["first_persistent_index"]
+    first_persistent_alert = (
+        None
+        if first_persistent_index is None
+        else ordered.iloc[int(first_persistent_index)].to_dict()
+    )
     early = _relative_slice(ordered, upper=EARLY_RELATIVE_LIFE_LIMIT)
     late = _relative_slice(ordered, lower=LATE_RELATIVE_LIFE_LIMIT)
     early_mean = (
@@ -291,9 +396,29 @@ def _degradation_metrics_for_run(run_id: str, group: pd.DataFrame) -> dict[str, 
         if first_alert is None
         else True if lead_time is None else lead_time >= 0.0
     )
+    persistent_lead_time = (
+        None
+        if first_persistent_alert is None
+        else _safe_float(first_persistent_alert.get("time_to_failure_seconds"))
+    )
+    confirmed_degradation_before_failure = (
+        False
+        if first_persistent_alert is None
+        else True if persistent_lead_time is None else persistent_lead_time >= 0.0
+    )
     missed_failure = first_alert is None or detected_before_failure is False
+    missed_confirmed_degradation = (
+        first_persistent_alert is None
+        or confirmed_degradation_before_failure is False
+    )
     return {
         "run_id": run_id,
+        "health_policy_id": DEFAULT_TEMPORAL_HEALTH_POLICY.policy_id,
+        "alert_policy_id": DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.policy_id,
+        "health_indicator_policy_id": health_indicator["policy_id"],
+        "persistent_alert_min_windows": (
+            DEFAULT_TEMPORAL_HEALTH_POLICY.alert_policy.persistent_alert_min_windows
+        ),
         "n_windows": int(len(ordered)),
         "first_alert_time": (
             None if first_alert is None else _first_alert_time(first_alert)
@@ -311,8 +436,46 @@ def _degradation_metrics_for_run(run_id: str, group: pd.DataFrame) -> dict[str, 
         "lead_time_to_failure": lead_time,
         "detected_before_failure": bool(detected_before_failure),
         "missed_failure": bool(missed_failure),
+        "first_persistent_alert_time": (
+            None
+            if first_persistent_alert is None
+            else _first_alert_time(first_persistent_alert)
+        ),
+        "first_persistent_alert_relative_life": (
+            None
+            if first_persistent_alert is None
+            else _safe_float(first_persistent_alert.get("relative_life"))
+        ),
+        "time_to_confirmed_degradation": (
+            None
+            if first_persistent_alert is None
+            else _safe_float(first_persistent_alert.get("time_since_start_seconds"))
+        ),
+        "persistent_lead_time_to_failure": persistent_lead_time,
+        "confirmed_degradation_before_failure": bool(
+            confirmed_degradation_before_failure
+        ),
+        "missed_confirmed_degradation": bool(missed_confirmed_degradation),
         "false_alarm_rate_nominal": _false_alarm_rate_nominal(ordered),
         "alert_persistence": _max_consecutive_alerts(ordered["predicted_anomaly"]),
+        "isolated_alert_points": int(alert_summary["isolated_alert_points"] or 0),
+        "alert_episodes": int(alert_summary["alert_episodes"] or 0),
+        "longest_alert_streak": int(alert_summary["longest_alert_streak"] or 0),
+        "initial_health_index": health_metrics["initial_health_index"],
+        "final_health_index": health_metrics["final_health_index"],
+        "health_index_drop": health_metrics["health_index_drop"],
+        "health_index_drop_ratio": health_metrics["health_index_drop_ratio"],
+        "health_slope": health_metrics["health_slope"],
+        "health_trend_spearman": health_metrics["health_trend_spearman"],
+        "health_degradation_trend_strength": health_metrics[
+            "health_degradation_trend_strength"
+        ],
+        "health_monotonicity": health_metrics["health_monotonicity"],
+        "health_robustness": health_metrics["health_robustness"],
+        "health_nominal_volatility": health_metrics["health_nominal_volatility"],
+        "health_indicator_score": health_metrics["health_indicator_score"],
+        "health_dominant_evidence": health_metrics["health_dominant_evidence"],
+        "health_indicator_status": health_metrics["health_indicator_status"],
         "score_trend_spearman": _spearman(
             ordered["relative_life"], ordered["anomaly_score"]
         ),
@@ -568,25 +731,38 @@ def _degradation_report_markdown(metrics: dict[str, Any]) -> list[str]:
         "",
         f"- Runs evaluados: `{metrics['n_runs']}`",
         f"- Ventanas temporales: `{metrics['n_windows']}`",
+        f"- Politica de salud temporal: `{metrics['health_policy_id']}`",
+        f"- Politica de Health Indicator: `{metrics['health_indicator_policy_id']}`",
+        f"- Politica de persistencia: `{metrics['alert_policy_id']}` "
+        f"({metrics['persistent_alert_min_windows']} ventanas)",
         f"- Runs detectados antes de fallo: `{metrics['detected_runs']}`",
+        f"- Runs con degradacion confirmada antes de fallo: `{metrics['confirmed_degradation_runs']}`",
         f"- Runs perdidos: `{metrics['missed_runs']}`",
         f"- Lead time medio a fallo: `{_format_optional(metrics['mean_lead_time_to_failure'])}`",
+        f"- Lead time medio persistente a fallo: `{_format_optional(metrics['mean_persistent_lead_time_to_failure'])}`",
         f"- Falsa alarma nominal media: `{_format_optional(metrics['mean_false_alarm_rate_nominal'])}`",
         f"- Tendencia Spearman media: `{_format_optional(metrics['mean_score_trend_spearman'])}`",
         f"- Separacion inicial-final media: `{_format_optional(metrics['mean_initial_final_separation'])}`",
+        f"- Caida media del Health Index: `{_format_optional(metrics['mean_health_index_drop'])}`",
+        f"- Monotonicidad media del Health Index: `{_format_optional(metrics['mean_health_monotonicity'])}`",
+        f"- Robustez media del Health Index: `{_format_optional(metrics['mean_health_robustness'])}`",
+        f"- Volatilidad nominal media del Health Index: `{_format_optional(metrics['mean_health_nominal_volatility'])}`",
         "",
-        "| run_id | first_alert | lead_time_to_failure | false_alarm_rate_nominal | trend_spearman | missed_failure |",
-        "| --- | ---: | ---: | ---: | ---: | --- |",
+        "| run_id | first_alert | first_persistent | persistent_lead_time | health_drop | health_monotonicity | health_robustness | false_alarm_rate_nominal | missed_confirmed |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for item in metrics["run_metrics"][:12]:
         lines.append(
             "| "
             f"{item['run_id']} | "
             f"{_format_optional(item['first_alert_relative_life'])} | "
-            f"{_format_optional(item['lead_time_to_failure'])} | "
+            f"{_format_optional(item['first_persistent_alert_relative_life'])} | "
+            f"{_format_optional(item['persistent_lead_time_to_failure'])} | "
+            f"{_format_optional(item['health_index_drop'])} | "
+            f"{_format_optional(item['health_monotonicity'])} | "
+            f"{_format_optional(item['health_robustness'])} | "
             f"{_format_optional(item['false_alarm_rate_nominal'])} | "
-            f"{_format_optional(item['score_trend_spearman'])} | "
-            f"{item['missed_failure']} |"
+            f"{item['missed_confirmed_degradation']} |"
         )
     lines.append("")
     return lines

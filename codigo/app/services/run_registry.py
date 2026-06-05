@@ -27,11 +27,25 @@ MetricFamily = Literal["binary_classification", "run_to_failure_degradation"]
 
 DEGRADATION_METRIC_NAMES = [
     "degradation_detected_before_failure_rate",
+    "degradation_confirmed_degradation_before_failure_rate",
     "degradation_mean_lead_time_to_failure",
+    "degradation_mean_persistent_lead_time_to_failure",
     "degradation_mean_false_alarm_rate_nominal",
     "degradation_mean_score_trend_spearman",
     "degradation_missed_runs",
+    "degradation_missed_confirmed_degradation_runs",
     "degradation_mean_initial_final_separation",
+    "degradation_mean_isolated_alert_points",
+    "degradation_mean_alert_episodes",
+    "degradation_mean_longest_alert_streak",
+    "degradation_mean_health_index_drop",
+    "degradation_mean_health_monotonicity",
+    "degradation_mean_health_robustness",
+    "degradation_mean_health_nominal_volatility",
+    "degradation_mean_health_degradation_trend_strength",
+    "degradation_mean_health_indicator_score",
+    "degradation_health_trendability",
+    "degradation_health_prognosability",
 ]
 
 
@@ -53,12 +67,30 @@ class RunComparisonRow(StrictBaseModel):
     false_positive_rate: float | None = None
     degradation_available: bool | None = None
     degradation_n_runs: int | None = None
+    degradation_health_policy_id: str | None = None
+    degradation_alert_policy_id: str | None = None
+    degradation_health_indicator_policy_id: str | None = None
+    degradation_persistent_alert_min_windows: int | None = None
     degradation_detected_before_failure_rate: float | None = None
+    degradation_confirmed_degradation_before_failure_rate: float | None = None
     degradation_mean_lead_time_to_failure: float | None = None
+    degradation_mean_persistent_lead_time_to_failure: float | None = None
     degradation_mean_false_alarm_rate_nominal: float | None = None
     degradation_mean_score_trend_spearman: float | None = None
     degradation_missed_runs: int | None = None
+    degradation_missed_confirmed_degradation_runs: int | None = None
     degradation_mean_initial_final_separation: float | None = None
+    degradation_mean_isolated_alert_points: float | None = None
+    degradation_mean_alert_episodes: float | None = None
+    degradation_mean_longest_alert_streak: float | None = None
+    degradation_mean_health_index_drop: float | None = None
+    degradation_mean_health_monotonicity: float | None = None
+    degradation_mean_health_robustness: float | None = None
+    degradation_mean_health_nominal_volatility: float | None = None
+    degradation_mean_health_degradation_trend_strength: float | None = None
+    degradation_mean_health_indicator_score: float | None = None
+    degradation_health_trendability: float | None = None
+    degradation_health_prognosability: float | None = None
     report_path: str | None = None
     snapshot_path: str = Field(min_length=1)
 
@@ -312,16 +344,52 @@ def _comparison_row(entry: RunIndexEntry, snapshot: RunSnapshot) -> RunCompariso
         degradation_n_runs=_optional_int(
             extra.get("degradation_n_runs", degradation.get("n_runs"))
         ),
+        degradation_health_policy_id=_optional_text(
+            extra.get(
+                "degradation_health_policy_id",
+                degradation.get("health_policy_id"),
+            )
+        ),
+        degradation_alert_policy_id=_optional_text(
+            extra.get(
+                "degradation_alert_policy_id",
+                degradation.get("alert_policy_id"),
+            )
+        ),
+        degradation_health_indicator_policy_id=_optional_text(
+            extra.get(
+                "degradation_health_indicator_policy_id",
+                degradation.get("health_indicator_policy_id"),
+            )
+        ),
+        degradation_persistent_alert_min_windows=_optional_int(
+            extra.get(
+                "degradation_persistent_alert_min_windows",
+                degradation.get("persistent_alert_min_windows"),
+            )
+        ),
         degradation_detected_before_failure_rate=_optional_float(
             extra.get(
                 "degradation_detected_before_failure_rate",
                 degradation.get("detected_before_failure_rate"),
             )
         ),
+        degradation_confirmed_degradation_before_failure_rate=_optional_float(
+            extra.get(
+                "degradation_confirmed_degradation_before_failure_rate",
+                degradation.get("confirmed_degradation_before_failure_rate"),
+            )
+        ),
         degradation_mean_lead_time_to_failure=_optional_float(
             extra.get(
                 "degradation_mean_lead_time_to_failure",
                 degradation.get("mean_lead_time_to_failure"),
+            )
+        ),
+        degradation_mean_persistent_lead_time_to_failure=_optional_float(
+            extra.get(
+                "degradation_mean_persistent_lead_time_to_failure",
+                degradation.get("mean_persistent_lead_time_to_failure"),
             )
         ),
         degradation_mean_false_alarm_rate_nominal=_optional_float(
@@ -339,10 +407,82 @@ def _comparison_row(entry: RunIndexEntry, snapshot: RunSnapshot) -> RunCompariso
         degradation_missed_runs=_optional_int(
             extra.get("degradation_missed_runs", degradation.get("missed_runs"))
         ),
+        degradation_missed_confirmed_degradation_runs=_optional_int(
+            extra.get(
+                "degradation_missed_confirmed_degradation_runs",
+                degradation.get("missed_confirmed_degradation_runs"),
+            )
+        ),
         degradation_mean_initial_final_separation=_optional_float(
             extra.get(
                 "degradation_mean_initial_final_separation",
                 degradation.get("mean_initial_final_separation"),
+            )
+        ),
+        degradation_mean_isolated_alert_points=_optional_float(
+            extra.get(
+                "degradation_mean_isolated_alert_points",
+                degradation.get("mean_isolated_alert_points"),
+            )
+        ),
+        degradation_mean_alert_episodes=_optional_float(
+            extra.get(
+                "degradation_mean_alert_episodes",
+                degradation.get("mean_alert_episodes"),
+            )
+        ),
+        degradation_mean_longest_alert_streak=_optional_float(
+            extra.get(
+                "degradation_mean_longest_alert_streak",
+                degradation.get("mean_longest_alert_streak"),
+            )
+        ),
+        degradation_mean_health_index_drop=_optional_float(
+            extra.get(
+                "degradation_mean_health_index_drop",
+                degradation.get("mean_health_index_drop"),
+            )
+        ),
+        degradation_mean_health_monotonicity=_optional_float(
+            extra.get(
+                "degradation_mean_health_monotonicity",
+                degradation.get("mean_health_monotonicity"),
+            )
+        ),
+        degradation_mean_health_robustness=_optional_float(
+            extra.get(
+                "degradation_mean_health_robustness",
+                degradation.get("mean_health_robustness"),
+            )
+        ),
+        degradation_mean_health_nominal_volatility=_optional_float(
+            extra.get(
+                "degradation_mean_health_nominal_volatility",
+                degradation.get("mean_health_nominal_volatility"),
+            )
+        ),
+        degradation_mean_health_degradation_trend_strength=_optional_float(
+            extra.get(
+                "degradation_mean_health_degradation_trend_strength",
+                degradation.get("mean_health_degradation_trend_strength"),
+            )
+        ),
+        degradation_mean_health_indicator_score=_optional_float(
+            extra.get(
+                "degradation_mean_health_indicator_score",
+                degradation.get("mean_health_indicator_score"),
+            )
+        ),
+        degradation_health_trendability=_optional_float(
+            extra.get(
+                "degradation_health_trendability",
+                degradation.get("health_trendability"),
+            )
+        ),
+        degradation_health_prognosability=_optional_float(
+            extra.get(
+                "degradation_health_prognosability",
+                degradation.get("health_prognosability"),
             )
         ),
         report_path=entry.report_path,
@@ -395,11 +535,25 @@ def _degradation_metric_comparisons(
         return []
     higher_is_better = {
         "degradation_detected_before_failure_rate": True,
+        "degradation_confirmed_degradation_before_failure_rate": True,
         "degradation_mean_lead_time_to_failure": True,
+        "degradation_mean_persistent_lead_time_to_failure": True,
         "degradation_mean_false_alarm_rate_nominal": False,
         "degradation_mean_score_trend_spearman": True,
         "degradation_missed_runs": False,
+        "degradation_missed_confirmed_degradation_runs": False,
         "degradation_mean_initial_final_separation": True,
+        "degradation_mean_isolated_alert_points": False,
+        "degradation_mean_alert_episodes": False,
+        "degradation_mean_longest_alert_streak": True,
+        "degradation_mean_health_index_drop": True,
+        "degradation_mean_health_monotonicity": True,
+        "degradation_mean_health_robustness": True,
+        "degradation_mean_health_nominal_volatility": False,
+        "degradation_mean_health_degradation_trend_strength": True,
+        "degradation_mean_health_indicator_score": True,
+        "degradation_health_trendability": True,
+        "degradation_health_prognosability": True,
     }
     return [
         _metric_comparison(

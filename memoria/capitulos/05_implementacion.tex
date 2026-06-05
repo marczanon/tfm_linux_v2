@@ -2514,3 +2514,77 @@ memoria y no hay uso invalido, pero al ejecutarse sin LLM no se evalua todavia
 la cita ni la influencia deliberativa de Qwen. Esa validacion queda reservada
 para una run posterior con agentes LLM y, preferentemente, con el perfil
 \texttt{run\_to\_failure\_degradation}.
+
+\section{Fase 9: cierre del perfil run-to-failure avanzado}
+
+La Fase 9 culmina la linea temporal iniciada en Fase 7 y agentificada en Fase
+8. El objetivo no es crear un runner paralelo para run-to-failure, sino elevar
+el perfil \texttt{run\_to\_failure\_degradation} reutilizando el runner comun,
+los contratos Pydantic, las herramientas agenticas, la memoria y el registro de
+runs ya existentes. De este modo, la mejora no desplaza a los agentes Qwen/LLM:
+les proporciona mas evidencia y mas familias de modelo dentro de fronteras
+estrictas.
+
+El primer bloque implementa una suite canonica de modelos temporales. En
+\texttt{experiment\_protocol.py} se define un plan comparable para PCA por
+error de reconstruccion, Isolation Forest, One-Class SVM y, posteriormente,
+\texttt{autoencoder\_dense}. El script
+\texttt{run\_run\_to\_failure\_model\_suite.py} materializa la suite usando el
+runner comun y persiste tabla de resultados, comparacion y artefactos por run.
+Con ello, una decision del \texttt{modeler} puede transformarse en un plan
+experimental auditable sin crear logica paralela.
+
+El segundo bloque introduce politicas temporales versionadas. La politica
+\texttt{temporal\_health\_policy\_v1} diferencia primer pico, aviso sostenido,
+onset confirmado, episodios de alerta, picos aislados y racha maxima. Las
+metricas de evaluacion se centran en degradacion confirmada antes de fallo,
+\texttt{lead time} persistente, falsas alarmas nominales y tendencia Spearman
+del score. Las metricas binarias se conservan como apoyo cuando proceden de
+etiquetas proxy, pero dejan de ser el criterio principal del perfil.
+
+El tercer bloque incorpora un Health Indicator avanzado. La politica
+\texttt{health\_indicator\_policy\_v1} genera un indicador causal de salud a
+partir del score temporal y calcula caida del indicador, monotonicidad,
+robustez, volatilidad nominal, fuerza de tendencia y un score agregado de
+calidad. Estas metricas se anaden a \texttt{MetricsReport.extra}, a la tabla de
+comparacion de la suite y al contexto que reciben evaluador y redactor. El
+Health Indicator se presenta como evidencia auxiliar de degradacion, no como
+pronostico industrial completo.
+
+El cuarto bloque implementa una herramienta de readiness para modelos
+temporales avanzados. \texttt{temporal\_model\_readiness\_assessor} evalua
+numero de ventanas, ventanas nominales de entrenamiento, numero de features,
+trayectorias disponibles y riesgo de fuga temporal. Devuelve indicadores como
+\texttt{autoencoder\_ready}, \texttt{rul\_ready} y motivos de bloqueo o
+cautela. El \texttt{modeler} solo puede proponer modelos avanzados si cita esta
+herramienta y referencias \texttt{readiness:*}; asi se evita que Qwen use
+complejidad adicional sin evidencia suficiente.
+
+El quinto bloque incorpora \texttt{autoencoder\_dense} con PyTorch. La
+implementacion vive en el ejecutor de modelado y mantiene hiperparametros
+cerrados: capas ocultas, dimension latente, \texttt{learning\_rate},
+\texttt{batch\_size}, \texttt{max\_epochs}, paciencia, regularizacion,
+cuantil de umbral y dispositivo CPU por defecto. El agente no inventa
+arquitecturas ni ejecuta codigo. El ejecutor guarda
+\texttt{autoencoder\_dense.pt}, \texttt{autoencoder\_dense\_scaler.joblib},
+\texttt{autoencoder\_dense\_training\_curve.json},
+\texttt{predictions.csv} y \texttt{modeling\_summary.json}. Si PyTorch no esta
+disponible, el error queda declarado de forma controlada.
+
+El sexto bloque refuerza la robustez de las salidas LLM. La clase
+\texttt{OllamaJSONClient} realiza ahora una reparacion JSON estructurada antes
+de declarar una respuesta irrecuperable. Ademas, \texttt{supervisor},
+\texttt{evaluator}, \texttt{report\_writer} y \texttt{report\_verifier}
+realizan un reintento de contrato ante salidas validables pero incorrectas.
+Cuando el problema es una violacion del contrato, la traza se registra como
+\texttt{Guardrail correction}; el texto \texttt{Fallback after LLM failure} se
+reserva para fallos tecnicos del proveedor, conexion o JSON irrecuperable. Esta
+distincion mejora la evidencia de un proyecto centrado en agentes: el sistema
+no oculta errores, pero tampoco presenta como fallo del LLM una correccion
+metodologica esperada.
+
+La fase queda cerrada sin implementar RUL completo ni LSTM autoencoder. Esa
+decision es deliberada: el sistema ya puede separar anomalia, degradacion,
+Health Indicator, readiness y recomendacion agentica, pero no debe comunicar
+vida util restante con falsa precision. RUL experimental y segundo dataset
+run-to-failure quedan como trabajo futuro sobre una base temporal ya validada.

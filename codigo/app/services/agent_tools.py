@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 from typing import Any
 
 from codigo.app.schemas.reasoning import (
@@ -13,10 +14,14 @@ from codigo.app.schemas.reasoning import (
 )
 from codigo.app.schemas.state import TFMStateModel
 from codigo.app.services.run_visualization import build_temporal_series_from_predictions
+from codigo.app.services.temporal_model_readiness import (
+    assess_temporal_model_readiness,
+)
 
 EVIDENCE_LOOKUP_TOOL = "evidence_lookup"
 TEMPORAL_HEALTH_LOOKUP_TOOL = "temporal_health_lookup"
 DEGRADATION_METRICS_LOOKUP_TOOL = "degradation_metrics_lookup"
+TEMPORAL_MODEL_READINESS_TOOL = "temporal_model_readiness_assessor"
 THRESHOLD_ANALYSIS_TOOL = "threshold_analysis"
 
 EVIDENCE_LOOKUP_SECTIONS = {
@@ -49,21 +54,53 @@ MAX_TEMPORAL_RUN_LIMIT = 20
 DEGRADATION_METRIC_NAMES = [
     "degradation_available",
     "degradation_n_runs",
+    "degradation_health_policy_id",
+    "degradation_alert_policy_id",
+    "degradation_persistent_alert_min_windows",
     "degradation_detected_before_failure_rate",
+    "degradation_confirmed_degradation_before_failure_rate",
     "degradation_mean_lead_time_to_failure",
+    "degradation_mean_persistent_lead_time_to_failure",
     "degradation_mean_false_alarm_rate_nominal",
     "degradation_mean_score_trend_spearman",
     "degradation_missed_runs",
+    "degradation_missed_confirmed_degradation_runs",
     "degradation_mean_initial_final_separation",
+    "degradation_mean_isolated_alert_points",
+    "degradation_mean_alert_episodes",
+    "degradation_mean_longest_alert_streak",
+    "degradation_health_indicator_policy_id",
+    "degradation_mean_health_index_drop",
+    "degradation_mean_health_monotonicity",
+    "degradation_mean_health_robustness",
+    "degradation_mean_health_nominal_volatility",
+    "degradation_mean_health_degradation_trend_strength",
+    "degradation_mean_health_indicator_score",
+    "degradation_health_trendability",
+    "degradation_health_prognosability",
 ]
 
 DEGRADATION_METRIC_ALIASES = {
     "degradation_detected_before_failure_rate": "detected_before_failure_rate",
+    "degradation_confirmed_degradation_before_failure_rate": "confirmed_degradation_before_failure_rate",
     "degradation_mean_lead_time_to_failure": "mean_lead_time_to_failure",
+    "degradation_mean_persistent_lead_time_to_failure": "mean_persistent_lead_time_to_failure",
     "degradation_mean_false_alarm_rate_nominal": "mean_false_alarm_rate_nominal",
     "degradation_mean_score_trend_spearman": "mean_score_trend_spearman",
     "degradation_missed_runs": "missed_runs",
+    "degradation_missed_confirmed_degradation_runs": "missed_confirmed_degradation_runs",
     "degradation_mean_initial_final_separation": "mean_initial_final_separation",
+    "degradation_mean_isolated_alert_points": "mean_isolated_alert_points",
+    "degradation_mean_alert_episodes": "mean_alert_episodes",
+    "degradation_mean_longest_alert_streak": "mean_longest_alert_streak",
+    "degradation_mean_health_index_drop": "mean_health_index_drop",
+    "degradation_mean_health_monotonicity": "mean_health_monotonicity",
+    "degradation_mean_health_robustness": "mean_health_robustness",
+    "degradation_mean_health_nominal_volatility": "mean_health_nominal_volatility",
+    "degradation_mean_health_degradation_trend_strength": "mean_health_degradation_trend_strength",
+    "degradation_mean_health_indicator_score": "mean_health_indicator_score",
+    "degradation_health_trendability": "health_trendability",
+    "degradation_health_prognosability": "health_prognosability",
 }
 
 ALL_TOOL_AGENTS: list[AgentToolAgent] = [
@@ -88,6 +125,7 @@ def agent_tool_catalog(
         _evidence_lookup_spec(),
         _temporal_health_lookup_spec(),
         _degradation_metrics_lookup_spec(),
+        _temporal_model_readiness_spec(),
         _threshold_analysis_spec(),
     ]
     if agent_name is None:
@@ -134,6 +172,11 @@ def run_agent_tool_request(
     if request.tool_name == DEGRADATION_METRICS_LOOKUP_TOOL:
         try:
             return _run_degradation_metrics_lookup(state, request)
+        except ValueError as exc:
+            return _failed_observation(request, str(exc))
+    if request.tool_name == TEMPORAL_MODEL_READINESS_TOOL:
+        try:
+            return _run_temporal_model_readiness(state, request)
         except ValueError as exc:
             return _failed_observation(request, str(exc))
     if request.tool_name == THRESHOLD_ANALYSIS_TOOL:
@@ -316,6 +359,27 @@ def _degradation_metrics_lookup_spec() -> AgentToolSpec:
     )
 
 
+def _temporal_model_readiness_spec() -> AgentToolSpec:
+    return AgentToolSpec(
+        tool_name=TEMPORAL_MODEL_READINESS_TOOL,
+        description=(
+            "Evalua si la run tiene datos suficientes para autoencoder denso "
+            "o RUL experimental sin entrenar modelos ni crear artefactos."
+        ),
+        allowed_agents=ALL_TOOL_AGENTS,
+        effect="read_only",
+        input_schema={},
+        output_schema={
+            "summary": "human readable readiness observation",
+            "evidence_refs": "closed list of readiness refs the agent may cite",
+            "payload": "structured readiness assessment",
+        },
+        human_summary_template=(
+            "{agent_name} consulta readiness temporal para modelos avanzados."
+        ),
+    )
+
+
 def _threshold_analysis_spec() -> AgentToolSpec:
     return AgentToolSpec(
         tool_name=THRESHOLD_ANALYSIS_TOOL,
@@ -450,6 +514,39 @@ def _run_degradation_metrics_lookup(
     refs = _degradation_metric_refs(catalog)
     refs.append(f"tool:{DEGRADATION_METRICS_LOOKUP_TOOL}")
     summary = _degradation_metrics_summary(payload)
+    return AgentToolObservation(
+        observation_id=f"{request.request_id}:observation:001",
+        request_id=request.request_id,
+        run_id=request.run_id,
+        agent_name=request.agent_name,
+        tool_name=request.tool_name,
+        status="success",
+        summary=summary,
+        evidence_refs=sorted(set(refs)),
+        payload=payload,
+    )
+
+
+def _run_temporal_model_readiness(
+    state: TFMStateModel,
+    request: AgentToolRequest,
+) -> AgentToolObservation:
+    features_path = _features_path_for_readiness(state)
+    predictions = _predictions_artifact(state)
+    assessment = assess_temporal_model_readiness(
+        features_path=features_path,
+        predictions_path=None if predictions is None else predictions.path,
+        splits_path=state.splits_path,
+    )
+    payload = assessment.model_dump(mode="json")
+    payload["interpretation_guardrail"] = (
+        "temporal_model_readiness_assessor no entrena modelos, no estima RUL "
+        "y no autoriza arquitectura libre; solo evalua si procede proponer "
+        "autoencoder_dense o RUL experimental bajo contratos cerrados."
+    )
+    refs = _readiness_refs(state, payload)
+    refs.append(f"tool:{TEMPORAL_MODEL_READINESS_TOOL}")
+    summary = _readiness_summary(payload)
     return AgentToolObservation(
         observation_id=f"{request.request_id}:observation:001",
         request_id=request.request_id,
@@ -599,11 +696,30 @@ def _selected_evidence_refs(
             or ref.startswith("metric_extra:degradation_")
             or ref in {
                 "metric:detected_before_failure_rate",
+                "metric:confirmed_degradation_before_failure_rate",
                 "metric:mean_lead_time_to_failure",
+                "metric:mean_persistent_lead_time_to_failure",
                 "metric:mean_false_alarm_rate_nominal",
                 "metric:mean_score_trend_spearman",
                 "metric:missed_runs",
+                "metric:missed_confirmed_degradation_runs",
                 "metric:mean_initial_final_separation",
+                "metric:mean_isolated_alert_points",
+                "metric:mean_alert_episodes",
+                "metric:mean_longest_alert_streak",
+                "metric:mean_health_index_drop",
+                "metric:mean_health_monotonicity",
+                "metric:mean_health_robustness",
+                "metric:mean_health_nominal_volatility",
+                "metric:mean_health_degradation_trend_strength",
+                "metric:mean_health_indicator_score",
+                "metric:health_trendability",
+                "metric:health_prognosability",
+                "health:indicator_available",
+                "health:monotonicity",
+                "health:robustness",
+                "health:onset_confirmed",
+                "health:dominant_evidence",
             }
         )
     if "evaluation" in include:
@@ -742,6 +858,24 @@ def _temporal_evidence_pack(state: TFMStateModel) -> dict[str, Any]:
                 "warnings": temporal_series.warnings,
             }
         ),
+        "temporal_policy": (
+            None
+            if temporal_series is None or not run_summaries
+            else {
+                "health_policy_id": run_summaries[0]["policy"][
+                    "health_policy_id"
+                ],
+                "alert_policy_id": run_summaries[0]["policy"][
+                    "alert_policy_id"
+                ],
+                "health_indicator_policy_id": run_summaries[0]["policy"][
+                    "health_indicator_policy_id"
+                ],
+                "persistent_alert_min_windows": run_summaries[0]["policy"][
+                    "persistent_alert_min_windows"
+                ],
+            }
+        ),
         "primary_run": None if not run_summaries else run_summaries[0],
         "runs_sample": run_summaries,
         "n_runs_returned": len(run_summaries),
@@ -769,6 +903,11 @@ def _degradation_metrics_payload(state: TFMStateModel) -> dict[str, Any]:
         "raw": raw,
         "aliases": aliases,
         "primary_names": [
+            "confirmed_degradation_before_failure_rate",
+            "mean_persistent_lead_time_to_failure",
+            "mean_health_index_drop",
+            "mean_health_monotonicity",
+            "mean_health_robustness",
             "detected_before_failure_rate",
             "mean_lead_time_to_failure",
             "mean_false_alarm_rate_nominal",
@@ -785,14 +924,40 @@ def _temporal_run_summary(run: Any) -> dict[str, Any]:
         "n_windows": run.n_points_total,
         "n_points_sampled": run.n_points_sampled,
         "threshold": run.threshold,
+        "policy": {
+            "health_policy_id": run.health_policy_id,
+            "alert_policy_id": run.alert_policy_id,
+            "health_indicator_policy_id": run.health_indicator_policy_id,
+            "persistent_alert_min_windows": run.persistent_alert_min_windows,
+        },
         "current": {
             "x": run.current_x,
             "time": run.current_time,
             "time_to_failure_seconds": run.current_time_to_failure_seconds,
             "health_state": run.current_health_state,
             "health_index": run.current_health_index,
+            "health_index_smoothed": run.current_health_index_smoothed,
+            "health_trend": run.current_health_trend,
             "risk_index": run.current_risk_index,
+            "risk_index_smoothed": run.current_risk_index_smoothed,
             "reason": run.current_state_reason,
+        },
+        "health_indicator": {
+            "initial_health_index": run.health_initial_index,
+            "final_health_index": run.health_final_index,
+            "health_index_drop": run.health_index_drop,
+            "health_index_drop_ratio": run.health_index_drop_ratio,
+            "health_slope": run.health_slope,
+            "health_trend_spearman": run.health_trend_spearman,
+            "health_degradation_trend_strength": (
+                run.health_degradation_trend_strength
+            ),
+            "health_monotonicity": run.health_monotonicity,
+            "health_robustness": run.health_robustness,
+            "health_nominal_volatility": run.health_nominal_volatility,
+            "health_indicator_score": run.health_indicator_score,
+            "health_dominant_evidence": run.health_dominant_evidence,
+            "health_indicator_status": run.health_indicator_status,
         },
         "first_spike": {
             "x": run.first_alert_x,
@@ -806,6 +971,15 @@ def _temporal_run_summary(run: Any) -> dict[str, Any]:
                 run.first_persistent_alert_time_to_failure_seconds
             ),
             "min_consecutive_windows": run.persistent_alert_min_windows,
+        },
+        "onset_confirmed": {
+            "confirmed": run.onset_confirmed,
+            "x": run.onset_confirmed_x,
+            "time": run.onset_confirmed_time,
+            "time_to_failure_seconds": (
+                run.onset_confirmed_time_to_failure_seconds
+            ),
+            "policy_ref": f"policy:{run.health_policy_id}",
         },
         "episodes": {
             "alert_points": run.alert_points,
@@ -875,6 +1049,7 @@ def _temporal_health_refs(catalog: dict[str, Any]) -> list[str]:
         ref
         for ref in catalog["allowed_evidence_refs"]
         if ref.startswith("temporal:")
+        or ref.startswith("health:")
         or ref.startswith("supervision_profile:")
         or ref.startswith("label_source:")
         or ref.startswith("label_granularity:")
@@ -888,16 +1063,31 @@ def _degradation_metric_refs(catalog: dict[str, Any]) -> list[str]:
         for ref in catalog["allowed_evidence_refs"]
         if ref.startswith("metric:degradation_")
         or ref.startswith("metric_extra:degradation_")
+        or ref.startswith("health:")
         or ref.startswith("supervision_profile:")
         or ref.startswith("label_source:")
         or ref.startswith("label_granularity:")
         or ref in {
             "metric:detected_before_failure_rate",
+            "metric:confirmed_degradation_before_failure_rate",
             "metric:mean_lead_time_to_failure",
+            "metric:mean_persistent_lead_time_to_failure",
             "metric:mean_false_alarm_rate_nominal",
             "metric:mean_score_trend_spearman",
             "metric:missed_runs",
+            "metric:missed_confirmed_degradation_runs",
             "metric:mean_initial_final_separation",
+            "metric:mean_isolated_alert_points",
+            "metric:mean_alert_episodes",
+            "metric:mean_longest_alert_streak",
+            "metric:mean_health_index_drop",
+            "metric:mean_health_monotonicity",
+            "metric:mean_health_robustness",
+            "metric:mean_health_nominal_volatility",
+            "metric:mean_health_degradation_trend_strength",
+            "metric:mean_health_indicator_score",
+            "metric:health_trendability",
+            "metric:health_prognosability",
         }
     ]
 
@@ -925,13 +1115,32 @@ def _degradation_metrics_summary(payload: dict[str, Any]) -> str:
             "disponibles para el perfil run-to-failure."
         )
     metrics = payload["primary_metrics"]
-    lead_time = metrics.get("mean_lead_time_to_failure")
+    confirmed = metrics.get("confirmed_degradation_before_failure_rate")
+    lead_time = metrics.get("mean_persistent_lead_time_to_failure")
+    if lead_time is None:
+        lead_time = metrics.get("mean_lead_time_to_failure")
     false_alarm = metrics.get("mean_false_alarm_rate_nominal")
     trend = metrics.get("mean_score_trend_spearman")
+    health_drop = metrics.get("mean_health_index_drop")
+    health_monotonicity = metrics.get("mean_health_monotonicity")
     return (
         "degradation_metrics_lookup devolvio metricas temporales primarias: "
-        f"lead_time={lead_time}, falsas_alarmas={false_alarm}, "
-        f"tendencia={trend}."
+        f"onset_confirmado={confirmed}, lead_time={lead_time}, falsas_alarmas={false_alarm}, "
+        f"tendencia={trend}, caida_hi={health_drop}, monotonicidad_hi={health_monotonicity}."
+    )
+
+
+def _readiness_summary(payload: dict[str, Any]) -> str:
+    if not payload.get("available"):
+        return (
+            "temporal_model_readiness_assessor no encontro features suficientes; "
+            "autoencoder y RUL quedan bloqueados."
+        )
+    return (
+        "temporal_model_readiness_assessor devolvio readiness="
+        f"{payload.get('readiness_level')}, autoencoder_ready="
+        f"{payload.get('autoencoder_ready')}, rul_ready={payload.get('rul_ready')} "
+        f"y siguiente_experimento={payload.get('recommended_next_experiment')}."
     )
 
 
@@ -945,6 +1154,38 @@ def _degradation_metric_warnings(temporal: dict[str, Any]) -> list[str]:
             "deben presentarse como ground truth oficial por ventana."
         )
     return list(dict.fromkeys(warnings))
+
+
+def _readiness_refs(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+) -> list[str]:
+    refs = [
+        "readiness:temporal_model_readiness",
+        f"readiness:level:{payload.get('readiness_level')}",
+        (
+            "readiness:autoencoder_ready"
+            if payload.get("autoencoder_ready")
+            else "readiness:autoencoder_blocked"
+        ),
+        (
+            "readiness:rul_ready"
+            if payload.get("rul_ready")
+            else "readiness:rul_blocked"
+        ),
+        f"readiness:cost:{payload.get('estimated_cost_level')}",
+        f"readiness:leakage:{payload.get('leakage_risk')}",
+        f"supervision_profile:{state.project_context.supervision_profile}",
+    ]
+    if payload.get("features_path"):
+        refs.append("artifact:features")
+    if payload.get("predictions_path"):
+        refs.append("artifact:model_predictions")
+    for reason in payload.get("blocked_reasons") or []:
+        refs.append(f"readiness:blocker:{reason}")
+    for reason in payload.get("caution_reasons") or []:
+        refs.append(f"readiness:caution:{reason}")
+    return refs
 
 
 def _temporal_evidence_warnings(
@@ -1022,9 +1263,13 @@ def _temporal_evidence_refs(
             [
                 "temporal:series_available",
                 "temporal:current_health_state",
+                "temporal:health_policy",
+                "temporal:alert_policy",
+                "temporal:health_indicator_policy",
                 "temporal:alert_episodes",
                 "temporal:longest_alert_streak",
                 "temporal:failure_reference",
+                "health:indicator_available",
             ]
         )
     for name in metrics.get("raw", {}):
@@ -1036,6 +1281,16 @@ def _temporal_evidence_refs(
             refs.extend(["temporal:first_spike", "temporal:first_alert"])
         if first["first_persistent_alert"]["x"] is not None:
             refs.append("temporal:first_persistent_alert")
+        if first["onset_confirmed"]["confirmed"]:
+            refs.append("temporal:onset_confirmed")
+            refs.append("health:onset_confirmed")
+        health = first.get("health_indicator") or {}
+        if health.get("health_monotonicity") is not None:
+            refs.append("health:monotonicity")
+        if health.get("health_robustness") is not None:
+            refs.append("health:robustness")
+        if health.get("health_dominant_evidence") is not None:
+            refs.append("health:dominant_evidence")
         if first["episodes"]["isolated_alert_points"]:
             refs.append("temporal:isolated_alert_points")
     return refs
@@ -1055,6 +1310,15 @@ def _predictions_artifact(state: TFMStateModel):
     for artifact in reversed(state.artifacts):
         if artifact.artifact_type == "predictions":
             return artifact
+    return None
+
+
+def _features_path_for_readiness(state: TFMStateModel) -> str | None:
+    for artifact in reversed(state.artifacts):
+        if artifact.artifact_type == "features":
+            return artifact.path
+    if state.tensor_path:
+        return str(Path(state.tensor_path).with_name("windows_features.csv"))
     return None
 
 

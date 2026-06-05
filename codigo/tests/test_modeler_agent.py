@@ -542,6 +542,161 @@ class ModelerAgentTests(unittest.TestCase):
         self.assertIn("aviso sostenido", decision.decision_strategy.alert_policy)
         self.assertEqual(len(decision.comparison_candidates), 2)
 
+    def test_llm_temporal_modeler_can_select_autoencoder_with_readiness(self):
+        state = _temporal_state("run-modeler-nasa-autoencoder-001")
+        client = FakeLLMClient(
+            {
+                "agent_name": "modeler",
+                "decision_id": "run-modeler-nasa-autoencoder-001:modeler:001",
+                "rationale": (
+                    "Use autoencoder_dense only after readiness confirms enough "
+                    "nominal train windows and compare it against PCA."
+                ),
+                "confidence": 0.84,
+                "decision_strategy": {
+                    "strategy_type": "feature_model_fit",
+                    "hypothesis": (
+                        "Test a learned reconstruction score for degradation "
+                        "trend, sustained onset and nominal false alarms."
+                    ),
+                    "evidence_refs": [
+                        "tool:temporal_health_lookup",
+                        "tool:degradation_metrics_lookup",
+                        "tool:temporal_model_readiness_assessor",
+                        "readiness:temporal_model_readiness",
+                        "readiness:autoencoder_ready",
+                        "temporal:first_persistent_alert",
+                        "metric:mean_lead_time_to_failure",
+                        "metric:mean_false_alarm_rate_nominal",
+                        "metric:mean_score_trend_spearman",
+                    ],
+                    "risk_notes": [
+                        "Autoencoder may improve sensitivity but increase false alarms.",
+                        "Temporal proxy labels remain auxiliary evidence.",
+                    ],
+                    "tool_names": [
+                        "temporal_health_lookup",
+                        "degradation_metrics_lookup",
+                        "temporal_model_readiness_assessor",
+                    ],
+                    "optimization_targets": [
+                        "detected_before_failure_rate",
+                        "mean_lead_time_to_failure",
+                        "mean_false_alarm_rate_nominal",
+                        "mean_score_trend_spearman",
+                    ],
+                    "alert_policy": (
+                        "Compare pico aislado, aviso sostenido, persistent "
+                        "alerts and nominal false alarms before approval."
+                    ),
+                },
+                "modeling_config": {
+                    "model_name": "autoencoder_dense",
+                    "random_state": 42,
+                    "hyperparameters": {
+                        "hidden_layers": "32,16",
+                        "latent_dim": 8,
+                        "learning_rate": 0.001,
+                        "batch_size": 32,
+                        "max_epochs": 50,
+                        "patience": 8,
+                        "weight_decay": 0.0001,
+                        "threshold_quantile": 0.99,
+                        "device": "cpu",
+                    },
+                },
+                "train_split": "train",
+                "validation_split": "validation",
+                "expected_model_path": "codigo/models/nasa_ims_bearing/autoencoder_dense.pt",
+                "comparison_candidates": [
+                    {
+                        "alternative_id": "pca_reference",
+                        "rationale": "Keep PCA as interpretable reconstruction baseline.",
+                        "expected_effect": "Compare linear and non-linear reconstruction scores.",
+                        "modeling_config": {
+                            "model_name": "pca_reconstruction_error",
+                            "random_state": 42,
+                            "hyperparameters": {
+                                "n_components": 0.95,
+                                "svd_solver": "full",
+                                "threshold_quantile": 0.99,
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(decision.modeling_config.model_name, "autoencoder_dense")
+        self.assertEqual(
+            decision.expected_model_path,
+            "codigo/models/nasa_ims_bearing/autoencoder_dense.pt",
+        )
+        self.assertIn(
+            "temporal_model_readiness_assessor",
+            decision.decision_strategy.tool_names,
+        )
+
+    def test_llm_temporal_modeler_rejects_autoencoder_without_readiness(self):
+        state = _temporal_state("run-modeler-nasa-autoencoder-invalid-001")
+        client = FakeLLMClient(
+            {
+                "agent_name": "modeler",
+                "decision_id": "run-modeler-nasa-autoencoder-invalid-001:modeler:001",
+                "rationale": "Use autoencoder without checking readiness.",
+                "confidence": 0.94,
+                "decision_strategy": {
+                    "strategy_type": "feature_model_fit",
+                    "hypothesis": "Try a learned reconstruction score.",
+                    "evidence_refs": [
+                        "tool:temporal_health_lookup",
+                        "tool:degradation_metrics_lookup",
+                        "temporal:first_persistent_alert",
+                        "metric:mean_lead_time_to_failure",
+                        "metric:mean_false_alarm_rate_nominal",
+                        "metric:mean_score_trend_spearman",
+                    ],
+                    "risk_notes": ["Proxy labels remain auxiliary."],
+                    "tool_names": [
+                        "temporal_health_lookup",
+                        "degradation_metrics_lookup",
+                    ],
+                    "optimization_targets": [
+                        "detected_before_failure_rate",
+                        "mean_lead_time_to_failure",
+                        "mean_false_alarm_rate_nominal",
+                        "mean_score_trend_spearman",
+                    ],
+                    "alert_policy": "Compare pico aislado and aviso sostenido.",
+                },
+                "modeling_config": {
+                    "model_name": "autoencoder_dense",
+                    "random_state": 42,
+                    "hyperparameters": {
+                        "hidden_layers": "32,16",
+                        "latent_dim": 8,
+                        "learning_rate": 0.001,
+                        "batch_size": 32,
+                        "max_epochs": 50,
+                        "patience": 8,
+                        "weight_decay": 0.0001,
+                        "threshold_quantile": 0.99,
+                        "device": "cpu",
+                    },
+                },
+                "train_split": "train",
+                "validation_split": "validation",
+                "expected_model_path": "codigo/models/nasa_ims_bearing/autoencoder_dense.pt",
+            }
+        )
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(decision.modeling_config.model_name, "pca_reconstruction_error")
+        self.assertIn("Fallback after LLM failure", decision.rationale)
+
     def test_llm_temporal_modeler_receives_tool_catalog_in_prompt(self):
         state = _temporal_state("run-modeler-nasa-temporal-prompt-001")
         client = FakeLLMClient(

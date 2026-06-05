@@ -322,6 +322,63 @@ tanto, Fase 5 aporta una capa de producto local que hace defendible el sistema
 ante una demo, aunque todavia no resuelve empaquetado, despliegue ni
 multiusuario.
 
+\section{Resultados de Fase 9: run-to-failure avanzado}
+
+La Fase 9 aporta el resultado mas completo del perfil
+\texttt{run\_to\_failure\_degradation}. La suite ligera con readiness confirma
+que el autoencoder PyTorch ya no es solo una propuesta futura: se entrena, genera
+artefactos reproducibles y se compara con PCA, Isolation Forest y One-Class SVM
+bajo la misma politica temporal. La Tabla~\ref{tab:resultados_fase9_suite}
+resume la lectura principal.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Modelo & Aprobado & Onset & Lead persistente & FAR nominal & F1 proxy \\
+\midrule
+PCA & Si & 1.0000 & 7200.7680 & 0.0952 & 0.8602 \\
+Isolation Forest & No & 0.0000 & 0.0000 & 0.0159 & 0.2051 \\
+One-Class SVM & Si & 1.0000 & 9600.7168 & 0.1905 & 0.9366 \\
+Autoencoder denso & Si & 1.0000 & 7200.8192 & 0.0476 & 0.8854 \\
+\bottomrule
+\end{tabular}
+\caption{Suite run-to-failure ligera con readiness para autoencoder.}
+\label{tab:resultados_fase9_suite}
+\end{table}
+
+El autoencoder denso lidero metricas asociadas al Health Indicator, como caida
+del indicador, monotonicidad y score global de salud, mientras que One-Class SVM
+lidero \texttt{lead time} persistente y tendencia del score. La conclusion no
+es que el autoencoder deba sustituir a PCA, sino que ya es una alternativa
+defendible para que el agente la considere cuando readiness lo permite.
+
+La run agentica final confirma esta interpretacion. En
+\texttt{fase9-agentic-modeler-readiness-lite-llm-guardrail-001}, Qwen eligio
+\texttt{pca\_reconstruction\_error} como modelo principal por interpretabilidad
+temporal y robustez ante etiquetas proxy. El autoencoder permanecio como
+candidato comparable, condicionado a readiness suficiente. Las metricas
+principales de la run fueron: onset confirmado 1.0000, \texttt{lead time}
+persistente 7200.7680, falsas alarmas nominales 0.0952, caida de Health
+Indicator 76.4453, monotonicidad 0.5214, tendencia Spearman 0.7967 y F1 proxy
+0.8602. La ejecucion quedo aprobada.
+
+Tambien se obtiene un resultado cualitativo relevante sobre robustez agentica.
+Tras reforzar la reparacion JSON y los reintentos de contrato, las decisiones
+principales de \texttt{modeler}, \texttt{evaluator} y
+\texttt{report\_writer} inicial aparecen como respuestas LLM reales con
+confianza alta. Las correcciones de contrato quedan registradas como
+\texttt{Guardrail correction}, no como caidas genericas a fallback. Esto mejora
+la presentacion metodologica del sistema: los guardarrailes se muestran como
+control de seguridad, no como sustitucion silenciosa del agente.
+
+Con estos resultados, Fase 9 cierra el paso de una deteccion temporal basica a
+un flujo PHM local: comparacion de modelos, politicas temporales versionadas,
+Health Indicator, readiness para modelos avanzados, autoencoder PyTorch y
+recomendacion agentica trazable. RUL completo queda correctamente fuera de las
+conclusiones, ya que el sistema solo declara que no esta estimado cuando no hay
+evidencia suficiente.
+
 \section{Limitaciones observadas}
 
 Los resultados sobre CWRU deben interpretarse como validacion del pipeline y del

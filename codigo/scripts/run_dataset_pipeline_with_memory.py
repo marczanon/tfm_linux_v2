@@ -27,16 +27,7 @@ from codigo.app.services.reasoning_memory_index import DEFAULT_MEMORY_DIR
 
 def main() -> None:
     args = _parse_args()
-    request = PipelineRunRequest(
-        run_id=args.run_id,
-        dataset_id=args.dataset_id,
-        raw_path=args.raw_path,
-        adapter_id=args.adapter_id,
-        dataset_policy_id=args.dataset_policy_id,
-        execution_mode=args.execution_mode,
-        use_memory=args.use_memory,
-        allow_synthetic_labels=args.allow_synthetic_labels,
-    )
+    request = _request_from_args(args)
     plan = plan_dataset_pipeline_run(request)
     if args.plan_only:
         print(json.dumps(_plan_summary(plan), indent=2, ensure_ascii=True))
@@ -75,6 +66,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--use-memory", action="store_true")
+    parser.add_argument("--use-llm", action="store_true")
     parser.add_argument("--memory-dir", type=Path, default=DEFAULT_MEMORY_DIR)
     parser.add_argument(
         "--embedding-provider",
@@ -86,6 +78,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding-timeout-seconds", type=float, default=60.0)
     parser.add_argument("--hash-dimension", type=int, default=128)
     return parser.parse_args()
+
+
+def _request_from_args(args: argparse.Namespace) -> PipelineRunRequest:
+    return PipelineRunRequest(
+        run_id=args.run_id,
+        dataset_id=args.dataset_id,
+        raw_path=args.raw_path,
+        adapter_id=args.adapter_id,
+        dataset_policy_id=args.dataset_policy_id,
+        execution_mode=args.execution_mode,
+        use_memory=args.use_memory,
+        use_llm=args.use_llm,
+        allow_synthetic_labels=args.allow_synthetic_labels,
+    )
 
 
 def _memory_config(

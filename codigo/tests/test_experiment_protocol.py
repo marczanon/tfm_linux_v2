@@ -1,7 +1,9 @@
 import json
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from codigo.app.graph.pipeline import PipelineExecutors
 from codigo.app.schemas.agent_decisions import (
@@ -16,8 +18,13 @@ from codigo.app.services.experiment_protocol import (
     cwru_model_experiment_plan_from_decision,
     cwru_window_experiment_plan_from_decision,
     default_cwru_experiment_plan,
+    default_run_to_failure_model_suite_plan,
     run_cwru_experiment_plan,
+    run_run_to_failure_experiment_plan,
+    run_to_failure_model_experiment_plan_from_decision,
 )
+from codigo.app.services.run_persistence import RunSnapshot
+from codigo.app.services.run_registry import MetricComparison, RunComparison, RunComparisonRow
 from codigo.app.schemas.executor_results import (
     CleaningResult,
     EvaluationExecutorResult,
@@ -257,6 +264,96 @@ class ExperimentProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two unique"):
             cwru_model_experiment_plan_from_decision(decision)
 
+    def test_default_run_to_failure_suite_defines_four_model_families(self):
+        plan = default_run_to_failure_model_suite_plan()
+
+        self.assertEqual(plan.dataset, "nasa_ims_bearing")
+        self.assertEqual(plan.adapter_id, "nasa_ims_bearing")
+        self.assertEqual(plan.dataset_policy_id, "nasa_ims_temporal_v1")
+        self.assertEqual(plan.supervision_profile, "run_to_failure_degradation")
+        self.assertEqual(
+            [spec.modeling_config.model_name for spec in plan.experiments],
+            [
+                "pca_reconstruction_error",
+                "isolation_forest",
+                "one_class_svm",
+                "autoencoder_dense",
+            ],
+        )
+
+    def test_run_to_failure_model_plan_is_built_from_modeler_decision(self):
+        decision = ModelingDecision(
+            decision_id="rtf:modeler:001",
+            rationale="Selected PCA for temporal health score.",
+            confidence=0.9,
+            modeling_config=_modeling_config(
+                "pca_reconstruction_error",
+                {"n_components": 0.95, "threshold_quantile": 0.99},
+            ),
+            train_split="train",
+            validation_split="validation",
+            expected_model_path="codigo/models/nasa_ims_bearing/pca.joblib",
+            comparison_candidates=[
+                ModelingAlternative(
+                    alternative_id="iforest",
+                    rationale="Compare isolation score.",
+                    expected_effect="Temporal sensitivity comparison.",
+                    modeling_config=_modeling_config(
+                        "isolation_forest",
+                        {"threshold_quantile": 0.99},
+                    ),
+                ),
+                ModelingAlternative(
+                    alternative_id="ocsvm",
+                    rationale="Compare nonlinear margin.",
+                    expected_effect="False alarm trade-off comparison.",
+                    modeling_config=_modeling_config(
+                        "one_class_svm",
+                        {"threshold_quantile": 0.99},
+                    ),
+                ),
+            ],
+        )
+
+        plan = run_to_failure_model_experiment_plan_from_decision(
+            decision,
+            plan_id="rtf_model_plan",
+        )
+
+        self.assertEqual(plan.dataset, "nasa_ims_bearing")
+        self.assertEqual(len(plan.experiments), 3)
+        self.assertEqual(
+            [spec.modeling_config.model_name for spec in plan.experiments],
+            [
+                "pca_reconstruction_error",
+                "isolation_forest",
+                "one_class_svm",
+            ],
+        )
+
+    def test_run_to_failure_plan_uses_temporal_results_table_with_fake_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plan = default_run_to_failure_model_suite_plan(plan_id="rtf_suite")
+            result = run_run_to_failure_experiment_plan(
+                plan,
+                raw_path=str(base / "raw"),
+                experiments_dir=base / "experiments",
+                runs_dir=base / "runs",
+                run_factory=_fake_run_to_failure_run,
+                comparison_factory=_fake_run_to_failure_comparison,
+            )
+            table = Path(result.results_table_path).read_text(encoding="utf-8")
+
+            self.assertEqual(len(result.runs), 4)
+        self.assertEqual(result.comparison.run_ids, [spec.run_id for spec in plan.experiments])
+        self.assertIn("Onset confirmado", table)
+        self.assertIn("Lead persistente", table)
+        self.assertIn("HI drop", table)
+        self.assertIn("HI mono", table)
+        self.assertIn("F1 aux", table)
+        self.assertIn("Las metricas binarias se muestran como auxiliares/proxy", table)
+
 
 def _spec(
     experiment_id: str,
@@ -309,6 +406,16 @@ def _modeling_config(
             "max_features": 1.0,
             "bootstrap": False,
             "n_jobs": 1,
+            **updates,
+        }
+    elif model_name == "one_class_svm":
+        hyperparameters = {
+            "kernel": "rbf",
+            "nu": 0.05,
+            "gamma": "scale",
+            "shrinking": True,
+            "tol": 0.001,
+            "max_iter": -1,
             **updates,
         }
     else:
@@ -569,6 +676,124 @@ def _fake_executors(
         modeling=modeling,
         evaluation=evaluation,
         reporting=reporting,
+    )
+
+
+def _fake_run_to_failure_run(
+    spec: ExperimentSpec,
+    experiment_dir: Path,
+):
+    snapshot_dir = experiment_dir / "snapshot"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = RunSnapshot(
+        run_id=spec.run_id,
+        thread_id=f"{spec.run_id}-thread",
+        dataset="nasa_ims_bearing",
+        current_stage="completed",
+        approved=True,
+        report_path=str(snapshot_dir / "final_report.md"),
+        snapshot_dir=str(snapshot_dir),
+        state_path=str(snapshot_dir / "state.json"),
+        decisions_path=str(snapshot_dir / "decisions.json"),
+        artifacts_path=str(snapshot_dir / "artifacts.json"),
+        metrics_path=str(snapshot_dir / "metrics.json"),
+        evaluation_path=str(snapshot_dir / "evaluation.json"),
+        summary_path=str(snapshot_dir / "summary.json"),
+        metadata_path=str(snapshot_dir / "metadata.json"),
+        created_at=datetime.now(UTC),
+    )
+    return SimpleNamespace(snapshot=snapshot)
+
+
+def _fake_run_to_failure_comparison(
+    run_ids: list[str],
+    _runs_dir,
+) -> RunComparison:
+    rows = []
+    for index, run_id in enumerate(run_ids):
+        rows.append(
+            RunComparisonRow(
+                run_id=run_id,
+                dataset="nasa_ims_bearing",
+                current_stage="completed",
+                approved=index != 1,
+                supervision_profile="run_to_failure_degradation",
+                label_source="temporal_proxy",
+                label_granularity="proxy_temporal",
+                model_name=[
+                    "pca_reconstruction_error",
+                    "isolation_forest",
+                    "one_class_svm",
+                    "autoencoder_dense",
+                ][index],
+                metric_families=[
+                    "binary_classification",
+                    "run_to_failure_degradation",
+                ],
+                f1_score=0.6 + index * 0.05,
+                false_positive_rate=0.2 + index * 0.1,
+                degradation_available=True,
+                degradation_n_runs=1,
+                degradation_detected_before_failure_rate=1.0,
+                degradation_confirmed_degradation_before_failure_rate=(
+                    1.0 if index != 1 else 0.0
+                ),
+                degradation_mean_lead_time_to_failure=1200.0 - index * 100.0,
+                degradation_mean_persistent_lead_time_to_failure=(
+                    900.0 - index * 100.0 if index != 1 else None
+                ),
+                degradation_mean_false_alarm_rate_nominal=0.1 + index * 0.05,
+                degradation_mean_score_trend_spearman=0.7 - index * 0.1,
+                degradation_mean_health_index_drop=65.0 - index * 10.0,
+                degradation_mean_health_monotonicity=0.9 - index * 0.1,
+                degradation_missed_runs=0,
+                degradation_missed_confirmed_degradation_runs=0 if index != 1 else 1,
+                degradation_mean_initial_final_separation=0.5 + index * 0.1,
+                snapshot_path=f"/tmp/{run_id}",
+            )
+        )
+    return RunComparison(
+        generated_at=datetime.now(UTC),
+        run_ids=run_ids,
+        rows=rows,
+        metrics=[
+            MetricComparison(
+                metric="f1_score",
+                higher_is_better=True,
+                best_run_id=run_ids[-1],
+                best_value=0.7,
+            )
+        ],
+        degradation_metrics=[
+            MetricComparison(
+                metric="degradation_confirmed_degradation_before_failure_rate",
+                metric_family="run_to_failure_degradation",
+                higher_is_better=True,
+                best_run_id=run_ids[0],
+                best_value=1.0,
+            ),
+            MetricComparison(
+                metric="degradation_mean_persistent_lead_time_to_failure",
+                metric_family="run_to_failure_degradation",
+                higher_is_better=True,
+                best_run_id=run_ids[0],
+                best_value=900.0,
+            ),
+            MetricComparison(
+                metric="degradation_mean_false_alarm_rate_nominal",
+                metric_family="run_to_failure_degradation",
+                higher_is_better=False,
+                best_run_id=run_ids[0],
+                best_value=0.1,
+            ),
+            MetricComparison(
+                metric="degradation_mean_health_index_drop",
+                metric_family="run_to_failure_degradation",
+                higher_is_better=True,
+                best_run_id=run_ids[0],
+                best_value=65.0,
+            )
+        ],
     )
 
 

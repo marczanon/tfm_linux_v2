@@ -110,10 +110,18 @@ class RunRegistryTests(unittest.TestCase):
                         "degradation_available": True,
                         "degradation_n_runs": 1,
                         "degradation_detected_before_failure_rate": 1.0,
+                        "degradation_confirmed_degradation_before_failure_rate": 1.0,
                         "degradation_mean_lead_time_to_failure": 300.0,
+                        "degradation_mean_persistent_lead_time_to_failure": 260.0,
                         "degradation_mean_false_alarm_rate_nominal": 0.05,
                         "degradation_mean_score_trend_spearman": 0.82,
                         "degradation_missed_runs": 0,
+                        "degradation_missed_confirmed_degradation_runs": 0,
+                        "degradation_mean_isolated_alert_points": 0.0,
+                        "degradation_mean_health_index_drop": 70.0,
+                        "degradation_mean_health_monotonicity": 0.95,
+                        "degradation_mean_health_robustness": 0.90,
+                        "degradation_mean_health_nominal_volatility": 3.0,
                     },
                 ),
                 runs_dir,
@@ -133,10 +141,18 @@ class RunRegistryTests(unittest.TestCase):
                         "degradation_available": True,
                         "degradation_n_runs": 1,
                         "degradation_detected_before_failure_rate": 1.0,
+                        "degradation_confirmed_degradation_before_failure_rate": 0.0,
                         "degradation_mean_lead_time_to_failure": 220.0,
+                        "degradation_mean_persistent_lead_time_to_failure": None,
                         "degradation_mean_false_alarm_rate_nominal": 0.01,
                         "degradation_mean_score_trend_spearman": 0.76,
                         "degradation_missed_runs": 0,
+                        "degradation_missed_confirmed_degradation_runs": 1,
+                        "degradation_mean_isolated_alert_points": 2.0,
+                        "degradation_mean_health_index_drop": 45.0,
+                        "degradation_mean_health_monotonicity": 0.70,
+                        "degradation_mean_health_robustness": 0.80,
+                        "degradation_mean_health_nominal_volatility": 9.0,
                     },
                 ),
                 runs_dir,
@@ -149,6 +165,24 @@ class RunRegistryTests(unittest.TestCase):
         self.assertEqual(rows["pca-run"].model_name, "pca_reconstruction_error")
         self.assertEqual(rows["svm-run"].label_source, "temporal_proxy")
         self.assertIn("run_to_failure_degradation", rows["pca-run"].metric_families)
+        self.assertEqual(
+            temporal[
+                "degradation_confirmed_degradation_before_failure_rate"
+            ].best_run_id,
+            "pca-run",
+        )
+        self.assertEqual(
+            temporal["degradation_mean_persistent_lead_time_to_failure"].best_run_id,
+            "pca-run",
+        )
+        self.assertEqual(
+            temporal["degradation_mean_health_index_drop"].best_run_id,
+            "pca-run",
+        )
+        self.assertEqual(
+            temporal["degradation_mean_health_nominal_volatility"].best_run_id,
+            "pca-run",
+        )
         self.assertEqual(
             temporal["degradation_mean_lead_time_to_failure"].best_run_id,
             "pca-run",

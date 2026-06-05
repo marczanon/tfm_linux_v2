@@ -28,6 +28,39 @@ El MVP comparará primero modelos clásicos y reproducibles:
 Los autoencoders densos y modelos recurrentes se considerarán en fases
 posteriores, cuando el pipeline de tensores esté validado.
 
+En la extension run-to-failure, la lectura de estos modelos cambia. Un detector
+no se evalua solo por separar ventanas normales y anomalias, sino por producir
+una trayectoria de score que anticipe degradacion, mantenga falsas alarmas
+nominales controladas y permita construir un indicador de salud interpretable.
+Por ello, PCA con error de reconstruccion, Isolation Forest, One-Class SVM y
+autoencoders densos se tratan como familias comparables dentro de un mismo
+protocolo temporal, no como modelos aislados optimizados por F1.
+
+\section{Run-to-failure, indicadores de salud y modelos de reconstruccion}
+
+Los datasets run-to-failure representan una trayectoria historica de un activo
+hasta fallo. En este tipo de problema conviene distinguir cuatro conceptos:
+anomalia puntual, degradacion sostenida, indicador de salud y pronostico de
+vida util restante. Una alerta aislada puede deberse a ruido o transitorios; la
+degradacion defendible requiere persistencia temporal, tendencia del score y
+coherencia con el tramo nominal.
+
+Los Health Indicators son habituales en mantenimiento predictivo porque
+condensan la evolucion del activo en una curva de salud. En un sistema
+experimental local, este indicador debe declararse como evidencia auxiliar y no
+como prediccion industrial cerrada. Su calidad puede evaluarse mediante caida
+entre tramo inicial y final, monotonicidad, robustez frente al ruido, volatilidad
+nominal y fuerza de tendencia durante la degradacion.
+
+Los autoencoders densos aportan una extension natural para este escenario,
+porque aprenden a reconstruir normalidad y convierten el error de
+reconstruccion en un score de anomalia. Sin embargo, su uso exige suficientes
+ventanas nominales de entrenamiento, control de fuga temporal, arquitectura
+cerrada, evaluacion comparable y guardarrailes que impidan presentar un modelo
+mas complejo como mejora automatica. En este TFM se incorporan como familia
+PyTorch reproducible sobre features tabulares, dejando los autoencoders
+recurrentes y el RUL completo como lineas futuras.
+
 \section{Sistemas multiagente aplicados a pipelines de datos}
 
 Esta sección describirá el uso de arquitecturas multiagente para dividir

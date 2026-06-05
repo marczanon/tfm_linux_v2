@@ -21,6 +21,9 @@ class FakeLLMClient:
         self.calls += 1
         self.messages = messages
         self.json_schema = json_schema
+        if isinstance(self.payload, list):
+            index = min(self.calls - 1, len(self.payload) - 1)
+            return self.payload[index]
         return self.payload
 
 
@@ -117,6 +120,45 @@ class ReportWriterAgentTests(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.91)
         self.assertIn("ReportDecision", str(client.json_schema))
 
+    def test_llm_report_decision_repairs_contract_violation_before_fallback(self):
+        valid_sections = [
+            {"title": "Resumen ejecutivo", "include_metrics": False, "include_artifacts": False, "source_paths": []},
+            {"title": "Contexto y datos", "include_metrics": False, "include_artifacts": False, "source_paths": ["codigo/data/interim/cwru_bearing/manifest.csv"]},
+            {"title": "Configuraciones del pipeline", "include_metrics": False, "include_artifacts": False, "source_paths": []},
+            {"title": "Metricas y evaluacion", "include_metrics": True, "include_artifacts": False, "source_paths": ["codigo/reports/cwru_bearing/evaluation/metrics.json"]},
+            {"title": "Artefactos generados", "include_metrics": False, "include_artifacts": True, "source_paths": ["codigo/reports/cwru_bearing/evaluation/metrics.json"]},
+            {"title": "Limitaciones y siguientes pasos", "include_metrics": False, "include_artifacts": False, "source_paths": []},
+        ]
+        client = FakeLLMClient(
+            [
+                {
+                    "agent_name": "report_writer",
+                    "decision_id": "run-report-001:report_writer:001",
+                    "rationale": "Invalid output path.",
+                    "confidence": 0.99,
+                    "output_path": "/tmp/report.md",
+                    "output_format": "markdown",
+                    "sections": valid_sections,
+                },
+                {
+                    "agent_name": "report_writer",
+                    "decision_id": "run-report-001:report_writer:001",
+                    "rationale": "Corrected after contract feedback.",
+                    "confidence": 0.87,
+                    "output_path": "codigo/reports/cwru_bearing/run-report-001/final_report.md",
+                    "output_format": "markdown",
+                    "sections": valid_sections,
+                },
+            ]
+        )
+
+        decision = decide_report_action(_state(), llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(decision.confidence, 0.87)
+        self.assertNotIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("contrato del redactor", client.messages[-1].content)
+
     def test_invalid_llm_report_decision_falls_back(self):
         client = FakeLLMClient(
             {
@@ -134,13 +176,13 @@ class ReportWriterAgentTests(unittest.TestCase):
 
         decision = decide_report_action(_state(), llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertEqual(
             decision.output_path,
             "codigo/reports/cwru_bearing/run-report-001/final_report.md",
         )
-        self.assertLessEqual(decision.confidence, 0.7)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.82)
+        self.assertIn("Guardrail correction", decision.rationale)
 
     def test_deterministic_revision_accepts_verifier_issues(self):
         verification = _verification_decision()

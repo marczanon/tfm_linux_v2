@@ -52,14 +52,26 @@ resultados sin duplicar la logica del backend ni leer ficheros directamente
 desde el navegador. Esta capa convierte la arquitectura en una herramienta
 demostrable y no solo en un conjunto de scripts reproducibles.
 
+La septima aportacion, cerrada en Fase 9, es la consolidacion del perfil
+run-to-failure como caso PHM agentico local. El sistema compara PCA, Isolation
+Forest, One-Class SVM y autoencoder PyTorch bajo una misma politica temporal;
+calcula onset confirmado, \texttt{lead time} persistente, falsas alarmas
+nominales, tendencia del score y Health Indicator; usa readiness para decidir
+si procede un modelo avanzado; y permite que Qwen elija sin imponerle el
+autoencoder. Ademas, las salidas LLM invalidas se reparan o se registran como
+correcciones de guardarrail, evitando que el sistema parezca depender de
+fallbacks opacos.
+
 \section{Limitaciones}
 
 Las metricas de CWRU no deben interpretarse como garantia de rendimiento en
 planta industrial. CWRU es un benchmark controlado y muy separable. NASA IMS es
-mas representativo de degradacion temporal, pero en esta fase solo se ha usado
-para ingestion, perfilado, diagnostico y pruebas sinteticas etiquetadas. La
-validacion supervisada sobre NASA IMS real queda pendiente de una politica de
-etiquetado temporal defendible.
+mas representativo de degradacion temporal. La politica
+\texttt{nasa\_ims\_temporal\_v1} y las pruebas sinteticas permiten ejecutar y
+evaluar trayectorias run-to-failure de forma auditable, pero las etiquetas por
+ventana siguen siendo proxy y no deben presentarse como ground truth oficial.
+La validacion industrial requiere mas trayectorias, otros datasets
+run-to-failure y particiones por activo o condicion operativa.
 
 El sistema tambien depende de la calidad de los expedientes expertos que reciben
 los agentes. Esta decision es intencionada: se evita pedir a un LLM local que
@@ -75,21 +87,28 @@ dependencia externa documentada. Ademas, los jobs de la API siguen siendo
 locales y en memoria, lo que es suficiente para la demo local pero no para una
 plataforma productiva.
 
+La incorporacion de PyTorch para el autoencoder denso aumenta la capacidad
+tecnica del sistema, pero tambien obliga a validar reproducibilidad Docker y
+coste local. En la fase cerrada se ha usado CPU por defecto y arquitectura
+cerrada; quedan fuera LSTM autoencoder, senal cruda y RUL industrial.
+
 \section{Trabajo futuro}
 
 Las lineas principales son:
 
 \begin{itemize}
-  \item definir una politica temporal defendible para NASA IMS real y otros
-        datasets run-to-failure;
-  \item incorporar modelos adicionales con ejecutores deterministas, como
-        One-Class SVM, LOF y autoencoders, solo cuando existan tests,
-        persistencia y evaluacion comparable;
-  \item ampliar la experimentacion multi-dataset con planes acotados y
-        comparacion frente a politicas deterministas;
+  \item validar la metodologia temporal sobre un segundo dataset run-to-failure
+        real, como XJTU-SY o PRONOSTIA;
+  \item incorporar RUL experimental con incertidumbre y criterios explicitos de
+        no comunicacion de falsa precision;
+  \item estudiar modelos secuenciales, como LSTM autoencoder, solo cuando
+        existan suficientes trayectorias completas y tests reproducibles;
+  \item ampliar la experimentacion multi-dataset con planes acotados,
+        particiones por activo y comparacion frente a politicas deterministas;
   \item pulir la aplicacion web y backend tras disponer ya de un minimo Docker
         reproducible, ampliando funcionalidad, usabilidad y fronteras de
         consulta sin duplicar contratos;
+  \item reconstruir y validar Docker tras la incorporacion de PyTorch;
   \item convertir las comprobaciones manuales de Docker en pruebas de humo
         automatizadas cuando la superficie funcional de la aplicacion este mas
         estabilizada;

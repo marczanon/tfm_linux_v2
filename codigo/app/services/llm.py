@@ -13,6 +13,8 @@ from typing import Any, Literal, Protocol
 
 DEFAULT_OLLAMA_CHAT_MODEL = "qwen3.5:4b"
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_NUM_CTX = 8192
+DEFAULT_OLLAMA_NUM_PREDICT = 4096
 
 
 class LLMCallError(RuntimeError):
@@ -62,12 +64,81 @@ class OllamaJSONClient:
     host: str = DEFAULT_OLLAMA_HOST
     timeout_seconds: float = 60.0
     think: bool | None = False
+    max_json_repair_attempts: int = 1
+    num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
+    num_predict: int = DEFAULT_OLLAMA_NUM_PREDICT
 
     def complete_json(
         self,
         messages: Sequence[LLMMessage],
         *,
         json_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raw_response = self._chat(messages, json_schema=json_schema)
+        content = raw_response.get("message", {}).get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise LLMCallError("ollama response did not include message.content")
+
+        try:
+            return parse_json_object(content)
+        except LLMCallError as exc:
+            if not json_schema or self.max_json_repair_attempts <= 0:
+                raise
+            return self._repair_json_response(
+                messages,
+                content,
+                json_schema=json_schema,
+                parse_error=exc,
+            )
+
+    def _repair_json_response(
+        self,
+        messages: Sequence[LLMMessage],
+        invalid_content: str,
+        *,
+        json_schema: dict[str, Any],
+        parse_error: Exception,
+    ) -> dict[str, Any]:
+        """Pide al LLM reemitir solo JSON valido antes de caer a fallback."""
+
+        repair_messages = [
+            *messages,
+            LLMMessage(
+                role="assistant",
+                content=invalid_content,
+            ),
+            LLMMessage(
+                role="user",
+                content="\n".join(
+                    [
+                        "La respuesta anterior no era JSON valido para el contrato.",
+                        f"Error de parseo: {parse_error}",
+                        "Reemite exclusivamente un unico objeto JSON valido.",
+                        "No incluyas Markdown, explicaciones ni texto fuera del JSON.",
+                        "Usa exactamente el mismo decision_id solicitado.",
+                        "Esquema JSON de referencia:",
+                        json.dumps(json_schema, ensure_ascii=True),
+                    ]
+                ),
+            ),
+        ]
+        raw_response = self._chat(repair_messages, json_schema=json_schema)
+        content = raw_response.get("message", {}).get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise LLMCallError("ollama repair response did not include message.content")
+        try:
+            return parse_json_object(content)
+        except LLMCallError as repair_exc:
+            raise LLMCallError(
+                "invalid JSON object from LLM after repair attempt: "
+                f"{repair_exc}"
+            ) from repair_exc
+
+    def _chat(
+        self,
+        messages: Sequence[LLMMessage],
+        *,
+        json_schema: dict[str, Any] | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -83,8 +154,8 @@ class OllamaJSONClient:
         if json_schema:
             payload["options"] = {
                 "temperature": 0,
-                "num_ctx": 8192,
-                "num_predict": 2048,
+                "num_ctx": self.num_ctx,
+                "num_predict": self.num_predict,
             }
 
         request = urllib.request.Request(
@@ -95,14 +166,9 @@ class OllamaJSONClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                raw_response = json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode("utf-8"))
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise LLMCallError(f"ollama call failed: {exc}") from exc
-
-        content = raw_response.get("message", {}).get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise LLMCallError("ollama response did not include message.content")
-        return parse_json_object(content)
 
 
 def get_default_json_llm_client() -> JSONLLMClient:
@@ -116,11 +182,17 @@ def get_default_json_llm_client() -> JSONLLMClient:
     host = _default_ollama_host()
     timeout = float(os.getenv("TFM_LLM_TIMEOUT_SECONDS", "60"))
     think = _ollama_think_from_env()
+    num_ctx = int(os.getenv("TFM_LLM_NUM_CTX", str(DEFAULT_OLLAMA_NUM_CTX)))
+    num_predict = int(
+        os.getenv("TFM_LLM_NUM_PREDICT", str(DEFAULT_OLLAMA_NUM_PREDICT))
+    )
     return OllamaJSONClient(
         model=model,
         host=host,
         timeout_seconds=timeout,
         think=think,
+        num_ctx=num_ctx,
+        num_predict=num_predict,
     )
 
 

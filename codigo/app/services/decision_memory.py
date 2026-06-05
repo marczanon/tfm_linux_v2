@@ -968,11 +968,19 @@ def _evaluation_when_not_to_reuse(state: TFMStateModel) -> list[str]:
 
 def _temporal_metric_summary(metrics: dict[str, float | None]) -> str | None:
     names = [
+        "degradation_confirmed_degradation_before_failure_rate",
+        "degradation_mean_persistent_lead_time_to_failure",
+        "degradation_mean_health_index_drop",
+        "degradation_mean_health_monotonicity",
+        "degradation_mean_health_robustness",
+        "degradation_mean_health_nominal_volatility",
+        "degradation_mean_health_indicator_score",
         "degradation_detected_before_failure_rate",
         "degradation_mean_lead_time_to_failure",
         "degradation_mean_false_alarm_rate_nominal",
         "degradation_mean_score_trend_spearman",
         "degradation_missed_runs",
+        "degradation_missed_confirmed_degradation_runs",
     ]
     values = [
         f"{name}={_fmt(metrics.get(name))}"
@@ -992,6 +1000,10 @@ def _modeling_risks(config: ModelingConfig) -> list[str]:
             risks.append("threshold_quantile alto puede dejar anomalias sin detectar")
     if config.model_name == "pca_reconstruction_error":
         risks.append("PCA puede reducir FPR pero perder recall en fallos no lineales")
+    if config.model_name == "autoencoder_dense":
+        risks.append(
+            "autoencoder_dense puede mejorar sensibilidad no lineal pero requiere readiness y control de falsas alarmas"
+        )
     return risks
 
 

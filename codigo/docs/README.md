@@ -286,3 +286,45 @@ Documentos iniciales:
   sesion para retomar el 2026-06-04; resume la base run-to-failure, el avance
   de memoria RAG/Qdrant, el estado exacto de M4.4, documentos/artefactos clave y
   el siguiente paso M4.5 con Qwen/LLM + Qdrant.
+- `88_fase8_memoria_m4_5_qwen_qdrant_citas_agenticas.md`: cierre de M4.5;
+  remigra Qdrant con `qwen3-embedding:0.6b`, expone `--use-llm` en el runner
+  comun, ejecuta `m4-5-qwen-qdrant-nasa-smoke-001` y valida que el `modeler`
+  cita 3 recuerdos recuperados desde Qdrant sin uso invalido.
+- `89_fase9_hoja_ruta_run_to_failure_maximo_nivel.md`: hoja de ruta de Fase 9
+  para elevar `run_to_failure_degradation` con suite canonica agentica,
+  politicas versionadas de salud/histeresis, Health Indicators avanzados,
+  autoencoder PyTorch denso, readiness, RUL experimental con incertidumbre,
+  visualizacion PHM y memoria metodologica.
+- `90_fase9_hito1_suite_canonica_run_to_failure.md`: implementacion del primer
+  hito de Fase 9; extiende `experiment_protocol.py` para definir y materializar
+  una suite run-to-failure PCA/Isolation Forest/One-Class SVM con el runner
+  comun, tabla temporal y planes derivados de `ModelingDecision`.
+- `91_fase9_hito2_politica_temporal_evaluacion_run_to_failure.md`:
+  implementacion del segundo hito de Fase 9; introduce politica temporal
+  versionada `temporal_health_policy_v1`, onset confirmado, lead time
+  persistente, refs citables para agentes y comparacion de runs centrada en
+  degradacion sostenida en lugar de primer pico aislado.
+- `92_fase9_hito3_health_indicator_avanzado.md`: implementacion del tercer
+  hito de Fase 9; introduce `health_indicator_policy_v1`, Health Index bruto y
+  suavizado causal, metricas de caida, monotonicidad, robustez, volatilidad
+  nominal, refs `health:*` para agentes y columnas `HI drop`/`HI mono` en la
+  suite run-to-failure.
+- `93_fase9_hito5_readiness_modelos_temporales_avanzados.md`: implementacion
+  del hito de readiness previo al autoencoder; anade
+  `temporal_model_readiness_assessor`, politica `temporal_model_readiness_v1`,
+  refs `readiness:*` y precondiciones para que los agentes puedan proponer
+  autoencoder/RUL solo con evidencia suficiente.
+- `94_fase9_hito4_autoencoder_pytorch_denso.md`: implementacion del autoencoder
+  PyTorch denso; anade `autoencoder_dense` al ejecutor de modelado, valida
+  hiperparametros cerrados, guarda `.pt`, scaler y curva de entrenamiento, y
+  obliga al `modeler` a citar readiness antes de proponerlo.
+- `95_cierre_fase9_run_to_failure_maximo_nivel.md`: cierre operativo de Fase 9;
+  declara `run_to_failure_degradation` como caso PHM agentico local defendible,
+  resume suite, politicas temporales, Health Indicator, readiness, autoencoder
+  PyTorch, hardening de fallbacks visibles, evidencias de smoke y alcance fuera
+  de fase.
+- `96_fase10_hoja_ruta_frontend_cockpit_visual.md`: hoja de ruta de Fase 10
+  para elevar el frontend a cockpit visual industrial, reestructurando la app
+  React/Vite existente sin romper contratos, con panel principal claro,
+  pestana `Agentes` profunda, sala de visualizacion 2D/3D y verificacion
+  incremental por hitos.

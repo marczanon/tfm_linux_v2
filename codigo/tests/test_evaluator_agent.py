@@ -21,6 +21,9 @@ class FakeLLMClient:
         self.calls += 1
         self.messages = messages
         self.json_schema = json_schema
+        if isinstance(self.payload, list):
+            index = min(self.calls - 1, len(self.payload) - 1)
+            return self.payload[index]
         return self.payload
 
 
@@ -101,7 +104,14 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertIn("temporal_health_lookup", decision.tool_names)
         self.assertIn("degradation_metrics_lookup", decision.tool_names)
         self.assertIn("tool:temporal_health_lookup", decision.evidence_refs)
+        self.assertIn(
+            "metric:confirmed_degradation_before_failure_rate",
+            decision.evidence_refs,
+        )
+        self.assertIn("health:monotonicity", decision.evidence_refs)
+        self.assertIn("metric:mean_health_index_drop", decision.evidence_refs)
         self.assertIn("metric:mean_lead_time_to_failure", decision.evidence_refs)
+        self.assertIn("Health Indicator", decision.operational_assessment)
         self.assertIn("pico", decision.operational_assessment)
         self.assertIn("rul_not_estimated", decision.temporal_guardrail_checks)
         self.assertIn("F1", " ".join(decision.temporal_debate_points))
@@ -198,11 +208,92 @@ class EvaluatorAgentTests(unittest.TestCase):
 
         decision = decide_evaluation_action(state, llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertTrue(decision.evaluation.approved)
-        self.assertLessEqual(decision.confidence, 0.7)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.82)
+        self.assertIn("Guardrail correction", decision.rationale)
         self.assertIn("temporal_health_lookup", decision.tool_names)
+
+    def test_llm_temporal_evaluator_repairs_contract_violation_before_fallback(self):
+        state = _temporal_state("run-evaluator-nasa-temporal-repair-001")
+        client = FakeLLMClient(
+            [
+                {
+                    "agent_name": "evaluator",
+                    "decision_id": "run-evaluator-nasa-temporal-repair-001:evaluator:001",
+                    "rationale": "Initial answer misses temporal guardrails.",
+                    "confidence": 0.95,
+                    "evaluation": {
+                        "approved": True,
+                        "summary": "Approved.",
+                        "next_action": "continue",
+                        "limitations": [],
+                    },
+                    "min_recall_required": None,
+                    "max_false_positive_rate": None,
+                    "tool_names": ["degradation_metrics_lookup"],
+                    "evidence_refs": ["tool:degradation_metrics_lookup"],
+                    "operational_assessment": "Looks good.",
+                    "temporal_debate_points": [],
+                    "temporal_guardrail_checks": [],
+                },
+                {
+                    "agent_name": "evaluator",
+                    "decision_id": "run-evaluator-nasa-temporal-repair-001:evaluator:001",
+                    "rationale": "Corrected after guardrail feedback.",
+                    "confidence": 0.86,
+                    "evaluation": {
+                        "approved": True,
+                        "summary": "Run-to-failure approved by temporal metrics.",
+                        "next_action": "continue",
+                        "limitations": [
+                            "Temporal proxy labels are not official per-window ground truth.",
+                            "RUL is not estimated in this run.",
+                        ],
+                    },
+                    "min_recall_required": None,
+                    "max_false_positive_rate": None,
+                    "tool_names": [
+                        "temporal_health_lookup",
+                        "degradation_metrics_lookup",
+                    ],
+                    "evidence_refs": [
+                        "tool:temporal_health_lookup",
+                        "tool:degradation_metrics_lookup",
+                        "temporal:first_persistent_alert",
+                        "metric:mean_lead_time_to_failure",
+                        "metric:mean_false_alarm_rate_nominal",
+                        "metric:mean_score_trend_spearman",
+                        "label_source:temporal_proxy",
+                    ],
+                    "operational_assessment": (
+                        "La decision separa pico aislado, aviso sostenido, "
+                        "RUL no estimado y etiquetas proxy no oficiales."
+                    ),
+                    "temporal_debate_points": [
+                        "Separar pico aislado de aviso sostenido antes de interpretar riesgo.",
+                        "Valorar falsas alarmas nominales frente a utilidad industrial.",
+                        "Las etiquetas proxy no son oficiales por ventana.",
+                        "F1 queda como metrica auxiliar, no principal.",
+                    ],
+                    "temporal_guardrail_checks": [
+                        "isolated_spike_not_failure",
+                        "sustained_alert_required",
+                        "rul_not_estimated",
+                        "proxy_labels_not_official",
+                        "f1_auxiliary_only",
+                    ],
+                },
+            ]
+        )
+
+        decision = decide_evaluation_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 2)
+        self.assertTrue(decision.evaluation.approved)
+        self.assertEqual(decision.confidence, 0.86)
+        self.assertNotIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("guardarrails del evaluador", client.messages[-1].content)
 
     def test_llm_temporal_evaluator_receives_tool_catalog_in_prompt(self):
         state = _temporal_state("run-evaluator-nasa-temporal-prompt-001")
@@ -278,10 +369,10 @@ class EvaluatorAgentTests(unittest.TestCase):
 
         decision = decide_evaluation_action(state, llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertTrue(decision.evaluation.approved)
         self.assertIsNone(decision.min_recall_required)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("Guardrail correction", decision.rationale)
 
     def test_llm_evaluation_decision_is_used_when_valid(self):
         state_dict = create_initial_cwru_state(
@@ -442,10 +533,10 @@ class EvaluatorAgentTests(unittest.TestCase):
             use_llm=True,
         )
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertFalse(decision.evaluation.approved)
         self.assertEqual(decision.evaluation.next_action, "continue")
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("Guardrail correction", decision.rationale)
 
     def test_invalid_llm_evaluation_decision_falls_back(self):
         state_dict = create_initial_cwru_state(
@@ -477,11 +568,11 @@ class EvaluatorAgentTests(unittest.TestCase):
 
         decision = decide_evaluation_action(state, llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertFalse(decision.evaluation.approved)
         self.assertEqual(decision.evaluation.next_action, "continue")
-        self.assertLessEqual(decision.confidence, 0.7)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.82)
+        self.assertIn("Guardrail correction", decision.rationale)
 
 
 def _evaluator_memory_context(run_id: str) -> RetrievedMemoryContext:
@@ -555,7 +646,12 @@ def _temporal_state(run_id: str):
             "metric_families": "binary_classification, run_to_failure_degradation",
             "degradation_available": True,
             "degradation_detected_before_failure_rate": 1.0,
+            "degradation_confirmed_degradation_before_failure_rate": 1.0,
             "degradation_mean_lead_time_to_failure": 300.0,
+            "degradation_mean_persistent_lead_time_to_failure": 240.0,
+            "degradation_mean_health_index_drop": 60.0,
+            "degradation_mean_health_monotonicity": 0.9,
+            "degradation_mean_health_robustness": 0.88,
             "degradation_mean_false_alarm_rate_nominal": 0.0,
             "degradation_mean_score_trend_spearman": 0.9,
         },

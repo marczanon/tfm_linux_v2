@@ -71,6 +71,16 @@ class RunVisualizationTests(unittest.TestCase):
             primary["detected_before_failure_rate"]["metric_family"],
             "run_to_failure_degradation",
         )
+        self.assertEqual(
+            primary["confirmed_degradation_before_failure_rate"]["value_kind"],
+            "ratio",
+        )
+        self.assertEqual(
+            primary["mean_persistent_lead_time_to_failure"]["value_kind"],
+            "seconds",
+        )
+        self.assertEqual(primary["mean_health_index_drop"]["value_kind"], "score")
+        self.assertEqual(primary["mean_health_monotonicity"]["value_kind"], "ratio")
         self.assertEqual(primary["mean_lead_time_to_failure"]["value_kind"], "seconds")
         auxiliary = {item["name"]: item["metric_family"] for item in payload["auxiliary_metrics"]}
         self.assertEqual(auxiliary["f1_score"], "binary_classification")
@@ -85,6 +95,14 @@ class RunVisualizationTests(unittest.TestCase):
         self.assertAlmostEqual(run["first_alert_time_to_failure_seconds"], 300.0)
         self.assertAlmostEqual(run["first_persistent_alert_x"], 0.571, places=3)
         self.assertEqual(run["persistent_alert_min_windows"], 3)
+        self.assertTrue(run["onset_confirmed"])
+        self.assertAlmostEqual(run["onset_confirmed_x"], 0.571, places=3)
+        self.assertEqual(run["health_policy_id"], "temporal_health_policy_v1")
+        self.assertEqual(run["alert_policy_id"], "alert_persistence_v1")
+        self.assertEqual(
+            run["health_indicator_policy_id"],
+            "health_indicator_policy_v1",
+        )
         self.assertEqual(run["failure_x"], 1.0)
         self.assertEqual(run["failure_reference"], "historic_replay")
         self.assertEqual(run["threshold"], 0.6)
@@ -96,9 +114,22 @@ class RunVisualizationTests(unittest.TestCase):
         self.assertEqual(run["isolated_alert_points"], 0)
         self.assertEqual(run["alert_episodes"], 1)
         self.assertEqual(run["longest_alert_streak"], 4)
+        self.assertGreater(run["health_index_drop"], 0.0)
+        self.assertGreaterEqual(run["health_monotonicity"], 0.5)
+        self.assertIsNotNone(run["health_robustness"])
+        self.assertIsNotNone(run["current_health_index_smoothed"])
+        self.assertIsNotNone(run["current_health_trend"])
         self.assertTrue(run["points"])
         self.assertEqual(run["points"][0]["health_state"], "nominal")
         self.assertGreater(run["points"][0]["health_index"], 80.0)
+        self.assertEqual(
+            run["points"][0]["health_policy_id"],
+            "temporal_health_policy_v1",
+        )
+        self.assertEqual(
+            run["points"][0]["health_indicator_policy_id"],
+            "health_indicator_policy_v1",
+        )
         self.assertEqual(run["points"][-1]["health_state"], "critical")
 
     def test_visualization_endpoint_returns_agent_recommendation(self):
@@ -439,10 +470,18 @@ def _write_temporal_metrics(metrics_path: Path) -> None:
   "degradation_metrics": {
     "available": true,
     "detected_before_failure_rate": 1.0,
+    "confirmed_degradation_before_failure_rate": 1.0,
     "mean_lead_time_to_failure": 300.0,
+    "mean_persistent_lead_time_to_failure": 400.0,
     "mean_false_alarm_rate_nominal": 0.125,
     "mean_score_trend_spearman": 0.91,
+    "mean_health_index_drop": 68.0,
+    "mean_health_monotonicity": 0.92,
+    "mean_health_robustness": 0.88,
+    "mean_health_nominal_volatility": 4.0,
+    "mean_health_indicator_score": 0.84,
     "missed_runs": 0,
+    "missed_confirmed_degradation_runs": 0,
     "mean_initial_final_separation": 0.42
   }
 }

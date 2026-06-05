@@ -20,6 +20,9 @@ class FakeLLMClient:
         self.calls += 1
         self.messages = messages
         self.json_schema = json_schema
+        if isinstance(self.payload, list):
+            index = min(self.calls - 1, len(self.payload) - 1)
+            return self.payload[index]
         return self.payload
 
 
@@ -364,11 +367,54 @@ class SupervisorAgentTests(unittest.TestCase):
 
         decision = decide_supervisor_action(state, llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertEqual(decision.next_stage, "dataset_manifest")
         self.assertEqual(decision.next_node, "manifest_executor")
-        self.assertLessEqual(decision.confidence, 0.7)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.82)
+        self.assertIn("Guardrail correction", decision.rationale)
+
+    def test_invalid_llm_transition_can_be_repaired_before_fallback(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-supervisor-test",
+                run_id="run-supervisor-repair-001",
+            )
+        )
+        client = FakeLLMClient(
+            [
+                {
+                    "agent_name": "supervisor",
+                    "decision_id": "run-supervisor-repair-001:supervisor:001",
+                    "current_stage": "dataset_manifest",
+                    "next_stage": "cleaning",
+                    "next_node": "cleaning_executor",
+                    "requires_human_review": False,
+                    "stop_reason": None,
+                    "rationale": "Invalid jump.",
+                    "confidence": 0.99,
+                },
+                {
+                    "agent_name": "supervisor",
+                    "decision_id": "run-supervisor-repair-001:supervisor:001",
+                    "current_stage": "dataset_manifest",
+                    "next_stage": "dataset_manifest",
+                    "next_node": "manifest_executor",
+                    "requires_human_review": False,
+                    "stop_reason": None,
+                    "rationale": "Corrected to the mandatory transition.",
+                    "confidence": 0.87,
+                },
+            ]
+        )
+
+        decision = decide_supervisor_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(decision.next_stage, "dataset_manifest")
+        self.assertEqual(decision.next_node, "manifest_executor")
+        self.assertEqual(decision.confidence, 0.87)
+        self.assertNotIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("Transicion obligatoria", client.messages[-1].content)
 
 
 if __name__ == "__main__":

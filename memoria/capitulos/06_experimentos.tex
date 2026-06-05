@@ -640,6 +640,78 @@ experimental es que la politica temporal desbloquea una ejecucion completa y
 auditable, aunque las metricas siguen siendo proxy metodologicas y requieren un
 protocolo mas robusto antes de usarse como resultado principal.
 
+\section{Experimento de cierre de Fase 9}
+
+El cierre de Fase 9 se valida con dos tipos de prueba: una suite comparable de
+modelos run-to-failure y una run agentica libre con Qwen. La primera comprueba
+que las familias PCA, Isolation Forest, One-Class SVM y autoencoder PyTorch se
+ejecutan bajo el mismo protocolo temporal. La segunda comprueba que el agente
+\texttt{modeler} mantiene capacidad de decision y no queda sustituido por una
+regla que fuerce el autoencoder.
+
+La suite ligera se ejecuto sobre
+\texttt{synthetic\_autoencoder\_readiness\_lite}, un conjunto NASA IMS-like de
+24 snapshots sinteticos preparado para no convertir el cierre de fase en un
+benchmark nuevo. La herramienta de readiness declaro
+\texttt{autoencoder\_ready=true}, \texttt{readiness\_level=caution} y
+\texttt{n\_train\_nominal\_windows=35}. RUL se mantuvo bloqueado por existir
+una sola trayectoria completa, lo que valida que readiness permite
+autoencoder pero no abre automaticamente pronostico de vida util.
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_run_to_failure_model_suite \
+  --plan-id fase9-hito4b-ae-readiness-lite-001 \
+  --raw-path codigo/data/raw/nasa_ims_bearing/synthetic_autoencoder_readiness_lite
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+La segunda prueba ejecuto el pipeline comun con agentes Qwen/Ollama reales:
+
+\begin{center}
+\begin{minipage}{0.95\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m codigo.scripts.run_dataset_pipeline_with_memory \
+  --dataset-id nasa_ims_bearing \
+  --adapter-id nasa_ims_bearing \
+  --dataset-policy-id nasa_ims_temporal_v1 \
+  --run-id fase9-agentic-modeler-readiness-lite-llm-guardrail-001 \
+  --raw-path codigo/data/raw/nasa_ims_bearing/synthetic_autoencoder_readiness_lite \
+  --use-llm
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+Esta run finalizo como \texttt{completed} y \texttt{approved=true}. El
+\texttt{modeler} eligio \texttt{pca\_reconstruction\_error}, no el
+autoencoder, priorizando interpretabilidad temporal y robustez ante etiquetas
+proxy. Al mismo tiempo, mantuvo \texttt{autoencoder\_dense\_temporal} como
+candidato comparable condicionado a readiness suficiente. Este resultado es
+metodologicamente importante: el autoencoder existe y puede ejecutarse, pero no
+quita protagonismo al agente.
+
+Por ultimo, se valido el hardening de fallbacks visibles. La misma linea de
+experimentos mostro que \texttt{supervisor}, \texttt{evaluator} y
+\texttt{report\_writer} inicial responden con LLM real y confianza alta; las
+salidas de contrato incorrectas se registran como \texttt{Guardrail
+correction} y no como fallos opacos de LLM. La verificacion completa de codigo
+tras el cierre produjo:
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\footnotesize
+\begin{verbatim}
+python -m unittest discover codigo/tests
+# Ran 352 tests
+# OK (skipped=1)
+\end{verbatim}
+\end{minipage}
+\end{center}
+
 \section{Validacion operativa de la aplicacion local}
 
 La Fase 5 no introduce un nuevo benchmark numerico, sino una validacion
@@ -674,12 +746,14 @@ capa que transforma datos.
 Experimentos previstos:
 
 \begin{itemize}
-  \item comparación entre features temporales y frecuenciales;
-  \item validación leave-one-load-out;
-  \item ejecuciones completas con memoria transversal para estructurador,
-        modelador y evaluador, sin forzar errores artificiales;
-  \item analisis de si los agentes citan recuerdos utiles y los transforman en
-        decisiones prudentes a lo largo de varias runs normales;
-  \item mejora del protocolo NASA IMS temporal v1 sobre secuencias mas largas,
-        especialmente umbral, tramo nominal y control de falsos positivos.
+  \item validacion de la misma metodologia sobre un segundo dataset
+        run-to-failure real, preferentemente XJTU-SY o PRONOSTIA;
+  \item extension del RUL experimental con intervalos e incertidumbre, sin
+        presentarlo como prediccion industrial validada;
+  \item comparacion entre features temporales, frecuenciales y representaciones
+        aprendidas cuando existan suficientes trayectorias completas;
+  \item validacion leave-one-run-out o por condicion operativa para reducir
+        riesgo de fuga temporal;
+  \item prueba Docker completa tras incorporar PyTorch como dependencia del
+        entorno local.
 \end{itemize}

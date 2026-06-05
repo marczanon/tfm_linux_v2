@@ -47,7 +47,18 @@ def decide_report_verification_action(
                 report_text,
                 client,
             )
-        except (LLMCallError, ValidationError, ValueError, OSError) as exc:
+        except (ValidationError, ValueError) as exc:
+            fallback = decide_report_verification_action_deterministic(
+                state,
+                report_markdown=report_text,
+            )
+            fallback.rationale = (
+                f"{fallback.rationale} Guardrail correction after invalid "
+                f"LLM report verification: {exc}"
+            )
+            fallback.confidence = min(fallback.confidence, 0.72)
+            return fallback
+        except (LLMCallError, OSError) as exc:
             fallback = decide_report_verification_action_deterministic(
                 state,
                 report_markdown=report_text,
@@ -69,14 +80,25 @@ def decide_report_verification_action_with_llm(
 ) -> ReportVerificationDecision:
     """Solicita al LLM una verificacion factual validada."""
 
+    messages = _report_verifier_messages(state, report_markdown)
+    schema = ReportVerificationDecision.model_json_schema()
     payload = llm_client.complete_json(
-        _report_verifier_messages(state, report_markdown),
-        json_schema=ReportVerificationDecision.model_json_schema(),
+        messages,
+        json_schema=schema,
     )
-    payload = _coerce_verification_payload(state, payload)
-    decision = ReportVerificationDecision.model_validate(payload)
-    _validate_verification_decision_bounds(state, decision)
-    return decision
+    try:
+        return _validated_report_verification_from_payload(state, payload)
+    except (ValidationError, ValueError) as exc:
+        repaired_payload = llm_client.complete_json(
+            _report_verifier_contract_repair_messages(
+                state,
+                messages,
+                invalid_payload=payload,
+                validation_error=exc,
+            ),
+            json_schema=schema,
+        )
+        return _validated_report_verification_from_payload(state, repaired_payload)
 
 
 def decide_report_verification_action_deterministic(
@@ -84,7 +106,7 @@ def decide_report_verification_action_deterministic(
     *,
     report_markdown: str | None = None,
 ) -> ReportVerificationDecision:
-    """Fallback reproducible: detecta riesgos evidentes sin reescribir el informe."""
+    """Verificacion reproducible: detecta riesgos evidentes sin reescribir el informe."""
 
     report_text = report_markdown if report_markdown is not None else _read_report(state)
     issues = _deterministic_issues(state, report_text)
@@ -92,7 +114,7 @@ def decide_report_verification_action_deterministic(
     return ReportVerificationDecision(
         decision_id=f"{state.run_id}:report_verifier:{_verifier_turn(state):03d}",
         rationale=(
-            "Fallback verifier policy: check obvious unsupported industrial claims, "
+            "Deterministic verifier policy: check obvious unsupported industrial claims, "
             "dataset policy risks and missing critical limitations. Style choices are "
             "accepted when they do not change factual meaning."
         ),
@@ -241,6 +263,46 @@ def _should_use_llm(
     if llm_client is not None:
         return True
     return os.getenv(REPORT_VERIFIER_MODE_ENV, "").strip().lower() == "llm"
+
+
+def _validated_report_verification_from_payload(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+) -> ReportVerificationDecision:
+    normalized = _coerce_verification_payload(state, payload)
+    decision = ReportVerificationDecision.model_validate(normalized)
+    _validate_verification_decision_bounds(state, decision)
+    return decision
+
+
+def _report_verifier_contract_repair_messages(
+    state: TFMStateModel,
+    original_messages: list[LLMMessage],
+    *,
+    invalid_payload: dict[str, Any],
+    validation_error: Exception,
+) -> list[LLMMessage]:
+    return [
+        *original_messages,
+        LLMMessage(
+            role="assistant",
+            content=json.dumps(invalid_payload, indent=2, ensure_ascii=True),
+        ),
+        LLMMessage(
+            role="user",
+            content="\n".join(
+                [
+                    "La verificacion anterior no valida contra el contrato.",
+                    f"Error de validacion: {validation_error}",
+                    "Corrige solo lo necesario y reemite un unico objeto JSON valido.",
+                    "No inventes evidencias ni cites refs fuera del catalogo.",
+                    f"decision_id obligatorio: {state.run_id}:report_verifier:{_verifier_turn(state):03d}.",
+                    f"report_path obligatorio: {_expected_report_path(state)}.",
+                    "No incluyas texto fuera del JSON.",
+                ]
+            ),
+        ),
+    ]
 
 
 def _validate_verification_decision_bounds(

@@ -48,7 +48,15 @@ def decide_report_action(
         try:
             client = llm_client or get_default_json_llm_client()
             return decide_report_action_with_llm(state, client)
-        except (LLMCallError, ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError) as exc:
+            fallback = decide_report_action_deterministic(state)
+            fallback.rationale = (
+                f"{fallback.rationale} Guardrail correction after invalid "
+                f"LLM report decision: {exc}"
+            )
+            fallback.confidence = min(fallback.confidence, 0.82)
+            return fallback
+        except LLMCallError as exc:
             fallback = decide_report_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
             fallback.confidence = min(fallback.confidence, 0.7)
@@ -63,13 +71,24 @@ def decide_report_action_with_llm(
 ) -> ReportDecision:
     """Solicita al LLM una ReportDecision y valida sus limites."""
 
+    messages = _report_writer_messages(state)
+    schema = ReportDecision.model_json_schema()
     payload = llm_client.complete_json(
-        _report_writer_messages(state),
-        json_schema=ReportDecision.model_json_schema(),
+        messages,
+        json_schema=schema,
     )
-    decision = ReportDecision.model_validate(payload)
-    _validate_report_decision_bounds(state, decision)
-    return decision
+    try:
+        return _validated_report_decision_from_payload(state, payload)
+    except (ValidationError, ValueError) as exc:
+        repaired_payload = llm_client.complete_json(
+            _report_contract_repair_messages(
+                messages,
+                invalid_payload=payload,
+                validation_error=exc,
+            ),
+            json_schema=schema,
+        )
+        return _validated_report_decision_from_payload(state, repaired_payload)
 
 
 def decide_report_action_deterministic(state: TFMStateModel) -> ReportDecision:
@@ -78,7 +97,7 @@ def decide_report_action_deterministic(state: TFMStateModel) -> ReportDecision:
     return ReportDecision(
         decision_id=f"{state.run_id}:report_writer:{_report_turn(state):03d}",
         rationale=(
-            "Fallback report policy: generate a concise Markdown report with "
+            "Deterministic report policy: generate a concise Markdown report with "
             "context, pipeline configuration, metrics, artifacts and limitations."
         ),
         confidence=1.0,
@@ -110,7 +129,20 @@ def decide_report_revision_action(
                 original_decision=original_decision,
                 revision_round=revision_round,
             )
-        except (LLMCallError, ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError) as exc:
+            fallback = decide_report_revision_action_deterministic(
+                state,
+                verification,
+                original_decision=original_decision,
+                revision_round=revision_round,
+            )
+            fallback.rationale = (
+                f"{fallback.rationale} Guardrail correction after invalid "
+                f"LLM report revision: {exc}"
+            )
+            fallback.confidence = min(fallback.confidence, 0.82)
+            return fallback
+        except LLMCallError as exc:
             fallback = decide_report_revision_action_deterministic(
                 state,
                 verification,
@@ -141,18 +173,37 @@ def decide_report_revision_action_with_llm(
 ) -> ReportRevisionDecision:
     """Solicita al LLM una revision del informe validada."""
 
+    messages = _report_revision_messages(
+        state,
+        verification,
+        original_decision=original_decision,
+        revision_round=revision_round,
+    )
+    schema = ReportRevisionDecision.model_json_schema()
     payload = llm_client.complete_json(
-        _report_revision_messages(
+        messages,
+        json_schema=schema,
+    )
+    try:
+        return _validated_report_revision_decision_from_payload(
             state,
             verification,
-            original_decision=original_decision,
-            revision_round=revision_round,
-        ),
-        json_schema=ReportRevisionDecision.model_json_schema(),
-    )
-    decision = ReportRevisionDecision.model_validate(payload)
-    _validate_report_revision_bounds(state, verification, decision)
-    return decision
+            payload,
+        )
+    except (ValidationError, ValueError) as exc:
+        repaired_payload = llm_client.complete_json(
+            _report_contract_repair_messages(
+                messages,
+                invalid_payload=payload,
+                validation_error=exc,
+            ),
+            json_schema=schema,
+        )
+        return _validated_report_revision_decision_from_payload(
+            state,
+            verification,
+            repaired_payload,
+        )
 
 
 def decide_report_revision_action_deterministic(
@@ -187,7 +238,7 @@ def decide_report_revision_action_deterministic(
             f"{state.run_id}:report_writer_revision:{revision_round:03d}"
         ),
         rationale=(
-            "Fallback revision policy: regenerate a conservative report from "
+            "Deterministic revision policy: regenerate a conservative report from "
             "validated state and explicitly address verifier findings."
         ),
         confidence=0.82 if issues else 0.9,
@@ -207,6 +258,54 @@ def decide_report_revision_action_deterministic(
         changes_summary=changes,
         evidence_refs=evidence_refs,
     )
+
+
+def _validated_report_decision_from_payload(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+) -> ReportDecision:
+    decision = ReportDecision.model_validate(payload)
+    _validate_report_decision_bounds(state, decision)
+    return decision
+
+
+def _validated_report_revision_decision_from_payload(
+    state: TFMStateModel,
+    verification: ReportVerificationDecision,
+    payload: dict[str, Any],
+) -> ReportRevisionDecision:
+    decision = ReportRevisionDecision.model_validate(payload)
+    _validate_report_revision_bounds(state, verification, decision)
+    return decision
+
+
+def _report_contract_repair_messages(
+    original_messages: list[LLMMessage],
+    *,
+    invalid_payload: dict[str, Any],
+    validation_error: Exception,
+) -> list[LLMMessage]:
+    return [
+        *original_messages,
+        LLMMessage(
+            role="assistant",
+            content=json.dumps(invalid_payload, indent=2, ensure_ascii=True),
+        ),
+        LLMMessage(
+            role="user",
+            content="\n".join(
+                [
+                    "La decision anterior no valida contra el contrato del redactor.",
+                    f"Error de validacion: {validation_error}",
+                    "Corrige solo lo necesario y reemite un unico objeto JSON valido.",
+                    "No inventes rutas, evidencias ni metricas.",
+                    "No cambies decision_id, output_path ni output_format.",
+                    "Conserva todas las secciones obligatorias.",
+                    "No incluyas texto fuera del JSON.",
+                ]
+            ),
+        ),
+    ]
 
 
 def _should_use_llm(
@@ -250,6 +349,8 @@ def _report_writer_messages(state: TFMStateModel) -> list[LLMMessage]:
                     f"- output_path debe ser {_default_report_path(state)}.",
                     "- Incluye todas las secciones obligatorias.",
                     "- Redacta las secciones en castellano tecnico claro.",
+                    "- Manten cada body por debajo de 280 caracteres.",
+                    "- Usa como maximo 3 key_findings y 2 recommendations por seccion.",
                     "- No devuelvas el informe como JSON al usuario final: este "
                     "JSON es solo el contrato interno validable.",
                     "- source_paths solo puede contener rutas ya presentes en el estado.",
@@ -318,6 +419,8 @@ def _report_revision_messages(
                     "- output_format debe ser markdown.",
                     f"- output_path debe ser {_default_report_path(state)}.",
                     "- Conserva todas las secciones obligatorias.",
+                    "- Manten cada body por debajo de 280 caracteres.",
+                    "- Usa como maximo 3 key_findings y 2 recommendations por seccion.",
                     "- accepted_issue_ids y rejected_issue_ids deben responder a las incidencias.",
                     "- Si rechazas una incidencia, explica por que era estilo y no falsedad.",
                     "- No presentes validacion industrial, etiquetas oficiales o aprobacion si la evidencia no lo respalda.",
@@ -338,7 +441,7 @@ def _report_json_template(state: TFMStateModel) -> dict[str, Any]:
         "confidence": 0.9,
         "output_path": _default_report_path(state),
         "output_format": DEFAULT_REPORT_FORMAT,
-        "sections": [section.model_dump(mode="json") for section in _default_sections(state)],
+        "sections": _compact_report_sections_template(state),
     }
 
 
@@ -365,7 +468,7 @@ def _revision_json_template(
         "verifier_decision_id": verification.decision_id,
         "output_path": _default_report_path(state),
         "output_format": DEFAULT_REPORT_FORMAT,
-        "sections": [section.model_dump(mode="json") for section in _default_sections(state)],
+        "sections": _compact_report_sections_template(state),
         "accepted_issue_ids": issue_ids,
         "rejected_issue_ids": [],
         "rejection_rationales": {},
@@ -378,6 +481,74 @@ def _revision_json_template(
             }
         ),
     }
+
+
+def _compact_report_sections_template(state: TFMStateModel) -> list[dict[str, Any]]:
+    metrics_path = None if state.metrics is None else state.metrics.metrics_path
+    manifest_sources = [path for path in [state.manifest_path, state.profile_path] if path]
+    artifact_paths = [artifact.path for artifact in state.artifacts[:6]]
+    return [
+        {
+            "title": "Resumen ejecutivo",
+            "body": "Sintesis breve de aprobacion, objetivo y cautelas.",
+            "key_findings": ["Hallazgo principal."],
+            "recommendations": ["Siguiente paso recomendado."],
+            "evidence_refs": [],
+            "include_metrics": False,
+            "include_artifacts": False,
+            "source_paths": [],
+        },
+        {
+            "title": "Contexto y datos",
+            "body": "Dataset, perfil de supervision y fuente de etiquetas.",
+            "key_findings": ["Contexto relevante."],
+            "recommendations": [],
+            "evidence_refs": [],
+            "include_metrics": False,
+            "include_artifacts": False,
+            "source_paths": manifest_sources,
+        },
+        {
+            "title": "Configuraciones del pipeline",
+            "body": "Limpieza, estructuracion y modelado elegidos.",
+            "key_findings": ["Configuracion trazable."],
+            "recommendations": [],
+            "evidence_refs": [],
+            "include_metrics": False,
+            "include_artifacts": False,
+            "source_paths": [],
+        },
+        {
+            "title": "Metricas y evaluacion",
+            "body": "Lectura principal de metricas y decision operacional.",
+            "key_findings": ["Metrica temporal clave."],
+            "recommendations": ["Revisar evidencia temporal."],
+            "evidence_refs": [],
+            "include_metrics": True,
+            "include_artifacts": False,
+            "source_paths": [path for path in [metrics_path] if path],
+        },
+        {
+            "title": "Artefactos generados",
+            "body": "Artefactos necesarios para reproducir la run.",
+            "key_findings": ["Artefactos registrados."],
+            "recommendations": [],
+            "evidence_refs": [],
+            "include_metrics": False,
+            "include_artifacts": True,
+            "source_paths": artifact_paths,
+        },
+        {
+            "title": "Limitaciones y siguientes pasos",
+            "body": "Limitaciones metodologicas y cautelas de uso.",
+            "key_findings": ["Limitacion principal."],
+            "recommendations": ["No extrapolar sin validacion adicional."],
+            "evidence_refs": [],
+            "include_metrics": False,
+            "include_artifacts": False,
+            "source_paths": [],
+        },
+    ]
 
 
 def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
@@ -540,10 +711,16 @@ def _metrics_body(state: TFMStateModel) -> str:
         return (
             "La evaluacion principal corresponde al perfil temporal "
             "run-to-failure. El informe interpreta el detector por trayectoria: "
-            "lead time hasta fallo="
-            f"{_format_metric(_metric_extra_float(state, 'degradation_mean_lead_time_to_failure'))}, "
+            "onset confirmado="
+            f"{_format_metric(_metric_extra_float_any(state, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}, "
+            "lead time persistente hasta fallo="
+            f"{_format_metric(_metric_extra_float_any(state, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}, "
             "falsa alarma nominal="
             f"{_format_metric(_metric_extra_float(state, 'degradation_mean_false_alarm_rate_nominal'))} "
+            "caida Health Index="
+            f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_index_drop'))}, "
+            "monotonicidad Health Index="
+            f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_monotonicity'))} "
             "y tendencia Spearman del score="
             f"{_format_metric(_metric_extra_float(state, 'degradation_mean_score_trend_spearman'))}. "
             "Las metricas binarias quedan como apoyo si proceden de una politica "
@@ -569,12 +746,28 @@ def _metrics_findings(state: TFMStateModel) -> list[str]:
                 f"{_format_metric(_metric_extra_float(state, 'degradation_n_runs'))}."
             ),
             (
-                "Lead time medio a fallo: "
-                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_lead_time_to_failure'))}."
+                "Onset confirmado antes de fallo: "
+                f"{_format_metric(_metric_extra_float_any(state, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}."
+            ),
+            (
+                "Lead time persistente medio a fallo: "
+                f"{_format_metric(_metric_extra_float_any(state, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}."
             ),
             (
                 "Falsa alarma nominal media: "
                 f"{_format_metric(_metric_extra_float(state, 'degradation_mean_false_alarm_rate_nominal'))}."
+            ),
+            (
+                "Caida media del Health Index: "
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_index_drop'))}."
+            ),
+            (
+                "Monotonicidad media del Health Index: "
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_monotonicity'))}."
+            ),
+            (
+                "Robustez media del Health Index: "
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_robustness'))}."
             ),
             (
                 "Tendencia Spearman media del score: "
@@ -698,6 +891,14 @@ def _metric_extra_float(state: TFMStateModel, key: str) -> float | None:
     return None
 
 
+def _metric_extra_float_any(state: TFMStateModel, *keys: str) -> float | None:
+    for key in keys:
+        value = _metric_extra_float(state, key)
+        if value is not None:
+            return value
+    return None
+
+
 def _verification_payload_for_revision(
     verification: ReportVerificationDecision,
 ) -> dict[str, Any]:
@@ -804,10 +1005,16 @@ def _metric_phrase(state: TFMStateModel) -> str:
         return "No hay metricas cuantitativas agregadas en el estado."
     if _uses_temporal_degradation_profile(state):
         return (
-            "El resumen temporal principal es lead_time_medio="
-            f"{_format_metric(_metric_extra_float(state, 'degradation_mean_lead_time_to_failure'))}, "
+            "El resumen temporal principal es onset_confirmado="
+            f"{_format_metric(_metric_extra_float_any(state, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}, "
+            "lead_time_persistente="
+            f"{_format_metric(_metric_extra_float_any(state, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}, "
             "falsa_alarma_nominal="
             f"{_format_metric(_metric_extra_float(state, 'degradation_mean_false_alarm_rate_nominal'))} "
+            "HI_drop="
+            f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_index_drop'))}, "
+            "HI_monotonicidad="
+            f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_monotonicity'))} "
             "y tendencia_score="
             f"{_format_metric(_metric_extra_float(state, 'degradation_mean_score_trend_spearman'))}."
         )

@@ -1,4 +1,5 @@
 import csv
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -213,6 +214,100 @@ class ModelingExecutorTests(unittest.TestCase):
         )
         self.assertEqual(model_bundle["model_family"], "sklearn_one_class_svm")
         self.assertIn("scaler", model_bundle)
+        self.assertEqual(len(predictions), 8)
+        self.assertIn("anomaly_score", predictions[0])
+
+    def test_invalid_autoencoder_hyperparameter_returns_failed_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            features_path = base / "features.csv"
+            write_features(features_path, feature_rows())
+
+            result = generate_model_outputs(
+                features_path,
+                base / "models",
+                ModelingConfig(
+                    model_name="autoencoder_dense",
+                    hyperparameters={"freeform_layers": "128,64"},
+                ),
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("unsupported autoencoder_dense", result.errors[0].message)
+
+    @unittest.skipIf(
+        importlib.util.find_spec("torch") is not None,
+        "PyTorch is available; missing dependency path is not applicable.",
+    )
+    def test_autoencoder_returns_clear_error_when_pytorch_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            features_path = base / "features.csv"
+            write_features(features_path, feature_rows())
+
+            result = generate_model_outputs(
+                features_path,
+                base / "models",
+                ModelingConfig(
+                    model_name="autoencoder_dense",
+                    random_state=42,
+                    hyperparameters={
+                        "hidden_layers": "4",
+                        "latent_dim": 1,
+                        "learning_rate": 0.001,
+                        "batch_size": 4,
+                        "max_epochs": 3,
+                        "patience": 1,
+                        "weight_decay": 0.0,
+                        "threshold_quantile": 0.95,
+                        "device": "cpu",
+                    },
+                ),
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("PyTorch is required", result.errors[0].message)
+
+    @unittest.skipIf(
+        importlib.util.find_spec("torch") is None,
+        "PyTorch is not installed in this environment.",
+    )
+    def test_train_autoencoder_dense_model_writes_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            features_path = base / "features.csv"
+            output_dir = base / "models"
+            write_features(features_path, feature_rows())
+
+            summary = train_anomaly_model(
+                features_path,
+                output_dir,
+                ModelingConfig(
+                    model_name="autoencoder_dense",
+                    random_state=42,
+                    hyperparameters={
+                        "hidden_layers": "4",
+                        "latent_dim": 1,
+                        "learning_rate": 0.001,
+                        "batch_size": 4,
+                        "max_epochs": 5,
+                        "patience": 2,
+                        "weight_decay": 0.0,
+                        "threshold_quantile": 0.95,
+                        "device": "cpu",
+                    },
+                ),
+            )
+            with open(summary["predictions_path"], encoding="utf-8") as file:
+                predictions = list(csv.DictReader(file))
+            preprocessor_exists = Path(summary["preprocessor_path"]).exists()
+            training_curve_exists = Path(summary["training_curve_path"]).exists()
+
+        self.assertEqual(summary["model_name"], "autoencoder_dense")
+        self.assertEqual(summary["model_path"], (output_dir / "autoencoder_dense.pt").as_posix())
+        self.assertEqual(summary["model_family"], "torch_autoencoder_dense")
+        self.assertTrue(preprocessor_exists)
+        self.assertTrue(training_curve_exists)
         self.assertEqual(len(predictions), 8)
         self.assertIn("anomaly_score", predictions[0])
 

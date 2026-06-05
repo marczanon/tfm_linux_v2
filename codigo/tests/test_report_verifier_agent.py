@@ -14,6 +14,9 @@ class FakeLLMClient:
         self.calls += 1
         self.messages = messages
         self.json_schema = json_schema
+        if isinstance(self.payload, list):
+            index = min(self.calls - 1, len(self.payload) - 1)
+            return self.payload[index]
         return self.payload
 
 
@@ -151,7 +154,7 @@ class ReportVerifierAgentTests(unittest.TestCase):
         self.assertEqual(decision.summary, "El informe es factual y no requiere revisiones.")
         self.assertIn("metric:recall", decision.evidence_refs)
 
-    def test_invalid_llm_verification_falls_back(self):
+    def test_invalid_llm_verification_uses_guardrail_correction(self):
         client = FakeLLMClient(
             {
                 "agent_name": "report_verifier",
@@ -171,13 +174,13 @@ class ReportVerifierAgentTests(unittest.TestCase):
             use_llm=True,
         )
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertEqual(
             decision.report_path,
             "codigo/reports/cwru_bearing/run-report-001/final_report.md",
         )
-        self.assertLessEqual(decision.confidence, 0.65)
-        self.assertIn("Fallback after verifier LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.72)
+        self.assertIn("Guardrail correction", decision.rationale)
         self.assertNotIn("validation errors", decision.rationale)
         self.assertNotIn("errors.pydantic.dev", decision.rationale)
 

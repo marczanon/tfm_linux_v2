@@ -12,6 +12,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from codigo.app.executors.modeling import (
+    AUTOENCODER_DENSE_PARAMS,
+    DEFAULT_AUTOENCODER_DENSE_CONFIG,
     DEFAULT_MODELING_CONFIG,
     DEFAULT_OCSVM_MODELING_CONFIG,
     DEFAULT_PCA_MODELING_CONFIG,
@@ -37,11 +39,13 @@ from codigo.app.services.vector_memory import VectorMemoryStore
 
 
 SUPPORTED_MODEL_NAMES = {
+    "autoencoder_dense",
     "isolation_forest",
     "one_class_svm",
     "pca_reconstruction_error",
 }
 SUPPORTED_HYPERPARAMETERS_BY_MODEL = {
+    "autoencoder_dense": AUTOENCODER_DENSE_PARAMS,
     "isolation_forest": SKLEARN_IFOREST_PARAMS | {"threshold_quantile"},
     "one_class_svm": SKLEARN_OCSVM_PARAMS | {"threshold_quantile"},
     "pca_reconstruction_error": SKLEARN_PCA_PARAMS | {"threshold_quantile"},
@@ -49,6 +53,10 @@ SUPPORTED_HYPERPARAMETERS_BY_MODEL = {
 RUN_TO_FAILURE_REQUIRED_TOOLS = {
     "temporal_health_lookup",
     "degradation_metrics_lookup",
+}
+ADVANCED_TEMPORAL_MODEL_NAMES = {
+    "autoencoder_dense",
+    "lstm_autoencoder",
 }
 RUN_TO_FAILURE_REQUIRED_TARGETS = {
     "detected_before_failure_rate",
@@ -153,9 +161,11 @@ def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDec
             evidence_refs=[
                 "tool:temporal_health_lookup",
                 "tool:degradation_metrics_lookup",
+                "tool:temporal_model_readiness_assessor",
                 "temporal:run_to_failure_profile",
                 "temporal:first_persistent_alert",
                 "temporal:longest_alert_streak",
+                "readiness:temporal_model_readiness",
                 "metric:mean_lead_time_to_failure",
                 "metric:mean_false_alarm_rate_nominal",
                 "metric:mean_score_trend_spearman",
@@ -164,10 +174,12 @@ def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDec
             risk_notes=[
                 "Las etiquetas proxy o sinteticas no deben tratarse como ground truth oficial.",
                 "El umbral solo define alertas; la trayectoria del score tambien debe evaluarse.",
+                "Autoencoder y RUL experimental requieren readiness explicito antes de proponerse.",
             ],
             tool_names=[
                 "temporal_health_lookup",
                 "degradation_metrics_lookup",
+                "temporal_model_readiness_assessor",
             ],
             optimization_targets=[
                 "detected_before_failure_rate",
@@ -547,10 +559,7 @@ def _modeler_messages(
                         "la cautela en risk_notes."
                     ),
                     "- modeling_config debe validar contra ModelingConfig.",
-                    (
-                        "- model_name debe estar soportado: isolation_forest, "
-                        "one_class_svm o pca_reconstruction_error."
-                    ),
+                    "- model_name debe estar soportado: " + _supported_models_text(state) + ".",
                     "- random_state debe ser 42.",
                     "- train_split debe ser train.",
                     "- validation_split debe ser validation o null.",
@@ -561,6 +570,12 @@ def _modeler_messages(
                         "- Para one_class_svm puedes usar kernel, nu, gamma, "
                         "degree, coef0, shrinking, tol, cache_size y max_iter "
                         "dentro de rangos validos."
+                    ),
+                    (
+                        "- Para autoencoder_dense solo puedes usar "
+                        "hidden_layers como string CSV, latent_dim, "
+                        "learning_rate, batch_size, max_epochs, patience, "
+                        "weight_decay, threshold_quantile y device=cpu."
                     ),
                     (
                         "- Incluye comparison_candidates con 1 a 3 alternativas "
@@ -780,8 +795,10 @@ def _modeler_json_template(
             "evidence_refs": [
                 "tool:temporal_health_lookup",
                 "tool:degradation_metrics_lookup",
+                "tool:temporal_model_readiness_assessor",
                 "temporal:first_persistent_alert",
                 "temporal:longest_alert_streak",
+                "readiness:temporal_model_readiness",
                 "metric:mean_lead_time_to_failure",
                 "metric:mean_false_alarm_rate_nominal",
                 "metric:mean_score_trend_spearman",
@@ -793,6 +810,7 @@ def _modeler_json_template(
             "tool_names": [
                 "temporal_health_lookup",
                 "degradation_metrics_lookup",
+                "temporal_model_readiness_assessor",
             ],
             "optimization_targets": [
                 "detected_before_failure_rate",
@@ -884,6 +902,18 @@ def _modeler_comparison_candidates_template(state: TFMStateModel) -> list[dict[s
                 "expected_effect": (
                     "Contrastar sensibilidad temporal a degradacion con nu/gamma "
                     "controlados."
+                ),
+            },
+            {
+                "alternative_id": "autoencoder_dense_temporal",
+                "modeling_config": DEFAULT_AUTOENCODER_DENSE_CONFIG.model_dump(mode="json"),
+                "rationale": (
+                    "Comparar reconstruccion no lineal aprendida si readiness "
+                    "declara suficientes ventanas train nominales."
+                ),
+                "expected_effect": (
+                    "Evaluar si el error de reconstruccion PyTorch mejora "
+                    "sensibilidad de degradacion sin disparar falsas alarmas."
                 ),
             },
         ]
@@ -1082,6 +1112,11 @@ def _profile_specific_modeler_rules(state: TFMStateModel) -> list[str]:
             "degradation_metrics_lookup."
         ),
         (
+            "- Usa temporal_model_readiness_assessor como herramienta read-only "
+            "cuando valores autoencoder_dense, LSTM o RUL experimental; no "
+            "propongas modelos avanzados sin citar readiness."
+        ),
+        (
             "- evidence_refs debe citar las herramientas usadas y al menos una "
             "referencia temporal o metrica de degradacion."
         ),
@@ -1094,6 +1129,15 @@ def _profile_specific_modeler_rules(state: TFMStateModel) -> list[str]:
             "sostenido y umbral auxiliar."
         ),
     ]
+
+
+def _supported_models_text(state: TFMStateModel) -> str:
+    if _uses_temporal_degradation_profile(state):
+        return (
+            "isolation_forest, one_class_svm, pca_reconstruction_error "
+            "o autoencoder_dense con readiness explicito"
+        )
+    return "isolation_forest, one_class_svm o pca_reconstruction_error"
 
 
 def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
@@ -1328,6 +1372,10 @@ def _validate_modeling_decision_bounds(
     _validate_modeler_memory_usage(decision, memory_context=memory_context)
     for candidate in decision.comparison_candidates:
         _validate_supported_modeling_config(candidate.modeling_config)
+        _validate_advanced_model_scope(
+            state,
+            candidate.modeling_config,
+        )
 
 
 def _validate_modeler_memory_usage(
@@ -1378,6 +1426,7 @@ def _validate_single_modeling_decision(
             "model_name must be one of "
             f"{', '.join(sorted(SUPPORTED_MODEL_NAMES))}"
         )
+    _validate_advanced_model_scope(state, config)
     if config.random_state != 42:
         raise ValueError("random_state must be 42 for reproducible MVP runs")
     if decision.train_split != "train":
@@ -1445,6 +1494,8 @@ def _validate_modeling_retry_decision_bounds(
         if decision.retry_config is None:
             raise ValueError("retry_config is required when should_retry=true")
         _validate_supported_modeling_config(decision.retry_config)
+        if decision.retry_config.model_name in ADVANCED_TEMPORAL_MODEL_NAMES:
+            raise ValueError("advanced temporal models are not supported for retry decisions")
         if decision.retry_config.random_state != 42:
             raise ValueError("random_state must be 42 for retry runs")
         if _modeling_config_key(decision.retry_config) == _modeling_config_key(
@@ -1503,6 +1554,35 @@ def _validate_run_to_failure_modeling_strategy(decision: ModelingDecision) -> No
         raise ValueError("run-to-failure alert_policy must address isolated spikes")
     if "f1" in " ".join(strategy.optimization_targets).lower():
         raise ValueError("run-to-failure optimization_targets cannot prioritize F1")
+    selected_and_candidates = [
+        decision.modeling_config,
+        *[candidate.modeling_config for candidate in decision.comparison_candidates],
+    ]
+    if any(
+        config.model_name in ADVANCED_TEMPORAL_MODEL_NAMES
+        for config in selected_and_candidates
+    ):
+        if "temporal_model_readiness_assessor" not in strategy.tool_names:
+            raise ValueError(
+                "advanced temporal models require temporal_model_readiness_assessor"
+            )
+        if "tool:temporal_model_readiness_assessor" not in evidence_refs:
+            raise ValueError(
+                "advanced temporal models must cite readiness tool evidence"
+            )
+        if not any(ref.startswith("readiness:") for ref in evidence_refs):
+            raise ValueError("advanced temporal models must cite readiness refs")
+
+
+def _validate_advanced_model_scope(
+    state: TFMStateModel,
+    config: ModelingConfig,
+) -> None:
+    if config.model_name not in ADVANCED_TEMPORAL_MODEL_NAMES:
+        return
+    if not _uses_temporal_degradation_profile(state):
+        raise ValueError("advanced temporal models are only supported for run-to-failure")
+    _validate_autoencoder_dense_decision_hyperparameters(config.hyperparameters)
 
 
 def _validate_supported_modeling_config(config: ModelingConfig) -> None:
@@ -1548,6 +1628,8 @@ def _validate_supported_modeling_config(config: ModelingConfig) -> None:
                 raise ValueError("n_components must be numeric")
     if config.model_name == "one_class_svm":
         _validate_one_class_svm_hyperparameters(config.hyperparameters)
+    if config.model_name == "autoencoder_dense":
+        _validate_autoencoder_dense_decision_hyperparameters(config.hyperparameters)
 
 
 def _validate_one_class_svm_hyperparameters(
@@ -1614,8 +1696,83 @@ def _validate_one_class_svm_hyperparameters(
             )
 
 
+def _validate_autoencoder_dense_decision_hyperparameters(
+    hyperparameters: dict[str, Any],
+) -> None:
+    unsupported = sorted(set(hyperparameters) - AUTOENCODER_DENSE_PARAMS)
+    if unsupported:
+        raise ValueError(
+            "unsupported autoencoder_dense hyperparameters: "
+            + ", ".join(unsupported)
+        )
+
+    hidden_layers = hyperparameters.get("hidden_layers", "32,16")
+    if isinstance(hidden_layers, bool):
+        raise ValueError("autoencoder_dense hidden_layers must be integer or csv string")
+    if isinstance(hidden_layers, int):
+        layers = [hidden_layers]
+    elif isinstance(hidden_layers, str):
+        try:
+            layers = [
+                int(part.strip())
+                for part in hidden_layers.split(",")
+                if part.strip()
+            ]
+        except ValueError as exc:
+            raise ValueError(
+                "autoencoder_dense hidden_layers must contain integers"
+            ) from exc
+    else:
+        raise ValueError("autoencoder_dense hidden_layers must be integer or csv string")
+    if not 1 <= len(layers) <= 3:
+        raise ValueError("autoencoder_dense hidden_layers must define 1 to 3 layers")
+    if any(layer < 2 or layer > 256 for layer in layers):
+        raise ValueError("autoencoder_dense hidden_layers values must be in [2, 256]")
+
+    latent_dim = hyperparameters.get("latent_dim", 8)
+    if isinstance(latent_dim, bool) or not isinstance(latent_dim, int):
+        raise ValueError("autoencoder_dense latent_dim must be an integer")
+    if not 1 <= latent_dim <= 64:
+        raise ValueError("autoencoder_dense latent_dim must be between 1 and 64")
+
+    learning_rate = hyperparameters.get("learning_rate", 0.001)
+    if isinstance(learning_rate, bool) or not isinstance(learning_rate, int | float):
+        raise ValueError("autoencoder_dense learning_rate must be numeric")
+    if not 1e-5 <= float(learning_rate) <= 1e-2:
+        raise ValueError("autoencoder_dense learning_rate must be between 1e-5 and 1e-2")
+
+    batch_size = hyperparameters.get("batch_size", 32)
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+        raise ValueError("autoencoder_dense batch_size must be an integer")
+    if not 4 <= batch_size <= 512:
+        raise ValueError("autoencoder_dense batch_size must be between 4 and 512")
+
+    max_epochs = hyperparameters.get("max_epochs", 100)
+    if isinstance(max_epochs, bool) or not isinstance(max_epochs, int):
+        raise ValueError("autoencoder_dense max_epochs must be an integer")
+    if not 1 <= max_epochs <= 500:
+        raise ValueError("autoencoder_dense max_epochs must be between 1 and 500")
+
+    patience = hyperparameters.get("patience", 12)
+    if isinstance(patience, bool) or not isinstance(patience, int):
+        raise ValueError("autoencoder_dense patience must be an integer")
+    if patience < 0 or patience > max_epochs:
+        raise ValueError("autoencoder_dense patience must be between 0 and max_epochs")
+
+    weight_decay = hyperparameters.get("weight_decay", 0.0001)
+    if isinstance(weight_decay, bool) or not isinstance(weight_decay, int | float):
+        raise ValueError("autoencoder_dense weight_decay must be numeric")
+    if not 0.0 <= float(weight_decay) <= 1e-2:
+        raise ValueError("autoencoder_dense weight_decay must be between 0 and 1e-2")
+
+    device = str(hyperparameters.get("device", "cpu")).lower()
+    if device != "cpu":
+        raise ValueError("autoencoder_dense device must be cpu")
+
+
 def _expected_model_path(state: TFMStateModel, config: ModelingConfig) -> str:
-    return f"codigo/models/{state.project_context.dataset}/{config.model_name}.joblib"
+    suffix = "pt" if config.model_name == "autoencoder_dense" else "joblib"
+    return f"codigo/models/{state.project_context.dataset}/{config.model_name}.{suffix}"
 
 
 def _retry_template_config(

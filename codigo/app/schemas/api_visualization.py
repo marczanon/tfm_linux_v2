@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import Field, NonNegativeInt
 
 from codigo.app.schemas.common import StrictBaseModel
+from codigo.app.schemas.temporal_health import HealthState
 
 
 class VisualizationMetric(StrictBaseModel):
@@ -52,7 +53,6 @@ class ProjectionBoundary(StrictBaseModel):
 
 
 TemporalXAxis = Literal["relative_life", "time_since_start_seconds", "window_index"]
-HealthState = Literal["nominal", "watch", "warning", "critical"]
 
 
 class TemporalSeriesPoint(StrictBaseModel):
@@ -73,9 +73,17 @@ class TemporalSeriesPoint(StrictBaseModel):
     predicted_anomaly: int | None = None
     score_ratio: float | None = None
     risk_index: float | None = None
+    risk_index_smoothed: float | None = None
     health_index: float | None = None
+    health_index_raw: float | None = None
+    health_index_smoothed: float | None = None
+    health_trend: float | None = None
     health_state: HealthState = "nominal"
     state_reason: str = Field(min_length=1)
+    health_policy_id: str | None = None
+    alert_policy_id: str | None = None
+    health_indicator_policy_id: str | None = None
+    dominant_evidence: str | None = None
 
 
 class TemporalRunSeries(StrictBaseModel):
@@ -94,6 +102,12 @@ class TemporalRunSeries(StrictBaseModel):
     first_persistent_alert_time: str | None = None
     first_persistent_alert_time_to_failure_seconds: float | None = None
     persistent_alert_min_windows: NonNegativeInt = 3
+    onset_confirmed: bool = False
+    onset_confirmed_x: float | None = None
+    onset_confirmed_time: str | None = None
+    onset_confirmed_time_to_failure_seconds: float | None = None
+    health_policy_id: str = Field(default="temporal_health_policy_v1", min_length=1)
+    alert_policy_id: str = Field(default="alert_persistence_v1", min_length=1)
     failure_x: float | None = None
     failure_time: str | None = None
     failure_reference: str = Field(
@@ -106,12 +120,29 @@ class TemporalRunSeries(StrictBaseModel):
     current_time: str | None = None
     current_time_to_failure_seconds: float | None = None
     current_risk_index: float | None = None
+    current_risk_index_smoothed: float | None = None
     current_health_index: float | None = None
+    current_health_index_smoothed: float | None = None
+    current_health_trend: float | None = None
     current_health_state: HealthState = "nominal"
     current_state_reason: str = Field(
         default="Sin evidencia temporal suficiente.",
         min_length=1,
     )
+    health_indicator_policy_id: str | None = None
+    health_initial_index: float | None = None
+    health_final_index: float | None = None
+    health_index_drop: float | None = None
+    health_index_drop_ratio: float | None = None
+    health_slope: float | None = None
+    health_trend_spearman: float | None = None
+    health_degradation_trend_strength: float | None = None
+    health_monotonicity: float | None = None
+    health_robustness: float | None = None
+    health_nominal_volatility: float | None = None
+    health_indicator_score: float | None = None
+    health_dominant_evidence: str | None = None
+    health_indicator_status: str | None = None
     alert_points: NonNegativeInt = 0
     warning_points: NonNegativeInt = 0
     critical_points: NonNegativeInt = 0
