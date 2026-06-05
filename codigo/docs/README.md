@@ -328,3 +328,23 @@ Documentos iniciales:
   React/Vite existente sin romper contratos, con panel principal claro,
   pestana `Agentes` profunda, sala de visualizacion 2D/3D y verificacion
   incremental por hitos.
+- `97_fase10_hito1_inventario_frontend_mapa_componentes.md`: implementacion
+  documental del primer hito de Fase 10; inventaria `App.tsx`, `api.ts`,
+  `types.ts` y `styles.css`, fija propietarios, riesgos, estructura objetivo y
+  orden de extraccion incremental antes de cambiar codigo frontend.
+- `98_fase10_hito2a_shell_common_frontend.md`: primer subhito de Hito 10.2;
+  extrae componentes `common` y `shell` desde `App.tsx`, crea `types/ui.ts` y
+  `lib/labels.ts`, conserva estilos, APIs y comportamiento, y valida el
+  frontend con `npm run build`.
+- `99_fase10_hito2b_modularizacion_runs_reports_visualizacion.md`: segundo
+  subhito de Hito 10.2; mueve detalle de run, paneles de informes, render
+  Markdown y visualizacion 2D/run-to-failure a modulos de dominio, extrae
+  helpers de formato y reduce `App.tsx` sin cambiar estilos ni contratos.
+- `100_fase10_hito2c_modularizacion_agentes_memoria_constantes.md`: tercer
+  subhito de Hito 10.2; separa constantes de dataset/pipeline, extrae la vista
+  de agentes, el cockpit de memoria y helpers de runtime/labels, reduciendo
+  `App.tsx` y manteniendo APIs, estilos y comportamiento.
+- `101_fase10_hito2d_modularizacion_pipeline_runs_jobs.md`: cuarto subhito de
+  Hito 10.2; extrae pipeline, preflight, jobs, historico de runs, comparacion,
+  contexto de ejecucion y helpers de request/comparacion, dejando `App.tsx`
+  como orquestador preparado para introducir `CockpitView`.

@@ -224,6 +224,9 @@ artefactos o comparacion de runs.
 
 Objetivo: preparar la reestructuracion sin tocar comportamiento.
 
+Estado 2026-06-05: implementado documentalmente en
+`codigo/docs/97_fase10_hito1_inventario_frontend_mapa_componentes.md`.
+
 Alcance:
 
 - mapear bloques actuales de `App.tsx`;
@@ -254,6 +257,20 @@ Criterio de cierre:
 ## Hito 10.2 - Shell y navegacion de cockpit
 
 Objetivo: convertir la estructura global en cockpit claro.
+
+Estado 2026-06-05: iniciado con el subhito
+`codigo/docs/98_fase10_hito2a_shell_common_frontend.md`. Se han extraido
+componentes `common`/`shell` y tipos UI sin cambiar comportamiento. Queda
+pendiente introducir `CockpitView` como panel principal. El subhito
+`codigo/docs/99_fase10_hito2b_modularizacion_runs_reports_visualizacion.md`
+reduce ademas `App.tsx` moviendo detalle de run, informes y visualizacion a
+modulos de dominio. El subhito
+`codigo/docs/100_fase10_hito2c_modularizacion_agentes_memoria_constantes.md`
+extrae agentes, memoria, constantes y helpers runtime, dejando pendiente la
+modularizacion de `Pipeline/Runs/Jobs`. El subhito
+`codigo/docs/101_fase10_hito2d_modularizacion_pipeline_runs_jobs.md` cierra ese
+corte, extrae pipeline, preflight, jobs, historico de runs, comparacion y
+helpers de request, y deja `App.tsx` como orquestador de 715 lineas.
 
 Alcance:
 
@@ -562,13 +579,12 @@ decidan y el usuario audite.
 
 ## Primer paso recomendado
 
-Empezar por Hito 10.1:
+Continuar con Hito 10.3:
 
 ```text
-Inventario frontend y mapa de componentes
+Panel principal operacional / CockpitView
 ```
 
-Ese paso debe producir una propuesta concreta de modularizacion de
-`App.tsx`/`styles.css` y un primer orden de extraccion. Despues se podra entrar
-en Hito 10.2 con cambios pequenos, verificables y reversibles, manteniendo viva
-la app durante toda la Fase 10.
+La base de modularizacion ya esta preparada. El siguiente paso debe introducir
+una vista principal clara, poco textual y orientada a control operacional,
+reutilizando los modulos extraidos y sin cambiar contratos backend.
