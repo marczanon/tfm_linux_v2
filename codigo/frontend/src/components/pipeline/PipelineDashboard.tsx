@@ -20,6 +20,7 @@ import type {
 import { PanelTitle } from "../common/PanelTitle";
 import { JobView } from "../jobs/JobView";
 import { PlanView } from "../plans/PlanView";
+import { RunEvidenceHub } from "../reports/ReportPanels";
 import { RunHistoryPanel } from "../runs/RunHistoryPanel";
 import { PipelineConfig } from "./PipelineConfig";
 
@@ -151,6 +152,19 @@ export function PipelineDashboard({
         <PreflightPanel response={planResponse} description={datasetDescription} />
         <ExecutionStatus job={job} snapshot={jobSnapshot} />
       </div>
+
+      {selectedRunId || selectedSnapshot || loadingRunDetail ? (
+        <RunEvidenceHub
+          artifacts={selectedArtifacts}
+          auditReport={selectedAuditReport}
+          entry={selectedRunEntry}
+          loading={loadingRunDetail}
+          report={selectedReport}
+          reportDebate={selectedReportDebate}
+          snapshot={selectedSnapshot}
+          variant="focus"
+        />
+      ) : null}
 
       <RunHistoryPanel
         adapters={adapters}

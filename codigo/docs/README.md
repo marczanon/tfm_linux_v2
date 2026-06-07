@@ -348,3 +348,110 @@ Documentos iniciales:
   Hito 10.2; extrae pipeline, preflight, jobs, historico de runs, comparacion,
   contexto de ejecucion y helpers de request/comparacion, dejando `App.tsx`
   como orquestador preparado para introducir `CockpitView`.
+- `102_fase10_hito3a_cockpit_operacional_inicial.md`: primer subhito de Hito
+  10.3; crea la vista `Cockpit` como entrada por defecto, con señales
+  compactas de API/LLM/dataset/job, run foco, salud temporal, recomendacion
+  agentica persistida e historial corto, reutilizando estado existente sin
+  cambiar contratos backend.
+- `103_fase10_hito3b_cockpit_run_foco_autocargada.md`: segundo subhito de Hito
+  10.3; reutiliza `loadRunDetail(...)` para autocargar de forma controlada la
+  ultima run foco en `Cockpit`, añade estados de carga y accesos directos a
+  visualizacion, agentes e informe sin crear flujos paralelos.
+- `104_fase10_hito3c_cockpit_pulido_evidencia.md`: tercer subhito de Hito
+  10.3; pule el cockpit con una tarjeta compacta de evidencia para informe,
+  auditoria, debate y artefactos, aclarando estados `listo`/`sin datos` sin
+  añadir texto largo ni endpoints nuevos.
+- `105_fase10_hito4a_nueva_run_launcher_operativo.md`: primer subhito de Hito
+  10.4; reorganiza `Nueva run` como launcher operativo por pasos
+  `Dataset`/`Ejecucion`/`Agentes`/`Preflight`, dejando opciones tecnicas
+  plegadas en avanzado sin modificar contratos backend.
+- `106_fase10_hito5a_agentes_runtime_investigativo.md`: primer subhito de
+  Hito 10.5; reorganiza la pestaña `Agentes` como runtime investigativo con
+  señales reales, mapa de agentes, detalle, memoria, timeline de eventos y
+  conversacion derivada de eventos persistidos.
+- `107_fase10_hito5b_detalle_agente_decision_memoria_payload.md`: segundo
+  subhito de Hito 10.5; reorganiza el detalle de cada agente separando tarjeta
+  de decision, señales/herramientas, memoria citada y payload tecnico plegado,
+  sin inventar herramientas ni fallbacks.
+- `108_fase10_hito5c_memoria_agentes_retrieval.md`: tercer subhito de Hito
+  10.5; refuerza el cockpit de memoria dentro de `Agentes`, separando
+  recuperados/usados/ignorados/excluidos, mostrando `memory_record_uses` y
+  senales observables de retrieval sin cambiar backend ni contratos.
+- `109_fase10_hito6a_visualizacion_2d_temporal_hi.md`: primer subhito de Hito
+  10.6; refuerza `Visualizacion` con grafica secundaria de Health Index y rail
+  de episodios de alerta/critico, reutilizando `TemporalRunSeries` sin cambiar
+  backend ni contratos.
+- `110_fase10_hito6b_comparacion_visual_runs_modelos.md`: segundo subhito de
+  Hito 10.6; añade comparacion visual de runs/modelos dentro de
+  `Visualizacion`, reutilizando `RunComparison`, `compareRuns(...)` y el estado
+  existente del frontend sin cambiar backend ni contratos.
+- `111_fase10_cierre_hito6_visualizacion_2d_avanzada.md`: cierre del Hito
+  10.6; consolida la sala 2D avanzada con Health Index, episodios de alerta,
+  comparacion visual y verificacion de build/proxy/endpoints con runs reales
+  persistidas.
+- `112_fase10_hito7a_sala_3d_base_threejs.md`: primer subhito de Hito 10.7;
+  introduce una escena Three.js industrial aislada y opcional en
+  `Visualizacion`, con selector `2D`/`3D`, fallback WebGL y carga diferida para
+  no penalizar la sala 2D.
+- `113_fase10_hito7b_mapeo_temporal_3d.md`: segundo subhito de Hito 10.7;
+  conecta la escena 3D con puntos reales de `TemporalRunSeries`, barras por
+  ventana coloreadas por `health_state`, altura por riesgo y marcadores de
+  primer pico, aviso sostenido y fallo historico.
+- `114_fase10_hito7c_interaccion_3d_ligera.md`: tercer subhito de Hito 10.7;
+  añade interaccion ligera con `THREE.Raycaster`, hover, seleccion fijada y
+  ficha compacta de barras/marcadores 3D sin nuevos contratos.
+- `115_fase10_hito7d_cierre_sala_3d_industrial.md`: cierre de Hito 10.7;
+  añade enfoque rapido de marcadores 3D, fallback de serie temporal vacia y
+  consolida la sala 3D como capa opcional de inspeccion industrial, validada
+  con Playwright headless, screenshots desktop/movil y analisis de pixeles.
+- `116_fase10_hito8_oficina_3d_agentes_plan.md`: plan de retomada para Hito
+  10.8; define la oficina 3D de agentes dentro de `Agentes`, basada en eventos
+  reales, con subhitos 10.8A-D, componentes previstos, reglas de alcance y
+  verificacion Playwright.
+- `117_fase10_hito8a_oficina_3d_agentes_base.md`: primer subhito de Hito
+  10.8; implementa una oficina 3D opcional dentro de `Agentes`, con boton
+  `2D`/`3D`, carga diferida, fallback WebGL, modelo derivado de eventos runtime
+  y validacion Playwright desktop/movil.
+- `118_fase10_hito8b_oficina_3d_runtime_senales.md`: segundo subhito de Hito
+  10.8; refuerza la oficina 3D con senales reales de actividad, memoria,
+  herramientas, errores y debate cuando hay `AgentRuntimeEvent`, y muestra un
+  aviso honesto de snapshot persistido cuando no hay job vivo.
+- `119_fase10_hito8c_oficina_3d_interaccion_foco.md`: tercer subhito de Hito
+  10.8; anade foco de camara por agente, botones compactos de seleccion,
+  hover mas visible y responsive movil contenido para la oficina 3D.
+- `120_fase10_hito9_identidad_visual_industrial_plan.md`: plan operativo del
+  Hito 10.9; define la identidad visual industrial de la aplicacion, la
+  politica de reduccion de texto visible, la paleta, el lenguaje de componentes
+  y los subhitos 10.9A-F para rediseñar shell, cockpit y pestañas sin tocar
+  backend ni eliminar trazabilidad.
+- `121_fase10_hito9a_tokens_shell_industrial.md`: primer subhito de Hito
+  10.9; implementa tokens CSS industriales, sidebar oscuro con marca
+  `Agentic Control`, navegacion compacta, cabecera operacional y paneles/base
+  visual con acento industrial, validado con build y Playwright desktop/movil.
+- `122_fase10_hito9b_cockpit_baja_lectura.md`: segundo subhito de Hito
+  10.9; rediseña `CockpitView` como command deck industrial de baja lectura,
+  con señales compactas, medidor HI/riesgo, readiness por chips y accion
+  agentica resumida, validado con build y Playwright desktop/movil.
+- `123_fase10_hito9c_reduccion_textual_pestanas.md`: tercer subhito de Hito
+  10.9; aplica la politica de texto minimo a `Nueva run`, `Visualizacion`,
+  `Agentes` y runs, plegando descriptor, politica, rationale, memoria,
+  informes, debate y evidencia sin perder trazabilidad; ademas compacta el
+  contexto superior, pliega el registro de runs, deja memoria agentica como
+  bloque provisional plegado y estructura `Visualizacion` por secciones
+  internas, validado con build y Playwright desktop/movil.
+- `124_fase10_hito9d_memoria_agentica_visual.md`: cuarto subhito de Hito
+  10.9; implementa la subpestaña visual de memoria dentro de `Agentes`, con
+  selector de agentes tipo personajes, avatar/rol/color, herramientas como
+  chips, recuerdos humanos concisos y memoria tecnica bajo demanda, sin tocar
+  backend ni contratos.
+- `125_fase10_hito9e_metricas_visualizacion_subpantalla.md`: primer subpaso de
+  Hito 10.9E; mueve `Metricas` a una subpantalla interna de `Visualizacion`,
+  elimina el panel fijo de metricas de la primera lectura y queda validado con
+  run real, sin tocar backend ni contratos.
+- `126_fase10_hito9f_qa_visual_global.md`: cierre del Hito 10.9; valida
+  coherencia visual global con Playwright desktop/movil, backend local, runs
+  persistidas, ausencia de errores/overflow y build frontend correcto.
+- `127_fase10_hito10_informe_evidencia_artefactos.md`: implementacion del Hito
+  10.10; crea un centro de evidencia reutilizable para informe, auditoria,
+  debate, evidence pack y artefactos, visible desde `Nueva run`, reutilizado en
+  el registro de runs y enlazado desde `Agentes`, sin tocar backend.

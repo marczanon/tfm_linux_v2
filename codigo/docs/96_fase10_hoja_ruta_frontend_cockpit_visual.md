@@ -291,6 +291,19 @@ Criterio de cierre:
 
 Objetivo: crear un panel principal limpio, entendible y rapido.
 
+Estado 2026-06-05: iniciado con el subhito
+`codigo/docs/102_fase10_hito3a_cockpit_operacional_inicial.md`. Se ha creado
+la vista `Cockpit` como entrada por defecto, reutilizando estado existente de
+runs, health, LLM, job, run seleccionada y visualizacion persistida sin cambiar
+contratos backend. El subhito
+`codigo/docs/103_fase10_hito3b_cockpit_run_foco_autocargada.md` añade carga
+automatica controlada de la ultima run foco, estados de carga y accesos a
+visualizacion, agentes e informe. El subhito
+`codigo/docs/104_fase10_hito3c_cockpit_pulido_evidencia.md` pule la jerarquia
+del cockpit con una tarjeta compacta de evidencia, estados `listo`/`sin datos`
+y una accion clara para abrir el detalle existente. Queda pendiente el rediseño
+del flujo `Nueva run`.
+
 Alcance:
 
 - tarjetas compactas de estado;
@@ -318,6 +331,12 @@ Criterio de cierre:
 
 Objetivo: hacer que lanzar runs agenticas sea claro y dificil de usar mal.
 
+Estado 2026-06-05: iniciado con el subhito
+`codigo/docs/105_fase10_hito4a_nueva_run_launcher_operativo.md`. Se ha
+reordenado `Nueva run` como launcher operativo de cuatro pasos
+(`Dataset`, `Ejecucion`, `Agentes`, `Preflight`), manteniendo opciones
+tecnicas en avanzado y sin cambiar contratos backend.
+
 Alcance:
 
 - selector de dataset con capacidades visibles;
@@ -343,6 +362,19 @@ Criterio de cierre:
 Objetivo: hacer visible la toma de decisiones agentica sin saturar el panel
 principal.
 
+Estado 2026-06-05: iniciado con el subhito
+`codigo/docs/106_fase10_hito5a_agentes_runtime_investigativo.md`. Se ha
+reorganizado la pestaña `Agentes` como runtime investigativo con banda de
+señales reales, mapa de agentes, detalle estructurado, memoria, timeline de
+eventos y conversacion derivada de eventos persistidos. El subhito
+`codigo/docs/107_fase10_hito5b_detalle_agente_decision_memoria_payload.md`
+mejora el detalle de agente separando decision, señales/herramientas, memoria
+citada y payload tecnico plegado. El subhito
+`codigo/docs/108_fase10_hito5c_memoria_agentes_retrieval.md` refuerza el
+cockpit de memoria dentro de `Agentes`, separando recuerdos recuperados,
+usados, ignorados y excluidos, mostrando `memory_record_uses` y señales
+observables de retrieval sin tocar backend ni contratos.
+
 Alcance:
 
 - jerarquia supervisor-agentes;
@@ -367,6 +399,17 @@ Criterio de cierre:
 
 Objetivo: convertir `Visualizacion` en una sala de analisis clara y potente.
 
+Estado 2026-06-06: cerrado y verificado en
+`codigo/docs/111_fase10_cierre_hito6_visualizacion_2d_avanzada.md`. El subhito
+`codigo/docs/109_fase10_hito6a_visualizacion_2d_temporal_hi.md` refuerza la
+lectura temporal 2D con una grafica secundaria de Health Index y un rail de
+episodios de alerta/critico, reutilizando `TemporalRunSeries` sin cambiar
+backend ni contratos. El subhito
+`codigo/docs/110_fase10_hito6b_comparacion_visual_runs_modelos.md` añade
+comparacion visual de runs/modelos dentro de `Visualizacion`, reutilizando
+`RunComparison`, `compareRuns(...)` y el estado existente del frontend sin
+cambiar backend ni contratos.
+
 Alcance:
 
 - serie temporal de score e HI;
@@ -390,11 +433,29 @@ Criterio de cierre:
 - la visualizacion temporal se entiende sin parrafos explicativos;
 - no se inventan metricas en frontend;
 - los datos salen de `RunVisualizationData` o comparacion existente.
+- `npm run build` pasa y los endpoints locales de health, runs, visualizacion
+  y comparacion responden con runs reales persistidas.
 
 ## Hito 10.7 - Sala 3D de visualizacion industrial
 
 Objetivo: explorar una visualizacion 3D como sala de control, sin poner en
 riesgo la app base.
+
+Estado 2026-06-06: cerrado con
+`codigo/docs/115_fase10_hito7d_cierre_sala_3d_industrial.md`. Iniciado con
+`codigo/docs/112_fase10_hito7a_sala_3d_base_threejs.md`. Se anade una escena
+Three.js aislada, cargada bajo demanda desde `Visualizacion`, con fallback
+WebGL, selector `2D`/`3D`, camara orbit limitada y escena industrial minima.
+La sala 2D sigue siendo el modo por defecto. El subhito
+`codigo/docs/113_fase10_hito7b_mapeo_temporal_3d.md` conecta la escena con
+puntos reales de `TemporalRunSeries`, coloreando barras por `health_state`,
+escalando altura por `risk_index`/`score_ratio` y mostrando marcadores 3D de
+primer pico, aviso sostenido y fallo historico. El subhito
+`codigo/docs/114_fase10_hito7c_interaccion_3d_ligera.md` anade hover,
+seleccion fijada y ficha compacta de barras/marcadores mediante `THREE.Raycaster`.
+El subhito `codigo/docs/115_fase10_hito7d_cierre_sala_3d_industrial.md`
+anade enfoque rapido de marcadores, fallback de serie temporal vacia y cierre
+documental de la sala 3D.
 
 Alcance:
 
@@ -424,14 +485,59 @@ Criterio de cierre:
 Objetivo: prototipar una vista visual de agentes como recurso demostrativo y de
 portfolio, manteniendo honestidad metodologica.
 
+Estado 2026-06-06: iniciado. Los subhitos `10.8A`, `10.8B` y `10.8C` quedan
+implementados en `codigo/docs/117_fase10_hito8a_oficina_3d_agentes_base.md`,
+`codigo/docs/118_fase10_hito8b_oficina_3d_runtime_senales.md` y
+`codigo/docs/119_fase10_hito8c_oficina_3d_interaccion_foco.md`. La guia
+operativa general del hito queda en
+`codigo/docs/116_fase10_hito8_oficina_3d_agentes_plan.md`.
+
 Alcance:
 
-- cada agente como figura o avatar simple;
-- oficina o sala de trabajo;
-- interacciones basadas en eventos reales;
-- activaciones por timeline;
-- conexiones de memoria/herramientas/debate;
-- modo demo vinculado a una run real.
+- ubicar la vista dentro de `Agentes`, no dentro de `Visualizacion`;
+- mantener la oficina 3D como modo opcional, sin sustituir timeline, detalle,
+  memoria ni conversacion;
+- representar cada agente persistido como mesa/nodo de trabajo:
+  `supervisor`, `cleaner`, `structurer`, `modeler`, `evaluator`,
+  `report_writer` y `report_verifier`;
+- usar eventos reales de `AgentRuntimeEvent` para actividad, enlaces,
+  memoria, herramientas, errores y debate;
+- permitir seleccionar un agente desde la escena reutilizando `onSelectAgent`;
+- cargar Three.js bajo demanda mediante `React.lazy`;
+- reutilizar el patron de fallback WebGL y verificacion Playwright del Hito
+  10.7.
+
+Subhitos propuestos:
+
+- `10.8A`: base de oficina 3D en `Agentes`, escena estatica, lazy loading,
+  fallback WebGL y boton `2D`/`3D`. Estado: implementado.
+- `10.8B`: mapeo de eventos reales a estados visuales: agente activo, conteo
+  de eventos, errores, memoria, herramientas y debate. Estado: implementado.
+- `10.8C`: interaccion ligera con `Raycaster`: hover/click de agente, ficha
+  compacta, foco de camara, botones por agente y sincronizacion con el detalle
+  existente. Estado: implementado.
+- `10.8D`: cierre/pulido con runtime vivo: lanzar una run pequena si se decide,
+  comprobar transiciones reales, senales durante `job.events` y documentacion
+  final de cierre.
+
+Arquitectura prevista:
+
+- `codigo/frontend/src/components/agents/AgentOffice3D.tsx`;
+- `codigo/frontend/src/lib/agentOffice3d.ts`;
+- estilos nuevos en `codigo/frontend/src/styles.css`, acotados con prefijo
+  `agent-office-3d`;
+- integracion en `AgentObservabilityView`, junto al panel actual
+  `agent-map-panel`, con selector de modo o bloque plegable.
+
+Fuentes de datos permitidas:
+
+- `AGENT_PROFILES`, `agentLabel(...)`, `eventsForAgent(...)` y
+  `eventOwnerId(...)` desde `agentRuntime.ts`;
+- `AgentRuntimeEvent.sequence`, `kind`, `source`, `stage`, `created_at`,
+  `decision_id`, `memory_record_ids`, `retrieved_memory_record_ids`,
+  `cited_memory_record_ids`, `ignored_memory_record_ids` y payloads existentes;
+- `selectedAgentId` y `onSelectAgent` ya recibidos por `AgentObservabilityView`;
+- memoria ya expuesta por `AgentMemoryPanel`, sin crear endpoints nuevos.
 
 Advertencia:
 
@@ -441,16 +547,208 @@ potencia investigatoria si no aporta evidencia nueva. Su valor principal es
 comunicacion, trazabilidad visual y portfolio.
 ```
 
+Reglas de alcance:
+
+- no simular pensamiento ni conversaciones no persistidas;
+- no inventar herramientas, memoria ni decisiones;
+- no crear backend nuevo en el primer bloque;
+- no mezclar la oficina de agentes con la sala industrial de `Visualizacion`;
+- no duplicar estado de agentes si puede derivarse de `AgentRuntimeEvent`;
+- si no hay eventos, mostrar oficina en reposo con estado vacio honesto.
+
 Criterio de cierre:
 
 - representa eventos reales;
 - no simula razonamiento inexistente;
-- se puede desactivar o ignorar sin perder funcionalidad cientifica.
+- se puede desactivar o ignorar sin perder funcionalidad cientifica;
+- el build pasa;
+- la escena no queda en blanco;
+- se valida con Playwright/screenshot al menos en desktop y movil;
+- la seleccion en 3D actualiza el detalle de agente ya existente.
 
-## Hito 10.9 - Informe, evidencia y artefactos
+## Hito 10.9 - Identidad visual industrial y reduccion de texto
+
+Objetivo: convertir la app en un producto con identidad propia de deteccion
+industrial y cockpit multiagente, reduciendo texto visible en zonas
+funcionales sin eliminar trazabilidad.
+
+Estado 2026-06-06: cerrado como bloque visual. El plan operativo queda en
+`codigo/docs/120_fase10_hito9_identidad_visual_industrial_plan.md`. Los
+subhitos `10.9A`, `10.9B`, `10.9C`, `10.9D`, `10.9E` y `10.9F` quedan
+implementados en
+`codigo/docs/121_fase10_hito9a_tokens_shell_industrial.md`,
+`codigo/docs/122_fase10_hito9b_cockpit_baja_lectura.md`,
+`codigo/docs/123_fase10_hito9c_reduccion_textual_pestanas.md`,
+`codigo/docs/124_fase10_hito9d_memoria_agentica_visual.md`,
+`codigo/docs/125_fase10_hito9e_metricas_visualizacion_subpantalla.md` y
+`codigo/docs/126_fase10_hito9f_qa_visual_global.md`.
+
+Direccion visual:
+
+- `Industrial Agentic Cockpit` como nombre de trabajo;
+- base clara industrial, no blanco puro;
+- superficies tecnicas, bordes finos y jerarquia compacta;
+- acentos por significado:
+  - verde petroleo para OK/aprobado;
+  - azul electrico para datos, memoria y señal;
+  - ambar para revision, incertidumbre y avisos;
+  - rojo tecnico para error, anomalia o critico;
+  - violeta solo para modelado, no como tema dominante;
+- LEDs, chips, railes, medidores y estados compactos como lenguaje visual;
+- texto profundo bajo demanda.
+
+Regla central:
+
+```text
+Ver primero estado y accion.
+Leer solo al inspeccionar.
+Auditar solo al abrir detalle.
+```
+
+Alcance:
+
+- tokens CSS y sistema visual de app;
+- shell/sidebar/topbar con identidad industrial;
+- cockpit mas funcional y menos textual;
+- reduccion de texto visible en `Nueva run`, `Visualizacion`, `Agentes` y
+  runs;
+- detalles largos plegados, en drawers, acordeones o secciones de evidencia;
+- mantener toda la informacion existente en estado, informes, memoria,
+  artefactos y detalles bajo demanda.
+
+Subhitos propuestos:
+
+- `10.9A`: tokens visuales y shell industrial.
+- `10.9B`: cockpit funcional de baja lectura.
+- `10.9C`: reduccion textual por pestañas.
+- `10.9D`: memoria agentica visual.
+- `10.9E`: visualizacion industrial guiada.
+- `10.9F`: sistema visual coherente y QA.
+
+Estado de subhitos:
+
+- `10.9A`: implementado;
+- `10.9B`: implementado;
+- `10.9C`: implementado;
+- `10.9D`: implementado;
+- `10.9E`: implementado;
+- `10.9F`: implementado y cerrado.
+
+Nota posterior a `10.9C`:
+
+- el resumen global queda oculto fuera de `Cockpit`;
+- el contexto de ejecucion se compacta en una linea plegable;
+- `Runs locales` queda como drawer plegado por defecto;
+- la memoria agentica queda plegada provisionalmente y se reserva para una
+  subpestaña propia dentro de `Agentes`;
+- `Visualizacion` incorpora secciones internas (`Estado`, `Agente`,
+  `Comparar`, `Serie`, `Mapa`) para evitar una sucesion larga de graficas.
+
+Nota posterior a `10.9D`:
+
+- `Agentes` incorpora selector interno `Runtime | Memoria`;
+- `Memoria` se activa con boton de cerebro;
+- la memoria se muestra como selector visual de agentes;
+- cada agente tiene color, rol, avatar de pie, herramientas y recuerdos
+  concisos;
+- el supervisor queda diferenciado con corona/rol de jefe;
+- la memoria tecnica sigue disponible en detalle plegado;
+- build y Playwright desktop/movil correctos.
+
+Nota posterior a `10.9E`:
+
+- `Visualizacion` mantiene secciones internas y añade `Metricas` como
+  subpantalla propia;
+- el panel fijo de metricas deja de ocupar la primera lectura;
+- el usuario valida manualmente la vista con una run real y confirma que no
+  queda pendiente funcional en `10.9E`;
+- el cierre visual global se completa posteriormente en `10.9F`.
+
+Nota posterior a `10.9F`:
+
+- QA visual global documentado en
+  `codigo/docs/126_fase10_hito9f_qa_visual_global.md`;
+- Playwright revisa desktop `1440x1100` y movil `390x920`;
+- vistas revisadas: `Cockpit`, `Nueva run`, `Agentes Runtime`, `Agentes
+  Memoria`, `Visualizacion Estado` y `Visualizacion Metricas`;
+- sin errores de consola, sin respuestas fallidas y sin overflow horizontal;
+- `npm run build` correcto;
+- el bloque `10.9` queda cerrado.
+
+### 10.9D - Memoria agentica visual
+
+Objetivo: convertir la memoria de agentes en una subpestaña propia dentro de
+`Agentes`, accesible mediante un boton de cerebro, con una experiencia tipo
+selector de personajes.
+
+Alcance:
+
+- selector superior de agentes;
+- avatar/personaje visual por agente;
+- color y rol del agente;
+- herramientas/capacidades como chips;
+- recuerdos humanos concisos en tarjetas;
+- memoria tecnica y payloads bajo demanda;
+- reutilizacion de `AgentMemoryPanel`, eventos runtime y records existentes.
+
+Criterio de cierre:
+
+- se puede abrir `Memoria` desde `Agentes`;
+- se puede seleccionar cada agente;
+- la vista superior tiene muy poco texto;
+- los recuerdos principales son frases humanas cortas;
+- la memoria tecnica sigue accesible;
+- build y validacion visual desktop/movil correctos.
+
+Estado 2026-06-06: implementado y verificado en
+`codigo/docs/124_fase10_hito9d_memoria_agentica_visual.md`.
+
+### 10.9E - Visualizacion industrial guiada
+
+Objetivo: evolucionar `Visualizacion` desde secciones internas hacia una vista
+de inspeccion industrial mas guiada, donde el usuario entienda rapidamente que
+grafica esta mirando y por que importa.
+
+Alcance:
+
+- priorizar una narrativa visual por estado;
+- reducir graficas simultaneas;
+- mejorar selector de `Estado`, `Metricas`, `Agente`, `Comparar`, `Serie` y
+  `Mapa`;
+- mantener 3D opcional y sin saturar la vista.
+
+Estado 2026-06-06:
+
+- `10.9E-A` implementado en
+  `codigo/docs/125_fase10_hito9e_metricas_visualizacion_subpantalla.md`;
+- el apartado `Metricas` pasa a ser subpantalla interna;
+- el panel fijo de metricas deja de ocupar la primera lectura;
+- validado posteriormente con backend activo y run real;
+- `10.9E` queda cerrado.
+
+### 10.9F - Sistema visual coherente y QA
+
+Objetivo: cerrar el bloque visual tras memoria y visualizacion, unificando
+estilos, contraste, responsive y evidencias de verificacion.
+
+Criterio de cierre:
+
+- la app deja de parecer una libreta blanca generica;
+- el cockpit se percibe como consola industrial real;
+- las vistas funcionales muestran poco texto por defecto;
+- la evidencia sigue accesible;
+- build correcto y validacion visual desktop/movil.
+
+Estado 2026-06-06: implementado y cerrado en
+`codigo/docs/126_fase10_hito9f_qa_visual_global.md`.
+
+## Hito 10.10 - Informe, evidencia y artefactos
 
 Objetivo: ordenar la lectura final de una run sin convertirla en la primera
 experiencia del usuario.
+
+Estado 2026-06-06: implementado y verificado en
+`codigo/docs/127_fase10_hito10_informe_evidencia_artefactos.md`.
 
 Alcance:
 
@@ -469,7 +767,16 @@ Criterio de cierre:
 - el informe no compite con el cockpit principal;
 - se mantiene trazabilidad completa.
 
-## Hito 10.10 - Pulido, QA visual y Docker
+Resultado:
+
+- `RunEvidenceHub` visible en `Nueva run` para la run foco;
+- informe, auditoria, debate y artefactos quedan como documentos plegados;
+- rutas tecnicas de artefactos se ocultan bajo demanda;
+- `RunDetailView` reutiliza el mismo centro de evidencia;
+- `Agentes` añade acceso corto a evidencia;
+- build y Playwright desktop/movil correctos.
+
+## Hito 10.11 - Pulido, QA visual y Docker
 
 Objetivo: cerrar la fase con verificacion de producto.
 
@@ -498,13 +805,14 @@ Criterio de cierre:
 Estado actual:
 
 ```text
-React + Vite + TypeScript + lucide-react
+React + Vite + TypeScript + lucide-react + three
 ```
 
 Politica:
 
 - no anadir librerias por estetica;
-- anadir `three` solo cuando se implemente un hito 3D real;
+- `three` ya esta incorporado por Hito 10.7 y debe seguir cargado bajo demanda;
+- Playwright/Chromium ya estan disponibles como verificacion visual local;
 - anadir libreria de graficas solo si evita codigo fragil;
 - mantener iconografia con `lucide-react`;
 - evitar un sistema de componentes pesado si no aporta productividad real.
@@ -579,12 +887,17 @@ decidan y el usuario audite.
 
 ## Primer paso recomendado
 
-Continuar con Hito 10.3:
+Retomar con Hito 10.11:
 
 ```text
-Panel principal operacional / CockpitView
+Pulido, QA visual y Docker
 ```
 
-La base de modularizacion ya esta preparada. El siguiente paso debe introducir
-una vista principal clara, poco textual y orientada a control operacional,
-reutilizando los modulos extraidos y sin cambiar contratos backend.
+La identidad visual base, el shell industrial, el cockpit de baja lectura y la
+reduccion textual por pestañas ya estan implementados. La subpestaña visual de
+memoria dentro de `Agentes` tambien queda implementada, y `Visualizacion` queda
+validada tras `10.9E`. El QA visual global `10.9F` queda cerrado con capturas
+desktop/movil y build correcto. `10.10` deja informe, evidencia, auditoria,
+debate y artefactos ordenados bajo demanda. El siguiente paso recomendado es
+el cierre de fase: smoke local, revision visual final y, si se decide, rebuild
+Docker frontend/backend.

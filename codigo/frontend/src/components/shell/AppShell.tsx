@@ -21,6 +21,7 @@ export function AppShell({
   llmStatus,
   loading,
   runsCount,
+  showHealthSummary = true,
   onRefresh,
   onViewChange,
 }: {
@@ -34,6 +35,7 @@ export function AppShell({
   llmStatus: LLMStatusResponse | null;
   loading: boolean;
   runsCount: number;
+  showHealthSummary?: boolean;
   onRefresh: () => void;
   onViewChange: (view: AppView) => void;
 }) {
@@ -45,12 +47,18 @@ export function AppShell({
             <Activity size={19} />
           </div>
           <div>
-            <p className="eyebrow">Fase 5</p>
-            <h1>TFM Pipeline</h1>
+            <p className="eyebrow">Industrial AI</p>
+            <h1>Agentic Control</h1>
           </div>
+        </div>
+        <div className="sidebar-signal-rail" aria-label="Identidad operacional">
+          <span>PHM</span>
+          <strong>Deteccion industrial</strong>
+          <small>Runs · Memoria · Agentes</small>
         </div>
         <ViewTabs activeView={activeView} onChange={onViewChange} />
         <div className="sidebar-status">
+          <span className="sidebar-status-label">Sistema</span>
           <StatusPill ok={health?.status === "ok"} label={health?.status ?? "offline"} />
           <span>{llmStatusLabel(llmStatus)}</span>
         </div>
@@ -59,14 +67,16 @@ export function AppShell({
       <main className="app-main">
         <StatusHeader loading={loading} onRefresh={onRefresh} />
         {error ? <ErrorState message={error} /> : null}
-        <HealthSummary
-          adaptersCount={adaptersCount}
-          approvedRuns={approvedRuns}
-          completedRuns={completedRuns}
-          health={health}
-          llmStatus={llmStatus}
-          runsCount={runsCount}
-        />
+        {showHealthSummary ? (
+          <HealthSummary
+            adaptersCount={adaptersCount}
+            approvedRuns={approvedRuns}
+            completedRuns={completedRuns}
+            health={health}
+            llmStatus={llmStatus}
+            runsCount={runsCount}
+          />
+        ) : null}
         <div className="view-content">{children}</div>
       </main>
     </div>

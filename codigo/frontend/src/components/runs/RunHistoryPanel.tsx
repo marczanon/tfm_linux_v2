@@ -61,13 +61,25 @@ export function RunHistoryPanel({
   onToggleCompare: (runId: string) => void;
 }) {
   return (
-    <section className="panel run-history-panel">
-      <div className="panel-heading">
+    <details className="panel run-history-panel run-history-disclosure">
+      <summary className="run-history-summary">
         <div>
           <p className="eyebrow">Registro</p>
           <h2>Runs locales</h2>
         </div>
-        <div className="panel-actions">
+        <div className="run-history-summary-meta">
+          <StatusPill ok={runs.length > 0} muted={runs.length === 0} label={`${runs.length} runs`} />
+          <StatusPill
+            ok={selectedRunId !== null}
+            muted={selectedRunId === null}
+            label={selectedRunId ? "run foco" : "sin foco"}
+          />
+          <ListChecks size={20} />
+        </div>
+      </summary>
+
+      <div className="run-history-content">
+        <div className="panel-actions run-history-actions">
           <button
             className="icon-button"
             type="button"
@@ -77,33 +89,32 @@ export function RunHistoryPanel({
           >
             <RefreshCcw size={17} />
           </button>
-          <ListChecks size={20} />
         </div>
+        <RunFiltersView filters={filters} adapters={adapters} onChange={onFilterChange} />
+        <RunsTable
+          runs={runs}
+          selectedRunId={selectedRunId}
+          selectedCompareRunIds={selectedCompareRunIds}
+          onSelectRun={onSelectRun}
+          onToggleCompare={onToggleCompare}
+        />
+        <ComparisonView
+          selectedCount={selectedCompareRunIds.length}
+          comparison={comparison}
+          loading={comparingRuns}
+          onCompare={onCompare}
+        />
+        <RunDetailView
+          entry={selectedRunEntry}
+          snapshot={selectedSnapshot}
+          artifacts={selectedArtifacts}
+          report={selectedReport}
+          auditReport={selectedAuditReport}
+          reportDebate={selectedReportDebate}
+          loading={loading}
+        />
       </div>
-      <RunFiltersView filters={filters} adapters={adapters} onChange={onFilterChange} />
-      <RunsTable
-        runs={runs}
-        selectedRunId={selectedRunId}
-        selectedCompareRunIds={selectedCompareRunIds}
-        onSelectRun={onSelectRun}
-        onToggleCompare={onToggleCompare}
-      />
-      <ComparisonView
-        selectedCount={selectedCompareRunIds.length}
-        comparison={comparison}
-        loading={comparingRuns}
-        onCompare={onCompare}
-      />
-      <RunDetailView
-        entry={selectedRunEntry}
-        snapshot={selectedSnapshot}
-        artifacts={selectedArtifacts}
-        report={selectedReport}
-        auditReport={selectedAuditReport}
-        reportDebate={selectedReportDebate}
-        loading={loading}
-      />
-    </section>
+    </details>
   );
 }
 

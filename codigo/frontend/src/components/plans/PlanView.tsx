@@ -35,42 +35,51 @@ export function PlanView({
       </div>
 
       {descriptor ? (
-        <section className="plan-section">
-          <h3>Descriptor</h3>
-          <dl className="meta-list">
-            <div>
-              <dt>dataset_id</dt>
-              <dd>{descriptor.dataset_id}</dd>
-            </div>
-            <div>
-              <dt>formato</dt>
-              <dd>{descriptor.source_format}</dd>
-            </div>
-            <div>
-              <dt>tarea</dt>
-              <dd>{descriptor.task_type}</dd>
-            </div>
-            <div>
-              <dt>perfil</dt>
-              <dd>{descriptor.supervision_profile}</dd>
-            </div>
-            <div>
-              <dt>labels</dt>
-              <dd>{descriptor.label_source}/{descriptor.label_granularity}</dd>
-            </div>
-            <div>
-              <dt>canales</dt>
-              <dd>{descriptor.channel_names.length || "-"}</dd>
-            </div>
-          </dl>
-          {descriptor.notes.length > 0 ? (
-            <ul className="plain-list note-list">
-              {descriptor.notes.slice(0, 3).map((note) => (
-                <li key={note}>{note}</li>
-              ))}
-            </ul>
-          ) : null}
-        </section>
+        <>
+          <div className="plan-signal-grid">
+            <PlanSignal label="Dataset" value={descriptor.dataset_id} />
+            <PlanSignal label="Tarea" value={descriptor.task_type} />
+            <PlanSignal label="Perfil" value={descriptor.supervision_profile} />
+            <PlanSignal label="Canales" value={String(descriptor.channel_names.length || "-")} />
+          </div>
+
+          <details className="compact-disclosure plan-disclosure">
+            <summary>Descriptor tecnico</summary>
+            <dl className="meta-list">
+              <div>
+                <dt>dataset_id</dt>
+                <dd>{descriptor.dataset_id}</dd>
+              </div>
+              <div>
+                <dt>formato</dt>
+                <dd>{descriptor.source_format}</dd>
+              </div>
+              <div>
+                <dt>tarea</dt>
+                <dd>{descriptor.task_type}</dd>
+              </div>
+              <div>
+                <dt>perfil</dt>
+                <dd>{descriptor.supervision_profile}</dd>
+              </div>
+              <div>
+                <dt>labels</dt>
+                <dd>{descriptor.label_source}/{descriptor.label_granularity}</dd>
+              </div>
+              <div>
+                <dt>canales</dt>
+                <dd>{descriptor.channel_names.length || "-"}</dd>
+              </div>
+            </dl>
+            {descriptor.notes.length > 0 ? (
+              <ul className="plain-list note-list">
+                {descriptor.notes.slice(0, 3).map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            ) : null}
+          </details>
+        </>
       ) : null}
 
       {plan ? (
@@ -86,25 +95,25 @@ export function PlanView({
             </div>
           </section>
 
-          <section className="plan-section">
-            <h3>Politica</h3>
+          <details className="compact-disclosure plan-disclosure">
+            <summary>Politica · {plan.policy.capabilities.length}</summary>
             <CapabilityList capabilities={plan.policy.capabilities} />
-          </section>
+          </details>
 
           {plan.blocking_reasons.length > 0 ? (
-            <section className="plan-section">
-              <h3>Bloqueos</h3>
+            <details className="compact-disclosure plan-disclosure warning-disclosure">
+              <summary>Bloqueos · {plan.blocking_reasons.length}</summary>
               <ul className="plain-list warning-list">
                 {plan.blocking_reasons.map((reason) => (
                   <li key={reason}>{reason}</li>
                 ))}
               </ul>
-            </section>
+            </details>
           ) : null}
 
           {reviewReasons.length > 0 ? (
-            <section className="plan-section">
-              <h3>Revision humana</h3>
+            <details className="compact-disclosure plan-disclosure warning-disclosure">
+              <summary>Revision humana · {reviewReasons.length}</summary>
               <ul className="plain-list review-reasons">
                 {reviewReasons.map((reason) => (
                   <li key={reason}>{reason}</li>
@@ -126,10 +135,19 @@ export function PlanView({
                   </div>
                 </dl>
               ) : null}
-            </section>
+            </details>
           ) : null}
         </>
       ) : null}
+    </div>
+  );
+}
+
+function PlanSignal({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="plan-signal">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }

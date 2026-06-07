@@ -26,18 +26,10 @@ export function RunContextBand({
   const jobStatus = job?.status ?? "sin job";
 
   return (
-    <section className="context-band" aria-label="Contexto de ejecucion">
-      <ContextItem
-        label="Dataset"
-        value={request.dataset_id || adapter.dataset_id}
-        detail={adapter.display_name}
-      />
-      <ContextItem label="Run" value={request.run_id || "-"} />
-      <ContextItem label="Modo" value={request.execution_mode} />
-      <ContextItem label="Politica" value={request.dataset_policy_id ?? "default"} />
-      <ContextItem label="Fases" value={stageCount.toString()} />
-      <div className="context-item context-status">
-        <span>Plan</span>
+    <details className="compact-disclosure run-context-disclosure">
+      <summary>
+        <span>Contexto</span>
+        <strong>{request.dataset_id || adapter.dataset_id} · {request.run_id || "-"}</strong>
         <StatusPill
           ok={planOk === true}
           muted={planOk === undefined}
@@ -45,20 +37,50 @@ export function RunContextBand({
             planOk === undefined
               ? "sin plan"
               : planOk
-                ? "ejecutable"
+                ? "plan ok"
                 : "bloqueado"
           }
         />
-      </div>
-      <div className="context-item context-status">
-        <span>Job</span>
         <StatusPill
           ok={job?.status === "completed"}
           muted={job === null || job.status === "queued" || job.status === "running"}
           label={jobStatus}
         />
-      </div>
-    </section>
+      </summary>
+      <section className="context-band context-band-detail" aria-label="Contexto de ejecucion">
+        <ContextItem
+          label="Dataset"
+          value={request.dataset_id || adapter.dataset_id}
+          detail={adapter.display_name}
+        />
+        <ContextItem label="Run" value={request.run_id || "-"} />
+        <ContextItem label="Modo" value={request.execution_mode} />
+        <ContextItem label="Politica" value={request.dataset_policy_id ?? "default"} />
+        <ContextItem label="Fases" value={stageCount.toString()} />
+        <div className="context-item context-status">
+          <span>Plan</span>
+          <StatusPill
+            ok={planOk === true}
+            muted={planOk === undefined}
+            label={
+              planOk === undefined
+                ? "sin plan"
+                : planOk
+                  ? "ejecutable"
+                  : "bloqueado"
+            }
+          />
+        </div>
+        <div className="context-item context-status">
+          <span>Job</span>
+          <StatusPill
+            ok={job?.status === "completed"}
+            muted={job === null || job.status === "queued" || job.status === "running"}
+            label={jobStatus}
+          />
+        </div>
+      </section>
+    </details>
   );
 }
 

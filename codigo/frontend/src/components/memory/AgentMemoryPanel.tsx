@@ -56,18 +56,9 @@ export function AgentMemoryPanel({
   const target = memoryTargetForAgent(agentId);
   const collection = collections.find((item) => item.target_agent === target) ?? null;
   const sourceTypes = collection?.source_types ?? {};
-  const retrievedMemoryIds = useMemo(
-    () =>
-      new Set(
-        events
-          .filter((event) => event.kind === "memory_retrieval" || event.memory_context_id !== null)
-          .flatMap((event) => event.memory_record_ids),
-      ),
-    [events],
-  );
-  const citedMemoryIds = useMemo(
-    () => new Set(events.flatMap((event) => event.memory_record_ids)),
-    [events],
+  const runtimeSummary = useMemo(
+    () => buildMemoryRuntimeSummary(events, records),
+    [events, records],
   );
   const lifecycleStages = [
     {
@@ -84,13 +75,13 @@ export function AgentMemoryPanel({
     },
     {
       label: "recuperados",
-      value: retrievedMemoryIds.size,
+      value: runtimeSummary.retrievedIds.size,
       detail: "runtime actual",
       tone: "reusable",
     },
     {
       label: "usados",
-      value: citedMemoryIds.size,
+      value: runtimeSummary.citedIds.size,
       detail: "citados por agente",
       tone: "used",
     },
@@ -103,10 +94,10 @@ export function AgentMemoryPanel({
   ];
 
   return (
-    <section className="runtime-block memory-panel">
-      <div className="section-heading">
+    <details className="runtime-block memory-panel memory-panel-disclosure">
+      <summary className="memory-panel-summary">
         <div>
-          <h3>Cockpit de memoria</h3>
+          <h3>Memoria agentica</h3>
           <p>{collection?.collection_name ?? target}</p>
         </div>
         <StatusPill
@@ -114,61 +105,69 @@ export function AgentMemoryPanel({
           label={`${collection?.n_records ?? 0} recuerdos`}
           muted={(collection?.n_records ?? 0) === 0}
         />
-      </div>
+      </summary>
 
-      <div className="memory-cockpit-grid">
-        <MemoryStat label="Total" value={collection?.n_records ?? 0} />
-        <MemoryStat label="Reutilizables" value={collection?.n_reusable ?? 0} />
-        <MemoryStat label="Datasets" value={collection?.datasets.length ?? 0} />
-        <MemoryStat label="Excluidos" value={collection?.n_excluded ?? 0} tone="warning" />
-      </div>
+      <div className="memory-panel-body">
+        <div className="memory-cockpit-grid">
+          <MemoryStat label="Total" value={collection?.n_records ?? 0} />
+          <MemoryStat label="Reutilizables" value={collection?.n_reusable ?? 0} />
+          <MemoryStat label="Datasets" value={collection?.datasets.length ?? 0} />
+          <MemoryStat label="Excluidos" value={collection?.n_excluded ?? 0} tone="warning" />
+        </div>
 
-      <MemoryLifecycleStrip stages={lifecycleStages} />
+        <MemoryLifecycleStrip stages={lifecycleStages} />
 
-      <div className="memory-distribution-grid">
-        <MemoryDistribution
-          title="Roles"
-          entries={collection?.memory_roles ?? {}}
-          labelFor={roleLabel}
-        />
-        <MemoryDistribution
-          title="Origen"
-          entries={collection?.source_types ?? {}}
-          labelFor={sourceTypeLabel}
-        />
-      </div>
-
-      <MemoryRuntimeFlow
-        events={events}
-        onSelectRecord={onSelectRecord}
-      />
-
-      <label className="field compact-field">
-        <span>Buscar</span>
-        <input
-          value={searchText}
-          onChange={(event) => onSearchChange(event.target.value)}
-        />
-      </label>
-
-      {loading ? (
-        <p className="empty-state compact-empty">Cargando memoria</p>
-      ) : (
-        <MemoryRecordList
-          records={records}
-          selectedRecordId={selectedRecord?.memory_record_id ?? null}
-          usedRecordIds={citedMemoryIds}
+        <MemoryRuntimeSummaryCard
+          summary={runtimeSummary}
           onSelectRecord={onSelectRecord}
         />
-      )}
 
-      <MemoryRecordDetail
-        record={selectedRecord}
-        curating={curating}
-        onCurateRecord={onCurateRecord}
-        onDeleteRecord={onDeleteRecord}
-      />
-    </section>
+        <div className="memory-distribution-grid">
+          <MemoryDistribution
+            title="Roles"
+            entries={collection?.memory_roles ?? {}}
+            labelFor={roleLabel}
+          />
+          <MemoryDistribution
+            title="Origen"
+            entries={collection?.source_types ?? {}}
+            labelFor={sourceTypeLabel}
+          />
+        </div>
+
+        <MemoryRuntimeFlow
+          events={events}
+          onSelectRecord={onSelectRecord}
+        />
+
+        <label className="field compact-field">
+          <span>Buscar</span>
+          <input
+            value={searchText}
+            onChange={(event) => onSearchChange(event.target.value)}
+          />
+        </label>
+
+        {loading ? (
+          <p className="empty-state compact-empty">Cargando memoria</p>
+        ) : (
+          <MemoryRecordList
+            records={records}
+            selectedRecordId={selectedRecord?.memory_record_id ?? null}
+            citedRecordIds={runtimeSummary.citedIds}
+            ignoredRecordIds={runtimeSummary.ignoredIds}
+            onSelectRecord={onSelectRecord}
+          />
+        )}
+
+        <MemoryRecordDetail
+          record={selectedRecord}
+          curating={curating}
+          onCurateRecord={onCurateRecord}
+          onDeleteRecord={onDeleteRecord}
+        />
+      </div>
+    </details>
   );
 }
 
@@ -204,6 +203,92 @@ function MemoryLifecycleStrip({
         </div>
       ))}
     </div>
+  );
+}
+
+function MemoryRuntimeSummaryCard({
+  summary,
+  onSelectRecord,
+}: {
+  summary: MemoryRuntimeSummary;
+  onSelectRecord: (memoryRecordId: string) => void;
+}) {
+  const usageEntries = memoryUsageSummaryEntries(summary.usageCounts);
+  return (
+    <section className="memory-retrieval-summary">
+      <div className="memory-retrieval-head">
+        <div>
+          <h4>Retrieval actual</h4>
+          <p>{summary.latestContextId ?? "sin contexto activo"}</p>
+        </div>
+        <span className={`memory-quality-badge ${summary.signal.tone}`}>
+          {summary.signal.label}
+        </span>
+      </div>
+
+      <div className="memory-retrieval-grid">
+        <MemoryStat label="Recuperados" value={summary.retrievedIds.size} />
+        <MemoryStat label="Usados" value={summary.citedIds.size} />
+        <MemoryStat label="Ignorados" value={summary.ignoredIds.size} />
+        <MemoryStat label="Excluidos" value={summary.excludedIds.size} tone="warning" />
+      </div>
+
+      {summary.latestUsageSummary ? (
+        <details className="compact-disclosure memory-summary-disclosure">
+          <summary>Resumen de uso</summary>
+          <p className="memory-usage-summary">
+            {shortText(summary.latestUsageSummary, 260)}
+          </p>
+        </details>
+      ) : null}
+
+      <div className="memory-flow-meta">
+        <span>
+          sim media: <strong>{formatSimilarity(summary.averageSimilarity)}</strong>
+        </span>
+        <span>
+          sim max: <strong>{formatSimilarity(summary.maxSimilarity)}</strong>
+        </span>
+        <span>
+          cautelas: <strong>{summary.cautionCount}</strong>
+        </span>
+      </div>
+
+      {usageEntries.length > 0 ? (
+        <div className="memory-usage-strip">
+          {usageEntries.map((entry) => (
+            <span className={`memory-use-chip ${entry.tone}`} key={entry.usage}>
+              {entry.label} · {entry.count}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {summary.ignoredIds.size > 0 || summary.excludedIds.size > 0 ? (
+        <div className="memory-chip-row">
+          {Array.from(summary.ignoredIds).slice(0, 3).map((memoryId) => (
+            <button
+              className="memory-chip subtle memory-chip-button"
+              key={`summary-ignored-${memoryId}`}
+              type="button"
+              onClick={() => onSelectRecord(memoryId)}
+            >
+              ignorado · {memoryId}
+            </button>
+          ))}
+          {Array.from(summary.excludedIds).slice(0, 3).map((memoryId) => (
+            <button
+              className="memory-chip excluded memory-chip-button"
+              key={`summary-excluded-${memoryId}`}
+              type="button"
+              onClick={() => onSelectRecord(memoryId)}
+            >
+              excluido · {memoryId}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -268,6 +353,8 @@ function MemoryRuntimeFlow({
             const queryText = stringValue(query?.query_text);
             const citedIds = stringArrayFromPayload(event.payload, "cited_memory_record_ids");
             const ignoredIds = stringArrayFromPayload(event.payload, "ignored_memory_record_ids");
+            const usageSummary = stringFromPayload(event.payload, "memory_usage_summary");
+            const recordUses = memoryRecordUses(event);
             const fallbackIds = event.memory_record_ids;
             return (
               <article className="memory-flow-event" key={event.event_id}>
@@ -284,29 +371,36 @@ function MemoryRuntimeFlow({
                     ))}
                   </div>
                 ) : null}
-                <p>{event.summary}</p>
-                {queryText ? (
-                  <p className="memory-query-excerpt">{shortText(queryText, 220)}</p>
+                <p className="memory-event-summary">{event.summary}</p>
+                {queryText || usageSummary ? (
+                  <details className="compact-disclosure memory-flow-disclosure">
+                    <summary>Consulta y uso</summary>
+                    {queryText ? (
+                      <p className="memory-query-excerpt">{shortText(queryText, 220)}</p>
+                    ) : null}
+                    {usageSummary ? (
+                      <p className="memory-usage-summary">
+                        {shortText(usageSummary, 260)}
+                      </p>
+                    ) : null}
+                  </details>
                 ) : null}
                 {flowItems.length > 0 ? (
                   <div className="memory-flow-items">
                     {flowItems.map((item) => (
-                      <button
-                        className="memory-flow-item"
+                      <MemoryFlowItemButton
+                        item={item}
                         key={`${event.event_id}-${item.memoryRecordId}`}
-                        type="button"
-                        onClick={() => onSelectRecord(item.memoryRecordId)}
-                      >
-                        <strong>
-                          #{item.rank ?? "-"} · sim {formatSimilarity(item.similarity)}
-                        </strong>
-                        <span>{item.memoryRecordId}</span>
-                        <em>
-                          {roleLabel(item.memoryRole ?? "")} · {sourceTypeLabel(item.sourceType ?? "")} · {item.dataset ?? "-"}
-                        </em>
-                      </button>
+                        onSelectRecord={onSelectRecord}
+                      />
                     ))}
                   </div>
+                ) : null}
+                {recordUses.length > 0 ? (
+                  <MemoryRecordUseList
+                    uses={recordUses}
+                    onSelectRecord={onSelectRecord}
+                  />
                 ) : null}
                 {citedIds.length > 0 || ignoredIds.length > 0 || fallbackIds.length > 0 ? (
                   <div className="memory-chip-row">
@@ -348,6 +442,74 @@ interface MemoryFlowItem {
   memoryRole: string | null;
   sourceType: string | null;
   dataset: string | null;
+  humanVerdict: string | null;
+  outcome: string | null;
+  tags: string[];
+}
+
+interface MemoryRecordUseView {
+  memoryRecordId: string;
+  usage: "followed" | "adapted" | "contradicted" | "ignored" | string;
+  influenceSummary: string;
+  riskMitigation: string | null;
+}
+
+function MemoryFlowItemButton({
+  item,
+  onSelectRecord,
+}: {
+  item: MemoryFlowItem;
+  onSelectRecord: (memoryRecordId: string) => void;
+}) {
+  const signal = retrievalSignal(item);
+  return (
+    <button
+      className="memory-flow-item"
+      type="button"
+      onClick={() => onSelectRecord(item.memoryRecordId)}
+    >
+      <span className="memory-flow-item-top">
+        <strong>
+          #{item.rank ?? "-"} · sim {formatSimilarity(item.similarity)}
+        </strong>
+        <em className={`memory-quality-badge ${signal.tone}`}>{signal.label}</em>
+      </span>
+      <span>{item.memoryRecordId}</span>
+      <em>
+        {roleLabel(item.memoryRole ?? "")} · {sourceTypeLabel(item.sourceType ?? "")} · {item.dataset ?? "-"}
+      </em>
+      {signal.reason ? <small>{signal.reason}</small> : null}
+    </button>
+  );
+}
+
+function MemoryRecordUseList({
+  uses,
+  onSelectRecord,
+}: {
+  uses: MemoryRecordUseView[];
+  onSelectRecord: (memoryRecordId: string) => void;
+}) {
+  return (
+    <div className="memory-record-use-list">
+      {uses.map((use) => {
+        const label = memoryUseLabel(use.usage);
+        return (
+          <button
+            className={`memory-record-use ${label.tone}`}
+            key={`${use.memoryRecordId}-${use.usage}`}
+            type="button"
+            onClick={() => onSelectRecord(use.memoryRecordId)}
+          >
+            <span>{label.label}</span>
+            <strong>{use.memoryRecordId}</strong>
+            <em>{shortText(use.influenceSummary, 160)}</em>
+            {use.riskMitigation ? <small>{shortText(use.riskMitigation, 160)}</small> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function retrievalEventLabel(
@@ -410,9 +572,292 @@ function memoryFlowItems(event: AgentRuntimeEvent): MemoryFlowItem[] {
         memoryRole: stringValue(item.memory_role),
         sourceType: stringValue(item.source_type),
         dataset: stringValue(item.dataset),
+        humanVerdict: stringValue(item.human_verdict),
+        outcome: stringValue(item.outcome),
+        tags: stringArrayFromUnknown(item.tags),
       };
     })
     .filter((item): item is MemoryFlowItem => item !== null);
+}
+
+interface MemoryRuntimeSummary {
+  retrievedIds: Set<string>;
+  citedIds: Set<string>;
+  ignoredIds: Set<string>;
+  excludedIds: Set<string>;
+  usageCounts: Record<string, number>;
+  latestUsageSummary: string | null;
+  latestContextId: string | null;
+  averageSimilarity: number | null;
+  maxSimilarity: number | null;
+  cautionCount: number;
+  signal: { label: string; tone: "ok" | "warning" | "danger" | "muted" };
+}
+
+function buildMemoryRuntimeSummary(
+  events: AgentRuntimeEvent[],
+  records: MemoryRecordSummary[],
+): MemoryRuntimeSummary {
+  const retrievedIds = new Set<string>();
+  const citedIds = new Set<string>();
+  const ignoredIds = new Set<string>();
+  const excludedIds = new Set(
+    records
+      .filter((record) => record.exclude_from_context || record.memory_role === "excluded")
+      .map((record) => record.memory_record_id),
+  );
+  const usageCounts: Record<string, number> = {};
+  const similarities: number[] = [];
+  let latestUsageSummary: string | null = null;
+  let latestContextId: string | null = null;
+  let cautionCount = 0;
+  let dangerCount = 0;
+
+  for (const event of events) {
+    if (event.memory_context_id) {
+      latestContextId = event.memory_context_id;
+    }
+    for (const memoryId of eventRetrievedMemoryIds(event)) {
+      retrievedIds.add(memoryId);
+    }
+    for (const memoryId of eventCitedMemoryIds(event)) {
+      citedIds.add(memoryId);
+    }
+    for (const memoryId of eventIgnoredMemoryIds(event)) {
+      ignoredIds.add(memoryId);
+    }
+    const usageSummary = stringFromPayload(event.payload, "memory_usage_summary");
+    if (usageSummary) {
+      latestUsageSummary = usageSummary;
+    }
+    for (const use of memoryRecordUses(event)) {
+      usageCounts[use.usage] = (usageCounts[use.usage] ?? 0) + 1;
+    }
+    for (const item of memoryFlowItems(event)) {
+      if (item.similarity !== null) {
+        similarities.push(item.similarity);
+      }
+      const signal = retrievalSignal(item);
+      if (signal.tone === "danger") {
+        dangerCount += 1;
+      } else if (signal.tone === "warning") {
+        cautionCount += 1;
+      }
+    }
+  }
+
+  for (const memoryId of citedIds) {
+    ignoredIds.delete(memoryId);
+  }
+
+  const averageSimilarity =
+    similarities.length === 0
+      ? null
+      : similarities.reduce((total, value) => total + value, 0) / similarities.length;
+  const maxSimilarity =
+    similarities.length === 0 ? null : Math.max(...similarities);
+
+  return {
+    retrievedIds,
+    citedIds,
+    ignoredIds,
+    excludedIds,
+    usageCounts,
+    latestUsageSummary,
+    latestContextId,
+    averageSimilarity,
+    maxSimilarity,
+    cautionCount: cautionCount + dangerCount,
+    signal: memoryRuntimeSignal({
+      retrievedCount: retrievedIds.size,
+      citedCount: citedIds.size,
+      cautionCount,
+      dangerCount,
+    }),
+  };
+}
+
+function eventRetrievedMemoryIds(event: AgentRuntimeEvent): string[] {
+  const explicitIds = stringArrayFromPayload(event.payload, "retrieved_memory_record_ids");
+  if (explicitIds.length > 0) {
+    return explicitIds;
+  }
+  const retrievalEvent = stringFromPayload(event.payload, "retrieval_event");
+  if (retrievalEvent === "retrieval_returned") {
+    return event.memory_record_ids;
+  }
+  return memoryFlowItems(event).map((item) => item.memoryRecordId);
+}
+
+function eventCitedMemoryIds(event: AgentRuntimeEvent): string[] {
+  const explicitIds = stringArrayFromPayload(event.payload, "cited_memory_record_ids");
+  if (explicitIds.length > 0) {
+    return explicitIds;
+  }
+  const retrievalEvent = stringFromPayload(event.payload, "retrieval_event");
+  if (retrievalEvent === "retrieval_used" || event.kind !== "memory_retrieval") {
+    return event.memory_record_ids;
+  }
+  return [];
+}
+
+function eventIgnoredMemoryIds(event: AgentRuntimeEvent): string[] {
+  return stringArrayFromPayload(event.payload, "ignored_memory_record_ids");
+}
+
+function memoryRecordUses(event: AgentRuntimeEvent): MemoryRecordUseView[] {
+  const value = event.payload.memory_record_uses;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter(isRecord)
+    .map((item) => {
+      const memoryRecordId = stringValue(item.memory_record_id);
+      const usage = stringValue(item.usage);
+      const influenceSummary = stringValue(item.influence_summary);
+      if (!memoryRecordId || !usage || !influenceSummary) {
+        return null;
+      }
+      return {
+        memoryRecordId,
+        usage,
+        influenceSummary,
+        riskMitigation: stringValue(item.risk_mitigation),
+      };
+    })
+    .filter((item): item is MemoryRecordUseView => item !== null);
+}
+
+function retrievalSignal(
+  item: MemoryFlowItem,
+): { label: string; tone: "ok" | "warning" | "danger" | "muted"; reason: string | null } {
+  const tags = new Set(item.tags.map((tag) => tag.toLowerCase()));
+  if (
+    item.humanVerdict === "unsafe" ||
+    item.humanVerdict === "incorrect" ||
+    tags.has("manual_exclude") ||
+    tags.has("exclude_candidate")
+  ) {
+    return {
+      label: "revisar",
+      tone: "danger",
+      reason: verdictLabel(item.humanVerdict),
+    };
+  }
+  if (item.similarity !== null && item.similarity < 0.05) {
+    return {
+      label: "sim baja",
+      tone: "danger",
+      reason: "similitud inferior a 0.05",
+    };
+  }
+  if (item.similarity !== null && item.similarity < 0.2) {
+    return {
+      label: "cautela",
+      tone: "warning",
+      reason: "similitud inferior a 0.20",
+    };
+  }
+  if (
+    item.memoryRole === "warning" ||
+    item.memoryRole === "negative_example" ||
+    item.memoryRole === "boundary_case"
+  ) {
+    return {
+      label: "cautela",
+      tone: "warning",
+      reason: roleLabel(item.memoryRole),
+    };
+  }
+  if (item.sourceType === "memory_usage_audit") {
+    return {
+      label: "auditoria",
+      tone: "warning",
+      reason: "fuente de auditoria",
+    };
+  }
+  if (
+    item.humanVerdict === "partially_correct" ||
+    item.humanVerdict === "needs_more_evidence" ||
+    item.outcome === "overcorrected" ||
+    item.outcome === "contradicted"
+  ) {
+    return {
+      label: "cautela",
+      tone: "warning",
+      reason: `${verdictLabel(item.humanVerdict)} · ${outcomeLabel(item.outcome)}`,
+    };
+  }
+  return {
+    label: "estable",
+    tone: item.similarity === null ? "muted" : "ok",
+    reason: null,
+  };
+}
+
+function memoryRuntimeSignal({
+  retrievedCount,
+  citedCount,
+  cautionCount,
+  dangerCount,
+}: {
+  retrievedCount: number;
+  citedCount: number;
+  cautionCount: number;
+  dangerCount: number;
+}): MemoryRuntimeSummary["signal"] {
+  if (retrievedCount === 0) {
+    return { label: "sin retrieval", tone: "muted" };
+  }
+  if (dangerCount > 0) {
+    return { label: "riesgo visible", tone: "danger" };
+  }
+  if (citedCount === 0) {
+    return { label: "recuperada sin uso", tone: "warning" };
+  }
+  if (cautionCount > 0) {
+    return { label: "uso con cautela", tone: "warning" };
+  }
+  return { label: "uso trazable", tone: "ok" };
+}
+
+function memoryUseLabel(
+  usage: string,
+): { label: string; tone: "support" | "adapt" | "contradict" | "ignored" } {
+  if (usage === "followed") {
+    return { label: "apoya", tone: "support" };
+  }
+  if (usage === "adapted") {
+    return { label: "adapta", tone: "adapt" };
+  }
+  if (usage === "contradicted") {
+    return { label: "contradice", tone: "contradict" };
+  }
+  return { label: usage === "ignored" ? "ignora" : usage, tone: "ignored" };
+}
+
+function memoryUsageSummaryEntries(
+  usageCounts: Record<string, number>,
+): Array<{ usage: string; label: string; count: number; tone: "support" | "adapt" | "contradict" | "ignored" }> {
+  return Object.entries(usageCounts).map(([usage, count]) => {
+    const label = memoryUseLabel(usage);
+    return {
+      usage,
+      label: label.label,
+      count,
+      tone: label.tone,
+    };
+  });
+}
+
+function stringArrayFromUnknown(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => stringValue(item))
+    .filter((item): item is string => item !== null);
 }
 
 function formatSimilarity(value: number | null): string {
@@ -434,12 +879,14 @@ function shortText(value: string, maxLength: number): string {
 function MemoryRecordList({
   records,
   selectedRecordId,
-  usedRecordIds,
+  citedRecordIds,
+  ignoredRecordIds,
   onSelectRecord,
 }: {
   records: MemoryRecordSummary[];
   selectedRecordId: string | null;
-  usedRecordIds: Set<string>;
+  citedRecordIds: Set<string>;
+  ignoredRecordIds: Set<string>;
   onSelectRecord: (memoryRecordId: string) => void;
 }) {
   if (records.length === 0) {
@@ -451,7 +898,9 @@ function MemoryRecordList({
       {records.slice(0, 10).map((record) => (
         <button
           className={`memory-record-row ${record.exclude_from_context ? "excluded" : ""} ${
-            usedRecordIds.has(record.memory_record_id) ? "used" : ""
+            citedRecordIds.has(record.memory_record_id) ? "used" : ""
+          } ${
+            ignoredRecordIds.has(record.memory_record_id) ? "ignored" : ""
           } ${
             record.memory_record_id === selectedRecordId ? "selected" : ""
           }`}
@@ -469,7 +918,8 @@ function MemoryRecordList({
           <span className="memory-record-badges">
             {record.reusable_as_context ? <em>reutilizable</em> : null}
             {record.exclude_from_context ? <em>excluido</em> : null}
-            {usedRecordIds.has(record.memory_record_id) ? <em>citado</em> : null}
+            {citedRecordIds.has(record.memory_record_id) ? <em>usado</em> : null}
+            {ignoredRecordIds.has(record.memory_record_id) ? <em>ignorado</em> : null}
           </span>
         </button>
       ))}

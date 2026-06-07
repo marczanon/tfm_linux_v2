@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApiClientError,
@@ -24,6 +24,7 @@ import {
   listRuns,
 } from "./api";
 import { AgentObservabilityView } from "./components/agents/AgentObservabilityView";
+import { CockpitView } from "./components/cockpit/CockpitView";
 import { PipelineDashboard } from "./components/pipeline/PipelineDashboard";
 import { RunContextBand } from "./components/runs/RunContextBand";
 import { AppShell } from "./components/shell/AppShell";
@@ -62,7 +63,7 @@ import type {
 import type { AppView } from "./types/ui";
 
 export default function App() {
-  const [activeView, setActiveView] = useState<AppView>("pipeline");
+  const [activeView, setActiveView] = useState<AppView>("cockpit");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [llmStatus, setLlmStatus] = useState<LLMStatusResponse | null>(null);
   const [adapters, setAdapters] = useState<DatasetAdapterInfo[]>([FALLBACK_ADAPTER]);
@@ -101,6 +102,7 @@ export default function App() {
   const [planning, setPlanning] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const cockpitFocusAttemptRef = useRef<string | null>(null);
 
   const visibleRuns = useMemo(() => runs.slice(0, 20), [runs]);
   const runtimeEvents = useMemo(() => job?.events ?? [], [job?.events]);
@@ -144,6 +146,32 @@ export default function App() {
   useEffect(() => {
     void refreshDashboard();
   }, [runFilters.dataset, runFilters.current_stage, runFilters.approved]);
+
+  useEffect(() => {
+    if (activeView !== "cockpit" || loadingRunDetail) {
+      return;
+    }
+    const latestRunId = runs[0]?.run_id;
+    if (!latestRunId) {
+      return;
+    }
+    const focusAlreadyLoaded =
+      selectedRunId === latestRunId && selectedSnapshot?.run_id === latestRunId;
+    if (focusAlreadyLoaded) {
+      return;
+    }
+    if (cockpitFocusAttemptRef.current === latestRunId) {
+      return;
+    }
+    cockpitFocusAttemptRef.current = latestRunId;
+    void loadRunDetail(latestRunId);
+  }, [
+    activeView,
+    loadingRunDetail,
+    runs,
+    selectedRunId,
+    selectedSnapshot?.run_id,
+  ]);
 
   useEffect(() => {
     if (job === null || !isActiveJob(job)) {
@@ -197,6 +225,7 @@ export default function App() {
   }, [activeView, selectedAgentId, memorySearchText]);
 
   async function refreshDashboard() {
+    cockpitFocusAttemptRef.current = null;
     setLoadingDashboard(true);
     setError(null);
     try {
@@ -601,6 +630,11 @@ export default function App() {
     setSelectedMemoryRecord(null);
   }
 
+  function openRunInView(runId: string, view: AppView) {
+    setActiveView(view);
+    void loadRunDetail(runId);
+  }
+
   return (
     <AppShell
       activeView={activeView}
@@ -612,17 +646,47 @@ export default function App() {
       llmStatus={llmStatus}
       loading={loadingDashboard}
       runsCount={runs.length}
+      showHealthSummary={false}
       onRefresh={() => void refreshDashboard()}
       onViewChange={setActiveView}
     >
-      <RunContextBand
-        request={request}
-        adapter={selectedAdapter}
-        response={planResponse}
-        job={job}
-      />
+      {activeView !== "cockpit" ? (
+        <RunContextBand
+          request={request}
+          adapter={selectedAdapter}
+          response={planResponse}
+          job={job}
+        />
+      ) : null}
 
-      {activeView === "pipeline" ? (
+      {activeView === "cockpit" ? (
+        <CockpitView
+          activeJob={activeJob}
+          approvedRuns={approvedRuns}
+          canExecutePlan={canExecutePlan}
+          completedRuns={completedRuns}
+          executing={executing}
+          health={health}
+          job={job}
+          llmStatus={llmStatus}
+          planning={planning}
+          request={request}
+          runs={runs}
+          selectedAdapter={selectedAdapter}
+          selectedArtifacts={selectedArtifacts}
+          selectedAuditReport={selectedAuditReport}
+          selectedReport={selectedReport}
+          selectedReportDebate={selectedReportDebate}
+          selectedRunEntry={selectedRunEntry}
+          selectedSnapshot={selectedSnapshot}
+          selectedVisualization={selectedVisualization}
+          loadingFocusRun={loadingRunDetail}
+          onExecute={() => void executeBackgroundRun()}
+          onNavigate={setActiveView}
+          onOpenRun={openRunInView}
+          onRefreshLlm={() => void refreshLLMStatus()}
+        />
+      ) : activeView === "pipeline" ? (
         <PipelineDashboard
           activeJob={activeJob}
           adapters={adapters}
@@ -674,8 +738,10 @@ export default function App() {
         <AgentObservabilityView
           job={job}
           events={runtimeEvents}
+          selectedSnapshot={selectedSnapshot}
           selectedAgentId={selectedAgentId}
           onSelectAgent={selectAgent}
+          onOpenEvidence={() => setActiveView("pipeline")}
           memoryCollections={memoryCollections}
           memoryRecords={memoryRecords}
           selectedMemoryRecord={selectedMemoryRecord}
@@ -693,11 +759,16 @@ export default function App() {
         />
       ) : (
         <VisualizationView
+          comparingRuns={comparingRuns}
+          comparison={runComparison}
           runs={visibleRuns}
+          selectedCompareRunIds={selectedCompareRunIds}
           selectedRunId={selectedRunId}
           data={selectedVisualization}
           loading={loadingVisualization}
+          onCompare={() => void submitRunComparison()}
           onSelectRun={(runId) => void loadRunDetail(runId)}
+          onToggleCompare={toggleCompareRun}
         />
       )}
     </AppShell>

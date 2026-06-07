@@ -10,8 +10,8 @@ export function StatusHeader({
   return (
     <header className="status-header">
       <div>
-        <p className="eyebrow">Operacion local</p>
-        <h2>Dashboard de ejecucion multiagente</h2>
+        <p className="eyebrow">Industrial Agentic Cockpit</p>
+        <h2>Control de anomalias</h2>
       </div>
       <button
         className="secondary-button"

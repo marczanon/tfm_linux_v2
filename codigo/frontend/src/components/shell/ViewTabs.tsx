@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Users } from "lucide-react";
+import { Activity, BarChart3, LayoutDashboard, Users } from "lucide-react";
 
 import type { AppView } from "../../types/ui";
 
@@ -12,12 +12,20 @@ export function ViewTabs({
   return (
     <nav className="view-tabs" aria-label="Vistas principales">
       <button
+        className={activeView === "cockpit" ? "active" : ""}
+        type="button"
+        onClick={() => onChange("cockpit")}
+      >
+        <LayoutDashboard size={16} />
+        Cockpit
+      </button>
+      <button
         className={activeView === "pipeline" ? "active" : ""}
         type="button"
         onClick={() => onChange("pipeline")}
       >
         <Activity size={16} />
-        Pipeline
+        Nueva run
       </button>
       <button
         className={activeView === "agents" ? "active" : ""}
@@ -33,7 +41,7 @@ export function ViewTabs({
         onClick={() => onChange("visualization")}
       >
         <BarChart3 size={16} />
-        Visualizacion
+        Visual
       </button>
     </nav>
   );

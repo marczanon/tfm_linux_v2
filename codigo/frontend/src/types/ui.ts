@@ -1,1 +1,1 @@
-export type AppView = "pipeline" | "agents" | "visualization";
+export type AppView = "cockpit" | "pipeline" | "agents" | "visualization";

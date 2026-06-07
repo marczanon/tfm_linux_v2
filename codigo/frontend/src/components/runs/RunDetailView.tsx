@@ -1,12 +1,8 @@
-import { BarChart3, Package } from "lucide-react";
+import { BarChart3 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { StatusPill } from "../common/StatusPill";
-import {
-  ExecutionAuditPanel,
-  FinalReportPanel,
-  ReportDebatePanel,
-} from "../reports/ReportPanels";
+import { RunEvidenceHub } from "../reports/ReportPanels";
 import { formatMetric } from "../../lib/formatters";
 import { runStatusLabel } from "../../lib/labels";
 import type { ArtifactRef, RunIndexEntry, RunSnapshot } from "../../types";
@@ -60,29 +56,14 @@ export function RunDetailView({
         />
       </div>
 
-      <dl className="meta-list detail-meta">
-        <div>
-          <dt>errores</dt>
-          <dd>{snapshot.n_errors}</dd>
-        </div>
-      </dl>
-
-      <FinalReportPanel report={report} snapshot={snapshot} />
-
-      <ExecutionAuditPanel auditReport={auditReport} />
-
-      <ReportDebatePanel reportDebate={reportDebate} />
-
-      <section className="registry-section evidence-section">
-        <div className="section-heading">
-          <div>
-            <h3>Evidencia tecnica</h3>
-            <p>{artifacts.length} artefactos</p>
-          </div>
-          <Package size={18} />
-        </div>
-        <ArtifactList artifacts={artifacts} />
-      </section>
+      <RunEvidenceHub
+        artifacts={artifacts}
+        auditReport={auditReport}
+        entry={entry}
+        report={report}
+        reportDebate={reportDebate}
+        snapshot={snapshot}
+      />
     </section>
   );
 }
@@ -101,25 +82,6 @@ function MetricCard({
       {icon}
       <span>{label}</span>
       <strong>{formatMetric(value)}</strong>
-    </div>
-  );
-}
-
-function ArtifactList({ artifacts }: { artifacts: ArtifactRef[] }) {
-  if (artifacts.length === 0) {
-    return <p className="empty-state compact-empty">Sin artefactos</p>;
-  }
-
-  return (
-    <div className="artifact-list">
-      {artifacts.map((artifact) => (
-        <div className="artifact-row" key={`${artifact.name}-${artifact.path}`}>
-          <div>
-            <strong>{artifact.name}</strong>
-            <span>{artifact.artifact_type} | {artifact.producer}</span>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
