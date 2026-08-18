@@ -59,6 +59,8 @@ def deserialize_common_manifest_row(row: dict[str, str]) -> CommonManifestRecord
     data: dict[str, Any] = dict(row)
     data["channel_names"] = _json_list(row.get("channel_names"))
     data["metadata_json"] = _json_object(row.get("metadata_json"))
+    if not str(data.get("data_provenance") or "").strip():
+        data.pop("data_provenance", None)
     for key in ["timestamp_start", "timestamp_end"]:
         if not str(data.get(key) or "").strip():
             data[key] = None

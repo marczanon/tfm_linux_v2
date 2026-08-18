@@ -13,11 +13,12 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import Field
 
 from codigo.app.schemas.common import StrictBaseModel
+from codigo.app.schemas.dataset import DataProvenance
 from codigo.app.schemas.reasoning import (
     AgentMemoryCollection,
     AgentMemoryQuery,
@@ -59,6 +60,20 @@ RETRIEVAL_USE_BY_ROLE: dict[MemoryRole, MemoryRetrievalUse] = {
     "evidence": "evidence_context",
     "excluded": "negative_warning",
 }
+
+QDRANT_MEMORY_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
+    ("target_agent", "keyword"),
+    ("dataset", "keyword"),
+    ("data_provenance", "keyword"),
+    ("source_type", "keyword"),
+    ("memory_role", "keyword"),
+    ("human_verdict", "keyword"),
+    ("reusable_as_context", "bool"),
+    ("exclude_from_context", "bool"),
+    ("promotion_source_hash", "keyword"),
+    ("record.embedding_model", "keyword"),
+    ("record.embedding_version", "keyword"),
+)
 
 
 class LocalHashEmbeddingModel(StrictBaseModel):
@@ -222,7 +237,10 @@ class LocalJsonVectorMemoryStore:
         vector = self.embedding_model.embed(_record_text(record))
         enriched = self._with_embedding_metadata(record, embedding_dimension=len(vector))
         entry = StoredMemoryVector(record=enriched, vector=vector)
-        entries = self._load_entries(enriched.collection_name)
+        entries = self._load_entries(
+            enriched.collection_name,
+            expected_embedding_dimension=len(vector),
+        )
         entries[enriched.memory_record_id] = entry
         self._write_entries(enriched.collection_name, entries)
         return enriched
@@ -246,29 +264,30 @@ class LocalJsonVectorMemoryStore:
             entries = self._load_entries(collection_name)
             return [entry.record for entry in _sorted_entries(entries)]
         records: list[ReasoningMemoryRecord] = []
-        for path in sorted(self.root_dir.glob("*.json")):
-            collection = path.stem
-            entries = self._load_entries(collection)  # type: ignore[arg-type]
+        for collection in sorted(set(COLLECTION_BY_AGENT.values())):
+            entries = self._load_entries(collection)
             records.extend(entry.record for entry in _sorted_entries(entries))
         return records
 
     def delete(self, memory_record_id: str) -> ReasoningMemoryRecord:
         """Elimina un recuerdo del indice local por identificador."""
 
-        for path in sorted(self.root_dir.glob("*.json")):
-            collection_name = path.stem
+        for collection_name in sorted(set(COLLECTION_BY_AGENT.values())):
             entries = self._load_entries(collection_name)
             entry = entries.pop(memory_record_id, None)
             if entry is None:
                 continue
-            self._write_entries(collection_name, entries)  # type: ignore[arg-type]
+            self._write_entries(collection_name, entries)
             return entry.record
         raise FileNotFoundError(f"memory record not found: {memory_record_id}")
 
     def query(self, query: AgentMemoryQuery) -> RetrievedMemoryContext:
         query_vector = self.embedding_model.embed(_query_text(query))
         retrieved: list[RetrievedMemoryItem] = []
-        for entry in self._candidate_entries(query):
+        for entry in self._candidate_entries(
+            query,
+            expected_embedding_dimension=len(query_vector),
+        ):
             record = entry.record
             if not _record_matches_query(record, query):
                 continue
@@ -298,13 +317,25 @@ class LocalJsonVectorMemoryStore:
             embedding_model=self.embedding_model.identifier,
         )
 
-    def _candidate_entries(self, query: AgentMemoryQuery) -> list[StoredMemoryVector]:
+    def _candidate_entries(
+        self,
+        query: AgentMemoryQuery,
+        *,
+        expected_embedding_dimension: int,
+    ) -> list[StoredMemoryVector]:
         collection_names = [COLLECTION_BY_AGENT[query.target_agent]]
         if query.target_agent != "shared_methodology":
             collection_names.append("shared_methodology_memory")
         entries: list[StoredMemoryVector] = []
         for collection_name in collection_names:
-            entries.extend(_sorted_entries(self._load_entries(collection_name)))
+            entries.extend(
+                _sorted_entries(
+                    self._load_entries(
+                        collection_name,
+                        expected_embedding_dimension=expected_embedding_dimension,
+                    )
+                )
+            )
         return entries
 
     def _with_embedding_metadata(
@@ -329,6 +360,8 @@ class LocalJsonVectorMemoryStore:
     def _load_entries(
         self,
         collection_name: AgentMemoryCollection | str,
+        *,
+        expected_embedding_dimension: int | None = None,
     ) -> dict[str, StoredMemoryVector]:
         path = self._collection_path(collection_name)
         if not path.exists():
@@ -338,6 +371,13 @@ class LocalJsonVectorMemoryStore:
             StoredMemoryVector.model_validate(raw_entry)
             for raw_entry in payload.get("entries", [])
         ]
+        _validate_local_embedding_compatibility(
+            payload,
+            entries,
+            provider=self.embedding_model,
+            expected_dimension=expected_embedding_dimension,
+            collection_name=str(collection_name),
+        )
         return {entry.record.memory_record_id: entry for entry in entries}
 
     def _write_entries(
@@ -455,8 +495,22 @@ class QdrantVectorMemoryStore:
         query_vector = self.embedding_model.embed(_query_text(query))
         retrieved: list[RetrievedMemoryItem] = []
         for collection_name in self._candidate_collection_names(query):
+            collection_info = self._collection_info(collection_name)
+            if collection_info is None:
+                continue
+            _validate_qdrant_collection_compatibility(
+                collection_info,
+                collection_name=str(collection_name),
+                expected_dimension=len(query_vector),
+                expected_distance=self.distance,
+            )
             query_payload = {
                 "query": query_vector,
+                "filter": _qdrant_query_filter(
+                    query,
+                    embedding_model=self.embedding_model.model_name,
+                    embedding_version=self.embedding_model.version,
+                ),
                 "limit": max(query.top_k * 10, 20),
                 "with_payload": True,
                 "with_vector": False,
@@ -466,7 +520,15 @@ class QdrantVectorMemoryStore:
                 continue
             for raw_point in _qdrant_result_list(response):
                 record = _record_from_qdrant_payload(raw_point.get("payload"))
-                if record is None or not _record_matches_query(record, query):
+                if (
+                    record is None
+                    or not _record_matches_query(record, query)
+                    or not _record_embedding_matches_provider(
+                        record,
+                        self.embedding_model,
+                        expected_dimension=len(query_vector),
+                    )
+                ):
                     continue
                 similarity = _qdrant_similarity(raw_point.get("score"))
                 if similarity < query.min_similarity:
@@ -582,27 +644,64 @@ class QdrantVectorMemoryStore:
         collection_name: AgentMemoryCollection | str,
         vector_size: int,
     ) -> None:
-        if self._collection_exists(collection_name):
-            return
-        self._request_json(
-            "PUT",
-            f"/collections/{_url_part(collection_name)}",
-            {
-                "vectors": {
-                    "size": vector_size,
-                    "distance": self.distance,
-                }
-            },
+        collection_info = self._collection_info(collection_name)
+        if collection_info is None:
+            self._request_json(
+                "PUT",
+                f"/collections/{_url_part(collection_name)}",
+                {
+                    "vectors": {
+                        "size": vector_size,
+                        "distance": self.distance,
+                    }
+                },
+            )
+            existing_payload_indexes: set[str] = set()
+        else:
+            _validate_qdrant_collection_compatibility(
+                collection_info,
+                collection_name=str(collection_name),
+                expected_dimension=vector_size,
+                expected_distance=self.distance,
+            )
+            existing_payload_indexes = _qdrant_payload_index_fields(collection_info)
+        self._ensure_payload_indexes(
+            collection_name,
+            existing_payload_indexes=existing_payload_indexes,
         )
 
-    def _collection_exists(self, collection_name: AgentMemoryCollection | str) -> bool:
+    def _collection_info(
+        self,
+        collection_name: AgentMemoryCollection | str,
+    ) -> dict[str, Any] | None:
         try:
-            self._request_json("GET", f"/collections/{_url_part(collection_name)}")
-            return True
+            return self._request_json(
+                "GET",
+                f"/collections/{_url_part(collection_name)}",
+            )
         except QdrantMemoryError as exc:
             if exc.status_code == 404:
-                return False
+                return None
             raise
+
+    def _ensure_payload_indexes(
+        self,
+        collection_name: AgentMemoryCollection | str,
+        *,
+        existing_payload_indexes: set[str],
+    ) -> None:
+        for field_name, field_schema in QDRANT_MEMORY_PAYLOAD_INDEXES:
+            if field_name in existing_payload_indexes:
+                continue
+            self._request_json(
+                "PUT",
+                f"/collections/{_url_part(collection_name)}/index?wait=true",
+                {
+                    "field_name": field_name,
+                    "field_schema": field_schema,
+                },
+            )
+            existing_payload_indexes.add(field_name)
 
     def _delete_collection_if_exists(
         self,
@@ -672,6 +771,7 @@ def memory_record_from_postmortem(
     *,
     review: HumanReasoningReview | None = None,
     dataset: str | None = None,
+    data_provenance: DataProvenance = "unknown",
     source_path: str | None = None,
     source_hash: str | None = None,
 ) -> ReasoningMemoryRecord:
@@ -692,6 +792,7 @@ def memory_record_from_postmortem(
         postmortem_id=postmortem.postmortem_id,
         decision_id=postmortem.decision_id,
         dataset=dataset,
+        data_provenance=data_provenance,
         source_agent_name=postmortem.agent_name,
         outcome=postmortem.outcome,
         human_verdict=None if review is None else review.verdict,
@@ -710,10 +811,15 @@ def memory_record_from_memory_usage_audit(
     *,
     target_agent: AgentMemoryTarget,
     dataset: str | None = None,
+    data_provenance: DataProvenance = "unknown",
     source_path: str | None = None,
     source_hash: str | None = None,
 ) -> ReasoningMemoryRecord:
-    """Convierte una auditoria de uso RAG en memoria reutilizable de agente."""
+    """Conserva una auditoria RAG como observacion no reutilizable.
+
+    Una auditoria describe el uso de memoria, no valida por si misma una
+    leccion. Mantenerla fuera del contexto evita bucles autorreferenciales.
+    """
 
     role = _memory_role_from_usage_audit(audit)
     return ReasoningMemoryRecord(
@@ -726,16 +832,24 @@ def memory_record_from_memory_usage_audit(
         run_id=audit.run_id,
         decision_id=audit.decision_id,
         dataset=dataset,
+        data_provenance=data_provenance,
         source_agent_name=target_agent,
         outcome=None,
         human_verdict=None,
         memory_role=role,
-        reusable_as_context=role != "excluded",
+        reusable_as_context=False,
         exclude_from_context=role == "excluded",
         summary=_memory_usage_audit_summary(audit),
         content=_memory_usage_audit_content(audit),
         metrics=audit.after_metrics,
-        tags=_memory_usage_audit_tags(audit, target_agent),
+        tags=sorted(
+            dict.fromkeys(
+                [
+                    *_memory_usage_audit_tags(audit, target_agent),
+                    "non_reusable_memory_observation",
+                ]
+            )
+        ),
     )
 
 
@@ -761,6 +875,8 @@ def memory_candidate_from_decision_episode(
         run_id=episode.run_id,
         decision_id=episode.decision_id,
         dataset=episode.dataset,
+        data_provenance=episode.data_provenance,
+        applicability=episode.applicability,
         source_agent_name=episode.agent_name,
         outcome=episode.outcome,
         human_verdict=human_verdict,
@@ -795,6 +911,8 @@ def memory_record_from_candidate(
         run_id=candidate.run_id,
         decision_id=candidate.decision_id,
         dataset=candidate.dataset,
+        data_provenance=candidate.data_provenance,
+        applicability=candidate.applicability,
         source_agent_name=candidate.source_agent_name,
         outcome=candidate.outcome,
         human_verdict=candidate.human_verdict,
@@ -987,6 +1105,23 @@ def _episode_candidate_content(episode: DecisionEpisode) -> str:
         f"Lesson learned: {episode.lesson_learned}",
         "Reusable lessons: " + ", ".join(episode.reusable_lessons),
     ]
+    if episode.hypothesis is not None:
+        hypothesis = episode.hypothesis
+        parts[1:1] = [
+            f"Ex-ante hypothesis kind: {hypothesis.kind}",
+            f"Ex-ante hypothesis: {hypothesis.statement}",
+            f"Hypothesis scope: {hypothesis.scope}",
+            f"Evidence cutoff: {hypothesis.evidence_cutoff}",
+            f"Expected observation: {hypothesis.expected_observation}",
+            f"Falsification criterion: {hypothesis.falsification_criterion}",
+            "Hypothesis evidence refs: " + ", ".join(hypothesis.evidence_refs),
+            "Hypothesis risks: " + ", ".join(hypothesis.risk_notes),
+            "Hypothesis assumptions: " + ", ".join(hypothesis.assumptions),
+            (
+                "Hypothesis assessment: not recorded here; episode outcome is "
+                "not by itself a confirmation of the hypothesis."
+            ),
+        ]
     if episode.options_considered:
         parts.append("Options considered:")
         for option in episode.options_considered:
@@ -1057,12 +1192,15 @@ def _episode_candidate_tags(
         episode.agent_name,
         episode.decision_type,
         episode.outcome,
+        f"data_provenance:{episode.data_provenance}",
         *episode.failure_modes,
         *episode.tradeoffs_observed,
         *episode.reusable_lessons,
     ]
     if episode.dataset is not None:
         tags.append(episode.dataset)
+    if episode.hypothesis is not None:
+        tags.append(f"hypothesis_kind:{episode.hypothesis.kind}")
     if human_verdict is not None:
         tags.append(human_verdict)
     return sorted(set(tags))
@@ -1073,6 +1211,7 @@ def _candidate_record_tags(candidate: MemoryCandidate) -> list[str]:
         candidate.target_agent,
         candidate.memory_role,
         candidate.source_type,
+        f"data_provenance:{candidate.data_provenance}",
         *candidate.tags,
     ]
     if candidate.dataset is not None:
@@ -1110,15 +1249,176 @@ def _record_matches_query(
 ) -> bool:
     if record.exclude_from_context or not record.reusable_as_context:
         return False
+    if record.source_type == "memory_usage_audit":
+        return False
+    if record.source_type in {"decision_episode", "memory_candidate"} and (
+        record.promotion_source_hash is None
+        or record.source_hash != record.promotion_source_hash
+    ):
+        return False
     if record.memory_role not in query.allowed_memory_roles:
         return False
     if record.human_verdict is not None and record.human_verdict in query.excluded_verdicts:
         return False
     if record.target_agent not in {query.target_agent, "shared_methodology"}:
         return False
+    if memory_provenance_status(record, query) == "conflict":
+        return False
     if query.dataset is not None and record.dataset not in {None, query.dataset}:
         return False
     return True
+
+
+def memory_provenance_status(
+    record: ReasoningMemoryRecord,
+    query: AgentMemoryQuery,
+) -> Literal["match", "unknown", "conflict"]:
+    """Clasifica compatibilidad sin convertir ``unknown`` en evidencia positiva."""
+
+    if record.target_agent == "shared_methodology":
+        return "unknown" if record.data_provenance == "unknown" else "conflict"
+    if query.data_provenance == "unknown":
+        return "unknown" if record.data_provenance == "unknown" else "conflict"
+    if record.data_provenance == query.data_provenance:
+        return "match"
+    if record.data_provenance == "unknown":
+        return "unknown"
+    return "conflict"
+
+
+def _qdrant_query_filter(
+    query: AgentMemoryQuery,
+    *,
+    embedding_model: str,
+    embedding_version: str,
+) -> dict[str, Any]:
+    target_agents = sorted({query.target_agent, "shared_methodology"})
+    must: list[dict[str, Any]] = [
+        {
+            "key": "target_agent",
+            "match": {"any": target_agents},
+        },
+        {
+            "key": "memory_role",
+            "match": {"any": sorted(set(query.allowed_memory_roles))},
+        },
+        {
+            "key": "reusable_as_context",
+            "match": {"value": True},
+        },
+        {
+            "key": "exclude_from_context",
+            "match": {"value": False},
+        },
+        {
+            "key": "record.embedding_model",
+            "match": {"value": embedding_model},
+        },
+        {
+            "key": "record.embedding_version",
+            "match": {"value": embedding_version},
+        },
+        _qdrant_provenance_scope(query),
+        _qdrant_governed_source_scope(),
+    ]
+    if query.dataset is not None:
+        must.append(
+            {
+                "should": [
+                    {
+                        "key": "dataset",
+                        "match": {"value": query.dataset},
+                    },
+                    {"is_null": {"key": "dataset"}},
+                ]
+            }
+        )
+
+    query_filter: dict[str, Any] = {"must": must}
+    if query.excluded_verdicts:
+        query_filter["must_not"] = [
+            {
+                "key": "human_verdict",
+                "match": {"any": sorted(set(query.excluded_verdicts))},
+            }
+        ]
+    return query_filter
+
+
+def _qdrant_governed_source_scope() -> dict[str, Any]:
+    """Descarta auditorias y candidatos sin promocion en el propio servidor."""
+
+    candidate_source = {
+        "key": "source_type",
+        "match": {"any": ["decision_episode", "memory_candidate"]},
+    }
+    return {
+        "must_not": [
+            {
+                "key": "source_type",
+                "match": {"value": "memory_usage_audit"},
+            }
+        ],
+        "should": [
+            {"must_not": [candidate_source]},
+            {
+                "must": [candidate_source],
+                "must_not": [
+                    {"is_empty": {"key": "promotion_source_hash"}},
+                ],
+            },
+        ],
+    }
+
+
+def _qdrant_provenance_scope(query: AgentMemoryQuery) -> dict[str, Any]:
+    unknown = _qdrant_unknown_provenance_condition()
+    if query.target_agent == "shared_methodology":
+        return unknown
+
+    allowed_specific: list[dict[str, Any]] = [unknown]
+    if query.data_provenance != "unknown":
+        allowed_specific.insert(
+            0,
+            {
+                "key": "data_provenance",
+                "match": {"value": query.data_provenance},
+            },
+        )
+    return {
+        "should": [
+            {
+                "must": [
+                    {
+                        "key": "target_agent",
+                        "match": {"value": query.target_agent},
+                    },
+                    {"should": allowed_specific},
+                ]
+            },
+            {
+                "must": [
+                    {
+                        "key": "target_agent",
+                        "match": {"value": "shared_methodology"},
+                    },
+                    unknown,
+                ]
+            },
+        ]
+    }
+
+
+def _qdrant_unknown_provenance_condition() -> dict[str, Any]:
+    return {
+        "should": [
+            {
+                "key": "data_provenance",
+                "match": {"value": "unknown"},
+            },
+            {"is_empty": {"key": "data_provenance"}},
+        ]
+    }
 
 
 def _record_text(record: ReasoningMemoryRecord) -> str:
@@ -1126,6 +1426,7 @@ def _record_text(record: ReasoningMemoryRecord) -> str:
         record.summary,
         record.content,
         record.dataset or "",
+        f"data_provenance={record.data_provenance}",
         record.outcome or "",
         record.human_verdict or "",
         record.memory_role,
@@ -1136,7 +1437,10 @@ def _record_text(record: ReasoningMemoryRecord) -> str:
 
 def _query_text(query: AgentMemoryQuery) -> str:
     context = " ".join(f"{key}={value}" for key, value in sorted(query.decision_context.items()))
-    return f"{query.query_text}\n{query.dataset or ''}\n{context}"
+    return (
+        f"{query.query_text}\n{query.dataset or ''}\n"
+        f"data_provenance={query.data_provenance}\n{context}"
+    )
 
 
 def _tokens(text: str) -> list[str]:
@@ -1156,6 +1460,130 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right, strict=True))
 
 
+def _validate_local_embedding_compatibility(
+    payload: dict[str, Any],
+    entries: list[StoredMemoryVector],
+    *,
+    provider: EmbeddingProvider,
+    expected_dimension: int | None,
+    collection_name: str,
+) -> None:
+    """Evita consultar o mezclar vectores creados con otro embedding."""
+
+    metadata = payload.get("embedding_model")
+    if entries and not isinstance(metadata, dict):
+        raise VectorMemoryConfigError(
+            f"memory collection {collection_name} has no embedding metadata; "
+            "rebuild it explicitly before querying"
+        )
+    if isinstance(metadata, dict):
+        stored_identifier = metadata.get("identifier")
+        if not isinstance(stored_identifier, str):
+            model_name = metadata.get("model_name")
+            version = metadata.get("version")
+            if isinstance(model_name, str) and isinstance(version, str):
+                stored_identifier = f"{model_name}:{version}"
+        if stored_identifier != provider.identifier:
+            raise VectorMemoryConfigError(
+                "embedding mismatch for memory collection "
+                f"{collection_name}: stored={stored_identifier!r}, "
+                f"configured={provider.identifier!r}; select the original provider "
+                "or rebuild the derived index explicitly"
+            )
+        stored_dimension = metadata.get("dimension")
+        if (
+            expected_dimension is not None
+            and isinstance(stored_dimension, int)
+            and stored_dimension != expected_dimension
+        ):
+            raise VectorMemoryConfigError(
+                "embedding dimension mismatch for memory collection "
+                f"{collection_name}: stored={stored_dimension}, "
+                f"configured={expected_dimension}"
+            )
+
+    for entry in entries:
+        if expected_dimension is not None and len(entry.vector) != expected_dimension:
+            raise VectorMemoryConfigError(
+                "embedding dimension mismatch for memory record "
+                f"{entry.record.memory_record_id}: stored={len(entry.vector)}, "
+                f"configured={expected_dimension}; rebuild the derived index"
+            )
+        if not _record_embedding_matches_provider(
+            entry.record,
+            provider,
+            expected_dimension=expected_dimension,
+        ):
+            raise VectorMemoryConfigError(
+                "embedding metadata mismatch for memory record "
+                f"{entry.record.memory_record_id}; rebuild the derived index"
+            )
+
+
+def _record_embedding_matches_provider(
+    record: ReasoningMemoryRecord,
+    provider: EmbeddingProvider,
+    *,
+    expected_dimension: int | None,
+) -> bool:
+    if record.embedding_model != provider.model_name:
+        return False
+    if record.embedding_version != provider.version:
+        return False
+    return (
+        expected_dimension is None
+        or record.embedding_dimension == expected_dimension
+    )
+
+
+def _validate_qdrant_collection_compatibility(
+    collection_info: dict[str, Any],
+    *,
+    collection_name: str,
+    expected_dimension: int,
+    expected_distance: str,
+) -> None:
+    dimension, distance = _qdrant_vector_config(collection_info)
+    if dimension is None or distance is None:
+        raise VectorMemoryConfigError(
+            f"Qdrant collection {collection_name} does not expose a single-vector "
+            "configuration; explicit migration is required"
+        )
+    if dimension != expected_dimension:
+        raise VectorMemoryConfigError(
+            f"Qdrant collection {collection_name} uses dimension {dimension}, "
+            f"but the configured embedding produces {expected_dimension}; rebuild "
+            "or select a compatible collection"
+        )
+    if distance.lower() != expected_distance.lower():
+        raise VectorMemoryConfigError(
+            f"Qdrant collection {collection_name} uses distance {distance}, "
+            f"but {expected_distance} is configured"
+        )
+
+
+def _qdrant_vector_config(
+    collection_info: dict[str, Any],
+) -> tuple[int | None, str | None]:
+    result = collection_info.get("result")
+    if not isinstance(result, dict):
+        return None, None
+    config = result.get("config")
+    if not isinstance(config, dict):
+        return None, None
+    params = config.get("params")
+    if not isinstance(params, dict):
+        return None, None
+    vectors = params.get("vectors")
+    if not isinstance(vectors, dict):
+        return None, None
+    size = vectors.get("size")
+    distance = vectors.get("distance")
+    if not isinstance(size, int) or not isinstance(distance, str):
+        return None, None
+    return size, distance
+
+
 def _embedding_provider_metadata(provider: EmbeddingProvider) -> dict[str, str | int]:
     metadata: dict[str, str | int] = {
         "model_name": provider.model_name,
@@ -1172,17 +1600,29 @@ def _qdrant_point_id(memory_record_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"tfm-memory:{memory_record_id}"))
 
 
+def _qdrant_payload_index_fields(collection_info: dict[str, Any]) -> set[str]:
+    result = collection_info.get("result")
+    if not isinstance(result, dict):
+        return set()
+    payload_schema = result.get("payload_schema")
+    if not isinstance(payload_schema, dict):
+        return set()
+    return {field_name for field_name in payload_schema if isinstance(field_name, str)}
+
+
 def _qdrant_payload(record: ReasoningMemoryRecord) -> dict[str, Any]:
     return {
         "memory_record_id": record.memory_record_id,
         "collection_name": record.collection_name,
         "target_agent": record.target_agent,
         "dataset": record.dataset,
+        "data_provenance": record.data_provenance,
         "source_type": record.source_type,
         "memory_role": record.memory_role,
         "human_verdict": record.human_verdict,
         "reusable_as_context": record.reusable_as_context,
         "exclude_from_context": record.exclude_from_context,
+        "promotion_source_hash": record.promotion_source_hash,
         "run_id": record.run_id,
         "decision_id": record.decision_id,
         "tags": record.tags,

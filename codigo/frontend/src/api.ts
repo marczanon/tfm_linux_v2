@@ -16,10 +16,19 @@ import type {
   RunSnapshot,
   AgentMemoryTarget,
   MemoryCollectionSummary,
+  MemoryStatusResponse,
   MemoryCurationRequest,
   MemoryCurationResponse,
   MemoryRecordSummary,
   MemoryRole,
+  MonitoringReplaySourceSummary,
+  MonitoringReviewGateView,
+  MonitoringReviewDispatchRequest,
+  MonitoringReviewDispatchResponse,
+  MonitoringSessionCreateRequest,
+  MonitoringSessionView,
+  MonitoringStepRequest,
+  MonitoringStepResponse,
   ReasoningMemoryRecord,
 } from "./types";
 
@@ -68,6 +77,12 @@ export async function getRunArtifacts(runId: string): Promise<ArtifactRef[]> {
   return apiRequest<ArtifactRef[]>(`/runs/${encodeURIComponent(runId)}/artifacts`);
 }
 
+export async function getRunEvents(runId: string): Promise<AgentRuntimeEvent[]> {
+  return apiRequest<AgentRuntimeEvent[]>(
+    `/runs/${encodeURIComponent(runId)}/events`,
+  );
+}
+
 export async function getRunReport(runId: string): Promise<string> {
   return apiTextRequest(`/runs/${encodeURIComponent(runId)}/report`);
 }
@@ -87,6 +102,58 @@ export async function getRunVisualization(
   const query = new URLSearchParams({ max_points: String(maxPoints) });
   return apiRequest<RunVisualizationData>(
     `/runs/${encodeURIComponent(runId)}/visualization?${query.toString()}`,
+  );
+}
+
+export async function listMonitoringSources(): Promise<MonitoringReplaySourceSummary[]> {
+  return apiRequest<MonitoringReplaySourceSummary[]>("/monitoring/sources");
+}
+
+export async function getCurrentMonitoringReviewGate(): Promise<MonitoringReviewGateView> {
+  return apiRequest<MonitoringReviewGateView>("/monitoring/review-gates/current");
+}
+
+export async function createMonitoringSession(
+  payload: MonitoringSessionCreateRequest,
+): Promise<MonitoringSessionView> {
+  return apiRequest<MonitoringSessionView>("/monitoring/sessions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getMonitoringSession(
+  sessionId: string,
+): Promise<MonitoringSessionView> {
+  return apiRequest<MonitoringSessionView>(
+    `/monitoring/sessions/${encodeURIComponent(sessionId)}`,
+  );
+}
+
+export async function stepMonitoringSession(
+  sessionId: string,
+  payload: MonitoringStepRequest,
+): Promise<MonitoringStepResponse> {
+  return apiRequest<MonitoringStepResponse>(
+    `/monitoring/sessions/${encodeURIComponent(sessionId)}/step`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function dispatchMonitoringReview(
+  sessionId: string,
+  triggerId: string,
+  payload: MonitoringReviewDispatchRequest,
+): Promise<MonitoringReviewDispatchResponse> {
+  return apiRequest<MonitoringReviewDispatchResponse>(
+    `/monitoring/sessions/${encodeURIComponent(sessionId)}/triggers/${encodeURIComponent(triggerId)}/dispatch`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
   );
 }
 
@@ -157,6 +224,10 @@ export async function listMemoryCollections(): Promise<MemoryCollectionSummary[]
   return apiRequest<MemoryCollectionSummary[]>("/memory/collections");
 }
 
+export async function getMemoryStatus(): Promise<MemoryStatusResponse> {
+  return apiRequest<MemoryStatusResponse>("/memory/status");
+}
+
 export async function listMemoryRecords(filters: {
   target_agent?: AgentMemoryTarget | null;
   dataset?: string | null;
@@ -207,15 +278,12 @@ export async function curateMemoryRecord(
 
 export async function deleteMemoryRecord(
   memoryRecordId: string,
-  reason: string | null = null,
+  reason: string,
 ): Promise<MemoryCurationResponse> {
   const query = new URLSearchParams();
-  if (reason) {
-    query.set("reason", reason);
-  }
-  const suffix = query.toString() ? `?${query.toString()}` : "";
+  query.set("reason", reason);
   return apiRequest<MemoryCurationResponse>(
-    `/memory/records/${encodeURIComponent(memoryRecordId)}${suffix}`,
+    `/memory/records/${encodeURIComponent(memoryRecordId)}?${query.toString()}`,
     {
       method: "DELETE",
     },

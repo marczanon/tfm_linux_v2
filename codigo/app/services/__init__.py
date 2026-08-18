@@ -142,6 +142,8 @@ from codigo.app.services.dataset_adapters import (
     get_dataset_adapter,
     infer_dataset_adapter,
     list_dataset_adapters,
+    prepare_nasa_ims_official_provenance,
+    verify_nasa_ims_official_provenance,
 )
 from codigo.app.services.common_manifest import (
     read_common_manifest,
@@ -257,6 +259,7 @@ __all__ = [
     "memory_usage_json_template",
     "parse_json_object",
     "prepare_synthetic_nasa_ims_binary_dataset",
+    "prepare_nasa_ims_official_provenance",
     "read_common_manifest",
     "read_signal_channels",
     "read_signal_frame",
@@ -265,6 +268,7 @@ __all__ = [
     "save_run_snapshot",
     "update_run_index",
     "validate_retrieved_memory_usage",
+    "verify_nasa_ims_official_provenance",
     "write_common_manifest",
     "write_reasoning_postmortem",
     "write_decision_memory_artifacts",

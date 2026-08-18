@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from codigo.app.schemas.agent_decisions import ModelingRetryDecision
+from codigo.app.schemas.agent_decisions import (
+    ModelingRetryDecision,
+    require_agent_hypothesis,
+)
 from codigo.app.schemas.common import StrictBaseModel
 from codigo.app.schemas.reasoning import (
     AgentReasoningPostmortem,
@@ -51,6 +54,10 @@ def build_modeling_retry_postmortem(
         approved=False if evaluation is None else evaluation.approved,
     )
     threshold_quantile = _threshold_quantile(decision)
+    hypothesis = require_agent_hypothesis(
+        decision,
+        allowed_kinds={"model_performance"},
+    )
     return AgentReasoningPostmortem(
         postmortem_id=f"{run_id}:reasoning_postmortem:{decision.attempt_number:03d}",
         run_id=run_id,
@@ -59,10 +66,12 @@ def build_modeling_retry_postmortem(
         decision_id=decision.decision_id,
         attempt_number=decision.attempt_number,
         max_attempts=decision.max_attempts,
-        hypothesis=decision.learning_summary,
+        hypothesis=hypothesis.statement,
         action_taken=_action_taken(decision, threshold_quantile),
         expected_effect=decision.expected_effect,
-        evidence_used=decision.evidence_used,
+        evidence_used=list(
+            dict.fromkeys([*decision.evidence_used, *hypothesis.evidence_refs])
+        ),
         before_metrics=before,
         after_metrics=after,
         metric_deltas=deltas,

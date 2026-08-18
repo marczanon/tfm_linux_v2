@@ -1,10 +1,13 @@
 import type { AgentRuntimeEvent } from "../types";
 import {
   AGENT_PROFILES,
+  agentDecisionEventsForAgent,
+  agentDecisionEvidenceModel,
   agentLabel,
-  eventOwnerId,
+  eventEmittingAgentId,
   eventsForAgent,
 } from "./agentRuntime";
+import type { AgentHypothesisViewModel } from "./agentRuntime";
 
 export type AgentOfficeNodeState =
   | "idle"
@@ -19,6 +22,7 @@ export interface AgentOfficeNode {
   decisionCount: number;
   errorCount: number;
   eventCount: number;
+  hypothesisCount: number;
   id: string;
   label: string;
   latestKind: AgentRuntimeEvent["kind"] | null;
@@ -26,6 +30,8 @@ export interface AgentOfficeNode {
   latestSummary: string | null;
   latestEvent: AgentRuntimeEvent | null;
   memoryCount: number;
+  primaryHypothesis: AgentHypothesisViewModel | null;
+  proposalHypothesisCount: number;
   role: string;
   selected: boolean;
   signalBadges: AgentOfficeSignalBadge[];
@@ -98,7 +104,7 @@ const STATE_STYLE: Record<
   },
   memory: {
     cssColor: "#2563eb",
-    stateLabel: "memoria",
+    stateLabel: "actividad RAG",
     threeColor: 0x2563eb,
   },
 };
@@ -108,23 +114,41 @@ export function buildAgentOfficeModel(
   selectedAgentId: string,
 ): AgentOfficeModel {
   const latestEvent = events.length > 0 ? events[events.length - 1] : null;
-  const activeAgentId = latestEvent ? eventOwnerId(latestEvent) : null;
-  const maxEventCount = Math.max(
-    1,
-    ...AGENT_PROFILES.map((agent) => eventsForAgent(events, agent.id).length),
-  );
+  const activeAgentId = latestEvent ? eventEmittingAgentId(latestEvent) : null;
 
   const nodes = AGENT_PROFILES.map((agent) => {
-    const agentEvents = eventsForAgent(events, agent.id);
+    const relatedEvents = eventsForAgent(events, agent.id);
+    const agentEvents = agentDecisionEventsForAgent(events, agent.id);
     const latestAgentEvent =
       agentEvents.length > 0 ? agentEvents[agentEvents.length - 1] : null;
-    const decisionCount = agentEvents.filter(
-      (event) =>
-        event.kind === "agent_decision" || event.kind === "supervisor_decision",
+    const latestRelatedEvent =
+      relatedEvents.length > 0 ? relatedEvents[relatedEvents.length - 1] : null;
+    const decisionCount = agentEvents.length;
+    const decisionModels = agentEvents
+      .filter(
+        (event) => event.kind === "agent_decision" || event.kind === "supervisor_decision",
+      )
+      .map(agentDecisionEvidenceModel);
+    const completeEffectiveHypotheses = decisionModels
+      .map((item) => item.primaryHypothesis)
+      .filter(
+        (item): item is AgentHypothesisViewModel =>
+          item !== null && item.contractComplete,
+      );
+    const proposalHypothesisCount = decisionModels.reduce(
+      (total, item) => total + Math.max(0, item.hypotheses.length - 1),
+      0,
+    );
+    const primaryHypothesis = decisionModels.length > 0
+      ? decisionModels[decisionModels.length - 1].primaryHypothesis
+      : null;
+    const memoryCount = relatedEvents.filter(
+      (event) => event.kind === "memory_retrieval",
     ).length;
-    const memoryCount = agentEvents.filter(hasMemorySignal).length;
-    const errorCount = agentEvents.filter((event) => event.kind === "error").length;
-    const toolCount = agentEvents.reduce(
+    const errorCount = relatedEvents.filter(
+      (event) => event.kind === "error" && event.agent_name === agent.id,
+    ).length;
+    const toolCount = relatedEvents.reduce(
       (total, event) => total + countToolSignals(event),
       0,
     );
@@ -132,9 +156,8 @@ export function buildAgentOfficeModel(
     const state = agentNodeState({
       activeAgentId,
       agentId: agent.id,
-      errorCount,
       latestAgentEvent,
-      memoryCount,
+      latestRelatedEvent,
       decisionCount,
     });
     const style = STATE_STYLE[state];
@@ -145,7 +168,8 @@ export function buildAgentOfficeModel(
       debateCount,
       decisionCount,
       errorCount,
-      eventCount: agentEvents.length,
+      eventCount: decisionCount,
+      hypothesisCount: completeEffectiveHypotheses.length,
       id: agent.id,
       label: agentLabel(agent.id),
       latestKind: latestAgentEvent?.kind ?? null,
@@ -153,13 +177,16 @@ export function buildAgentOfficeModel(
       latestSummary: latestAgentEvent?.summary ?? null,
       latestEvent: latestAgentEvent,
       memoryCount,
+      primaryHypothesis,
+      proposalHypothesisCount,
       role: agent.role,
       selected: selectedAgentId === agent.id,
       signalBadges: signalBadges({
         debateCount,
         decisionCount,
         errorCount,
-        eventCount: agentEvents.length,
+        eventCount: decisionCount,
+        hypothesisCount: completeEffectiveHypotheses.length,
         memoryCount,
         state,
         toolCount,
@@ -175,8 +202,8 @@ export function buildAgentOfficeModel(
 
   return {
     activeAgentId,
-    activeAgents: nodes.filter((node) => node.eventCount > 0).length,
-    connections: buildAgentConnections(events, nodes, maxEventCount),
+    activeAgents: nodes.filter((node) => node.decisionCount > 0).length,
+    connections: buildAgentConnections(events, nodes),
     eventCount: events.length,
     hasRuntimeEvents: events.length > 0,
     latestEvent,
@@ -189,24 +216,25 @@ function agentNodeState({
   activeAgentId,
   agentId,
   decisionCount,
-  errorCount,
   latestAgentEvent,
-  memoryCount,
+  latestRelatedEvent,
 }: {
   activeAgentId: string | null;
   agentId: string;
   decisionCount: number;
-  errorCount: number;
   latestAgentEvent: AgentRuntimeEvent | null;
-  memoryCount: number;
+  latestRelatedEvent: AgentRuntimeEvent | null;
 }): AgentOfficeNodeState {
-  if (latestAgentEvent?.kind === "error" || errorCount > 0) {
+  if (latestAgentEvent?.kind === "error") {
     return "error";
   }
   if (activeAgentId === agentId) {
     return "active";
   }
-  if (latestAgentEvent?.kind === "memory_retrieval" || memoryCount > 0) {
+  if (
+    latestRelatedEvent?.kind === "memory_retrieval"
+    && (latestAgentEvent === null || latestRelatedEvent.sequence > latestAgentEvent.sequence)
+  ) {
     return "memory";
   }
   if (decisionCount > 0) {
@@ -218,74 +246,53 @@ function agentNodeState({
 function buildAgentConnections(
   events: AgentRuntimeEvent[],
   nodes: AgentOfficeNode[],
-  maxEventCount: number,
 ): AgentOfficeConnection[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const transitions = events
-    .slice(-36)
-    .reduce<AgentOfficeConnection[]>((connections, event, index, recentEvents) => {
-      if (index === 0) {
-        return connections;
-      }
-      const previousAgentId = eventOwnerId(recentEvents[index - 1]);
-      const nextAgentId = eventOwnerId(event);
-      if (
-        previousAgentId === nextAgentId ||
-        !nodeById.has(previousAgentId) ||
-        !nodeById.has(nextAgentId)
-      ) {
-        return connections;
-      }
-      const target = nodeById.get(nextAgentId)!;
-      connections.push({
+  return events
+    .filter((event) => event.kind === "supervisor_decision" && event.next_node)
+    .flatMap((event) => {
+      const targetId = agentIdForPipelineNode(event.next_node!);
+      const target = targetId ? nodeById.get(targetId) : null;
+      if (!target || targetId === "supervisor") return [];
+      const resolvedTargetId = target.id;
+      return [{
         color: target.threeColor,
-        fromAgentId: previousAgentId,
-        intensity: Math.min(1, 0.28 + connections.length * 0.035),
-        kind: "transition",
+        fromAgentId: "supervisor",
+        intensity: 0.72,
+        kind: "supervisor" as const,
         sequence: event.sequence,
-        toAgentId: nextAgentId,
-      });
-      return connections;
-    }, []);
-
-  if (transitions.length > 0) {
-    return transitions.slice(-14);
-  }
-
-  return nodes
-    .filter((node) => node.id !== "supervisor" && (node.eventCount > 0 || node.selected))
-    .map((node) => ({
-      color: node.threeColor,
-      fromAgentId: "supervisor",
-      intensity: Math.max(0.22, Math.min(1, node.eventCount / maxEventCount)),
-      kind: "supervisor" as const,
-      sequence: null,
-      toAgentId: node.id,
-    }));
+        toAgentId: resolvedTargetId,
+      }];
+    })
+    .slice(-14);
 }
 
-function hasMemorySignal(event: AgentRuntimeEvent): boolean {
-  return (
-    event.kind === "memory_retrieval" ||
-    event.memory_record_ids.length > 0 ||
-    payloadStringArray(event.payload, "retrieved_memory_record_ids").length > 0 ||
-    payloadStringArray(event.payload, "cited_memory_record_ids").length > 0 ||
-    payloadStringArray(event.payload, "ignored_memory_record_ids").length > 0
-  );
+function agentIdForPipelineNode(node: string): string | null {
+  const agentNodes: Record<string, string> = {
+    cleaner: "cleaner",
+    cleaner_agent: "cleaner",
+    structurer: "structurer",
+    structuring_agent: "structurer",
+    modeler: "modeler",
+    modeling_agent: "modeler",
+    evaluator: "evaluator",
+    evaluation_agent: "evaluator",
+    report_writer: "report_writer",
+    report_verifier: "report_verifier",
+  };
+  return agentNodes[node.trim().toLowerCase()] ?? null;
 }
 
 function countToolSignals(event: AgentRuntimeEvent): number {
-  return [
-    "tool_names",
-    "tool_calls",
-    "tools_used",
-    "used_tools",
-  ].reduce((total, key) => total + payloadStringArray(event.payload, key).length, 0);
+  return event.payload.tool_observation !== undefined
+    || event.payload.observation_id !== undefined
+    ? 1
+    : 0;
 }
 
 function hasDebateSignal(event: AgentRuntimeEvent): boolean {
   return (
-    eventOwnerId(event) === "report_verifier" ||
+    eventEmittingAgentId(event) === "report_verifier" ||
     payloadStringArray(event.payload, "required_corrections").length > 0 ||
     payloadStringArray(event.payload, "changes_summary").length > 0 ||
     payloadStringArray(event.payload, "accepted_issue_ids").length > 0 ||
@@ -299,6 +306,7 @@ function signalBadges({
   decisionCount,
   errorCount,
   eventCount,
+  hypothesisCount,
   memoryCount,
   state,
   toolCount,
@@ -307,24 +315,31 @@ function signalBadges({
   decisionCount: number;
   errorCount: number;
   eventCount: number;
+  hypothesisCount: number;
   memoryCount: number;
   state: AgentOfficeNodeState;
   toolCount: number;
 }): AgentOfficeSignalBadge[] {
   const badges: AgentOfficeSignalBadge[] = [];
   if (eventCount === 0) {
-    badges.push({ label: "sin eventos", tone: "neutral" });
+    badges.push({ label: "sin decisiones", tone: "neutral" });
     return badges;
   }
-  badges.push({ label: state === "active" ? "activo" : `${eventCount} eventos`, tone: "ok" });
+  badges.push({ label: state === "active" ? "activo" : `${eventCount} decisiones`, tone: "ok" });
   if (decisionCount > 0) {
     badges.push({ label: `${decisionCount} decisiones`, tone: "warning" });
   }
+  if (hypothesisCount > 0) {
+    badges.push({ label: `${hypothesisCount} hipotesis completas`, tone: "ok" });
+  }
   if (memoryCount > 0) {
-    badges.push({ label: `${memoryCount} memoria`, tone: "ok" });
+    badges.push({
+      label: `${memoryCount} ${memoryCount === 1 ? "evento RAG" : "eventos RAG"}`,
+      tone: "neutral",
+    });
   }
   if (toolCount > 0) {
-    badges.push({ label: `${toolCount} tools`, tone: "neutral" });
+    badges.push({ label: `${toolCount} observaciones tool`, tone: "neutral" });
   }
   if (debateCount > 0) {
     badges.push({ label: `${debateCount} debate`, tone: "warning" });

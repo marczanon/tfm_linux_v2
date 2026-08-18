@@ -36,6 +36,7 @@ from codigo.app.schemas.executor_results import ModelingResult
 from codigo.app.schemas.state import PipelineError, ProjectContext, TFMStateModel
 from codigo.app.services.llm import OllamaJSONClient
 from codigo.app.services.run_persistence import DEFAULT_RUNS_DIR, extract_decisions
+from codigo.app.services.dataset_adapters import describe_dataset
 
 
 def main() -> None:
@@ -106,10 +107,25 @@ def _prepare_synthetic_nasa_ims(raw_dir: Path) -> Path:
             ]
         )
         np.savetxt(target_dir / timestamp, frame, fmt="%.8f", delimiter="\t")
+    (raw_dir / "synthetic_dataset_spec.json").write_text(
+        json.dumps(
+            {
+                "dataset": "nasa_ims_bearing",
+                "synthetic": True,
+                "generator": "run_nasa_ims_qwen_smoke",
+                "sample_count": sample_count,
+                "sample_rate_hz": 20000,
+                "n_files": 3,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return raw_dir
 
 
 def _initial_state(run_id: str, raw_dir: Path) -> TFMState:
+    descriptor = describe_dataset(raw_dir, adapter_id="nasa_ims_bearing")
     state = TFMStateModel(
         thread_id=f"{run_id}-thread",
         run_id=run_id,
@@ -123,6 +139,13 @@ def _initial_state(run_id: str, raw_dir: Path) -> TFMState:
             target_sample_rate_hz=20000,
             main_channel="channel_1",
             label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="event",
+            label_source="none",
+            data_provenance=descriptor.data_provenance,
+            provenance_detection_method=descriptor.provenance_detection_method,
+            provenance_evidence_path=descriptor.provenance_evidence_path,
+            provenance_evidence_sha256=descriptor.provenance_evidence_sha256,
             notes=(
                 "NASA IMS synthetic preextracted smoke run; modeling is expected "
                 "to be blocked until temporal labels and split policy exist."

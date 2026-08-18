@@ -105,6 +105,35 @@ class MemoryBackendMigrationTests(unittest.TestCase):
             [("modeler", "nasa_ims_bearing"), ("shared_methodology", None)],
         )
         self.assertEqual(queries[0].top_k, 5)
+        self.assertEqual(queries[0].data_provenance, "unknown")
+
+    def test_verification_queries_keep_distinct_data_provenance(self):
+        synthetic = _modeler_record().model_copy(
+            update={
+                "memory_record_id": "memory-modeler-synthetic",
+                "data_provenance": "synthetic",
+            }
+        )
+        official = _modeler_record().model_copy(
+            update={
+                "memory_record_id": "memory-modeler-official",
+                "data_provenance": "official",
+            }
+        )
+
+        queries = build_memory_migration_verification_queries(
+            [synthetic, official],
+            max_queries=8,
+        )
+
+        self.assertEqual(
+            {query.data_provenance for query in queries},
+            {"official", "synthetic"},
+        )
+        self.assertEqual(
+            {query.decision_context["data_provenance"] for query in queries},
+            {"official", "synthetic"},
+        )
 
 
 def _modeler_record() -> ReasoningMemoryRecord:

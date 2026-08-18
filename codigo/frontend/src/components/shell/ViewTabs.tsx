@@ -1,4 +1,4 @@
-import { Activity, BarChart3, LayoutDashboard, Users } from "lucide-react";
+import { Activity, BarChart3, LayoutDashboard, MonitorPlay, Users } from "lucide-react";
 
 import type { AppView } from "../../types/ui";
 
@@ -12,14 +12,16 @@ export function ViewTabs({
   return (
     <nav className="view-tabs" aria-label="Vistas principales">
       <button
+        aria-current={activeView === "cockpit" ? "page" : undefined}
         className={activeView === "cockpit" ? "active" : ""}
         type="button"
         onClick={() => onChange("cockpit")}
       >
         <LayoutDashboard size={16} />
-        Cockpit
+        Inicio
       </button>
       <button
+        aria-current={activeView === "pipeline" ? "page" : undefined}
         className={activeView === "pipeline" ? "active" : ""}
         type="button"
         onClick={() => onChange("pipeline")}
@@ -28,6 +30,16 @@ export function ViewTabs({
         Nueva run
       </button>
       <button
+        aria-current={activeView === "monitoring" ? "page" : undefined}
+        className={activeView === "monitoring" ? "active" : ""}
+        type="button"
+        onClick={() => onChange("monitoring")}
+      >
+        <MonitorPlay size={16} />
+        Monitorización
+      </button>
+      <button
+        aria-current={activeView === "agents" ? "page" : undefined}
         className={activeView === "agents" ? "active" : ""}
         type="button"
         onClick={() => onChange("agents")}
@@ -36,12 +48,13 @@ export function ViewTabs({
         Agentes
       </button>
       <button
+        aria-current={activeView === "visualization" ? "page" : undefined}
         className={activeView === "visualization" ? "active" : ""}
         type="button"
         onClick={() => onChange("visualization")}
       >
         <BarChart3 size={16} />
-        Visual
+        Resultados
       </button>
     </nav>
   );

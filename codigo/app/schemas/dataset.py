@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import (
@@ -41,9 +42,98 @@ SupervisionProfile = Literal[
 ]
 LabelGranularity = Literal["window", "file", "run", "event", "none", "proxy_temporal"]
 LabelSource = Literal["official", "curated", "temporal_proxy", "synthetic", "none"]
+DataProvenance = Literal["official", "synthetic", "unknown"]
+ProvenanceDetectionMethod = Literal[
+    "trusted_adapter",
+    "official_dataset_provenance",
+    "synthetic_dataset_spec",
+    "synthetic_generator",
+    "unverified",
+]
 
 
 DATASET_ID_PATTERN = r"^[a-z0-9][a-z0-9_]*$"
+SHA256_PATTERN = r"^[0-9a-f]{64}$"
+NASA_IMS_SNAPSHOT_PATTERN = r"^\d{4}\.\d{2}\.\d{2}\.\d{2}\.\d{2}\.\d{2}$"
+
+
+class NASAIMSOfficialArchiveEvidence(StrictBaseModel):
+    """Identidad verificable del paquete oficial distribuido por NASA."""
+
+    source_url: str = Field(min_length=1)
+    archive_file_name: str = Field(min_length=1)
+    archive_size_bytes: PositiveInt
+    archive_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @field_validator("archive_file_name")
+    @classmethod
+    def validate_archive_file_name(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            "\\" in value
+            or path.is_absolute()
+            or len(path.parts) != 1
+            or path.name != value
+            or value in {".", ".."}
+        ):
+            raise ValueError("archive_file_name must be a safe base name")
+        return value
+
+
+class NASAIMSOfficialSubsetInventory(StrictBaseModel):
+    """Inventario reproducible de un subconjunto IMS ya extraido."""
+
+    set_id: Literal["set_1", "set_2", "set_3"]
+    relative_path: str = Field(min_length=1)
+    snapshot_count: PositiveInt
+    expected_n_channels: PositiveInt
+    first_snapshot: str = Field(pattern=NASA_IMS_SNAPSHOT_PATTERN)
+    last_snapshot: str = Field(pattern=NASA_IMS_SNAPSHOT_PATTERN)
+    total_bytes: PositiveInt
+    tree_digest_algorithm: Literal["sha256_path_size_content_v1"] = (
+        "sha256_path_size_content_v1"
+    )
+    tree_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @field_validator("relative_path")
+    @classmethod
+    def validate_relative_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            "\\" in value
+            or path.is_absolute()
+            or value != path.as_posix()
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("relative_path must be a normalized safe relative path")
+        return value
+
+    @model_validator(mode="after")
+    def validate_set_path(self) -> "NASAIMSOfficialSubsetInventory":
+        expected_directory = {
+            "set_1": "1st_test",
+            "set_2": "2nd_test",
+            "set_3": "3rd_test",
+        }[self.set_id]
+        if PurePosixPath(self.relative_path).name != expected_directory:
+            raise ValueError(
+                f"{self.set_id} must point to a {expected_directory} directory"
+            )
+        if self.last_snapshot < self.first_snapshot:
+            raise ValueError("last_snapshot cannot precede first_snapshot")
+        return self
+
+
+class NASAIMSOfficialProvenanceEvidence(StrictBaseModel):
+    """Sidecar estricto que acredita una extraccion oficial de NASA IMS."""
+
+    schema_version: Literal["nasa_ims_official_provenance_v1"] = (
+        "nasa_ims_official_provenance_v1"
+    )
+    dataset: Literal["nasa_ims_bearing"] = "nasa_ims_bearing"
+    data_provenance: Literal["official"] = "official"
+    source: NASAIMSOfficialArchiveEvidence
+    subset: NASAIMSOfficialSubsetInventory
 
 
 class SignalChannel(StrictBaseModel):
@@ -134,6 +224,13 @@ class DatasetDescriptor(StrictBaseModel):
     supervision_profile: SupervisionProfile = "binary_fault_classification"
     label_granularity: LabelGranularity = "file"
     label_source: LabelSource = "official"
+    data_provenance: DataProvenance = "unknown"
+    provenance_detection_method: ProvenanceDetectionMethod = "unverified"
+    provenance_evidence_path: str | None = Field(default=None, min_length=1)
+    provenance_evidence_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     sampling_rate_hz: float | None = Field(default=None, gt=0.0)
     channel_names: list[str] = Field(default_factory=list)
     has_multiple_conditions: bool
@@ -171,6 +268,7 @@ class CommonManifestRecord(StrictBaseModel):
     dataset: str = Field(min_length=1, pattern=DATASET_ID_PATTERN)
     source_path: str = Field(min_length=1)
     source_format: SourceFormat
+    data_provenance: DataProvenance = "unknown"
     label: CommonDatasetLabel
     label_detail: str | None = None
     condition_id: str | None = None

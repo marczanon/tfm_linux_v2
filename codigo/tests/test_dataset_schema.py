@@ -134,10 +134,12 @@ class DatasetSchemaTests(unittest.TestCase):
         self.assertEqual(cwru.supervision_profile, "binary_fault_classification")
         self.assertEqual(cwru.label_granularity, "file")
         self.assertEqual(cwru.label_source, "official")
+        self.assertEqual(cwru.data_provenance, "unknown")
         self.assertTrue(nasa.has_run_to_failure)
         self.assertEqual(nasa.supervision_profile, "run_to_failure_degradation")
         self.assertEqual(nasa.label_granularity, "event")
         self.assertEqual(nasa.label_source, "none")
+        self.assertEqual(nasa.data_provenance, "unknown")
 
     def test_dataset_descriptor_rejects_invalid_ids_and_duplicate_channels(self):
         payload = {
@@ -191,6 +193,7 @@ class DatasetSchemaTests(unittest.TestCase):
         )
 
         self.assertEqual(record.primary_channel, "channel_1")
+        self.assertEqual(record.data_provenance, "unknown")
 
     def test_common_manifest_record_rejects_invalid_channel_payloads(self):
         payload = {

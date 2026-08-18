@@ -1,279 +1,566 @@
 \chapter{Metodología}
 
-\section{Caso de uso industrial}
+\section{Enfoque de investigación}
 
-El caso de uso seleccionado es la detección de anomalías en rodamientos de
-motores eléctricos mediante señales de vibración. La elección permite trabajar
-con datos industriales públicos, etiquetas interpretables y un flujo temporal
-adecuado para ventanas, features y tensores.
+Este trabajo adopta un diseño experimental orientado a estudiar el
+comportamiento de agentes basados en modelos de lenguaje dentro de un sistema
+industrial trazable. El objetivo científico no es comparar bases vectoriales ni
+maximizar de forma aislada una métrica de clasificación. Se pretende observar
+cómo los agentes formulan hipótesis, seleccionan acciones, utilizan evidencia
+recuperada, revisan decisiones y reconocen limitaciones en un escenario de
+degradación \textit{run-to-failure}.
 
-\section{Pipeline de datos}
+La arquitectura se utiliza como instrumento de investigación. Los agentes
+producen decisiones estructuradas y los ejecutores deterministas realizan el
+cálculo, la transformación de datos y el entrenamiento de modelos. Esta
+separación permite atribuir al agente la hipótesis y la elección, pero no una
+operación numérica que en realidad haya sido programada. También permite repetir
+una misma configuración sin depender de código generado dinámicamente.
 
-El flujo metodológico para el MVP queda definido como:
+El estudio combina tres niveles de evaluación: la calidad de las decisiones de
+los agentes, el funcionamiento y efecto de la memoria RAG, y la utilidad de las
+decisiones en el seguimiento temporal del activo. Los tres niveles se analizan
+por separado antes de relacionarlos. Una recuperación técnicamente correcta no
+implica que el agente haya usado bien el recuerdo, y una decisión bien
+justificada no implica necesariamente una mejora del detector.
 
-\begin{center}
-\begin{minipage}{0.85\textwidth}
-\begin{verbatim}
-datos .mat crudos
--> manifiesto del dataset
--> extracción de señales
--> normalización de frecuencia de muestreo
--> perfilado estadístico
--> limpieza determinista
--> ventanas temporales
--> features y tensores
--> particiones train/validation/test
--> modelos de anomalías
--> evaluación
--> informe técnico
-\end{verbatim}
-\end{minipage}
-\end{center}
+\section{Preguntas e hipótesis de trabajo}
 
-\section{Principio rector agentico}
+Las preguntas de investigación formuladas en la introducción se
+operacionalizan mediante las siguientes hipótesis:
 
-El objeto central de investigacion de este TFM no es solo construir un pipeline
-clasico de deteccion de anomalias, sino estudiar hasta donde puede llegar una
-arquitectura multiagente basada en LLM locales, especialmente la familia Qwen,
-en un contexto industrial de monitorizacion de activos. Por tanto, los agentes
-mantienen el protagonismo metodologico: formulan hipotesis, seleccionan
-configuraciones, interpretan evidencias, proponen alternativas, debaten
-resultados, redactan conclusiones y dejan trazabilidad de sus decisiones.
+\begin{description}
+  \item[H1.] Los agentes locales pueden convertir un expediente técnico en una
+        decisión válida y ejecutable dentro de los contratos definidos, dejando
+        una justificación, una hipótesis y referencias de evidencia auditables.
+  \item[H2.] El filtrado por metadatos y el control de calidad previo a la
+        inyección aumentan la relevancia y la fidelidad de las citas respecto a
+        una recuperación sin ese control, y reducen la exposición a recuerdos
+        incompatibles o inseguros.
+  \item[H3.] La memoria filtrada puede modificar de forma observable las
+        hipótesis, alternativas, configuraciones o revisiones del agente frente
+        a la condición sin memoria. El cambio se considerará beneficioso solo
+        si la auditoría y las métricas posteriores lo respaldan.
+  \item[H4.] Evaluar la alerta algorítmica persistente, su intervalo
+        retrospectivo hasta el final registrado y la tasa de alertas previa a
+        monitorización a nivel de snapshot, en lugar de tratar ventanas
+        solapadas como observaciones longitudinales independientes, produce una
+        interpretación temporal más conservadora y evita pseudorreplicación.
+\end{description}
 
-Los componentes deterministas no sustituyen ese papel. Su funcion es dar a los
-agentes un entorno industrialmente defendible: contratos Pydantic, herramientas
-de observacion, calculo reproducible de metricas, ejecucion segura de
-transformaciones y persistencia auditable de artefactos. En otras palabras, la
-parte determinista actua como instrumentacion, guardarrail y brazo ejecutor,
-mientras que la linea de investigacion evalua si los agentes pequenos pueden
-tomar decisiones utiles, consistentes y trazables sobre esa evidencia.
+La comparación entre Qwen 3.5 y Qwen 3 se considera una pregunta experimental
+posterior, no una conclusión disponible. Solo se abordará después de congelar el
+dataset, los contratos, los prompts, las herramientas, el corpus de memoria y el
+protocolo temporal. De este modo, una diferencia observada podrá asociarse al
+modelo con menos factores de confusión.
 
-La eleccion de modelos LLM locales y relativamente pequenos es deliberada. No
-se plantea como una solucion comodamente sobredimensionada, sino como una
-hipotesis de viabilidad para entornos industriales reales, donde el coste, la
-latencia, la privacidad, la conectividad y la posibilidad de despliegue local
-son restricciones relevantes. Si el sistema llega a sus limites, esos limites
-formaran parte del resultado de investigacion; hasta entonces, la metodologia
-debe intentar llevar la linea agentica tan lejos como sea razonablemente
-posible sin abandonar seguridad, reproducibilidad ni trazabilidad.
+\section{Fuentes de evidencia y alcance inferencial}
 
-\section{Memoria agentica y RAG}
+Se establecen tres categorías de datos con funciones distintas. Esta separación
+es obligatoria tanto en los planes experimentales como en tablas, figuras e
+informes.
 
-La memoria se trata como una capacidad metodologica central, no como un simple
-historial de ejecuciones. Cada recuerdo debe representar una decision, una
-evidencia, una advertencia o una leccion reutilizable; debe poder recuperarse
-por un agente, citarse dentro de una decision estructurada y auditarse despues.
-Por ello se separan cuatro responsabilidades: los agentes deciden si usan la
-memoria, los contratos limitan que pueden declarar, los ejecutores persisten e
-indexan artefactos reproducibles y la interfaz debe mostrar el ciclo completo
-del recuerdo.
-
-El baseline del TFM conserva una memoria vectorial local basada en JSON y
-embeddings Qwen cuando Ollama esta disponible. Esta eleccion facilita
-reproducibilidad, inspeccion manual y pruebas locales, pero se declara
-explicitamente como punto de partida, no como equivalente a una base vectorial
-industrial. La evolucion metodologica prevista compara ese baseline con
-tecnicas actuales de RAG: observabilidad de consultas, evaluacion de retrieval,
-reranking, busqueda hibrida, consolidacion de episodios y eventualmente una
-base vectorial externa. En todos los casos, la memoria debe informar a Qwen sin
-sustituir el protagonismo deliberativo de los agentes.
-
-\section{Metodologia run-to-failure de Fase 9}
-
-La Fase 9 fija una metodologia especifica para elevar el perfil
-\texttt{run\_to\_failure\_degradation} desde una ejecucion temporal defendible
-hacia un caso local de mantenimiento predictivo agentico. La unidad de analisis
-deja de ser la ventana aislada y pasa a ser la trayectoria completa del activo.
-Por ello, el criterio principal no es F1, sino la deteccion de degradacion
-confirmada antes de fallo, el \texttt{lead time} persistente, las falsas
-alarmas nominales, la tendencia del score y la calidad del Health Indicator.
-
-Esta metodologia introduce politicas versionadas y citables. La politica de
-alerta distingue pico aislado, vigilancia y aviso sostenido; la politica de
-Health Indicator produce una curva de salud causal y metricas de caida,
-monotonicidad y robustez; y la politica de readiness decide si existen datos
-suficientes para modelos temporales avanzados. Los agentes pueden consultar
-estas herramientas y citarlas en sus decisiones, pero las herramientas no
-aprueban runs, no eligen modelos y no estiman RUL.
-
-El principio agentico se mantiene: Qwen/LLM conserva el protagonismo como
-decisor. El sistema le ofrece familias de modelo ejecutables y evidencias
-temporales, pero no fuerza una eleccion. En particular, el autoencoder PyTorch
-denso se incorpora como candidato profesional y reproducible, no como reemplazo
-del agente ni como mejora garantizada. Para seleccionarlo, el modelador debe
-trabajar dentro del perfil run-to-failure, citar la herramienta de readiness,
-usar hiperparametros cerrados y aceptar que el evaluador juzgara el resultado
-con las mismas metricas temporales que PCA, Isolation Forest y One-Class SVM.
-
-Tambien se refuerza la trazabilidad de fallos del LLM. Una salida que no cumple
-un contrato no debe aparecer como una caida opaca a fallback si puede repararse
-mediante una segunda emision estructurada. Por ello, las violaciones de contrato
-se registran como correcciones de guardarrail, mientras que el fallback queda
-reservado para fallos tecnicos del proveedor o JSON irrecuperable. Esta
-distincion es importante en un TFM centrado en agentes: una correccion de
-guardarrail demuestra control metodologico; un fallback tecnico indica que el
-LLM no pudo participar.
-
-\section{Generalización multi-dataset}
-
-Tras consolidar el MVP sobre CWRU, la siguiente extensión metodológica consiste
-en separar explícitamente tres niveles: el dataset crudo, el adaptador
-determinista de dataset y el pipeline común. Esta separación evita que los
-ejecutores dependan de nombres de fichero o estructuras particulares de un
-benchmark concreto.
-
-La generalización se plantea mediante un descriptor común de dataset, un
-manifiesto común con una fila por unidad cruda procesable y un registro de
-adaptadores. CWRU se mantendrá como benchmark de regresión, mientras que NASA
-IMS se contempla como primer candidato para validar el sistema con series más
-largas, múltiples canales y condiciones de degradación menos triviales.
-
-La inspección local de NASA IMS muestra que el paquete se distribuye como un
-contenedor anidado (`zip`, `7z` y `rar`) y que la aplicación deberá distinguir
-entre detección de formato, selección de adaptador y generación efectiva de
-manifiesto. En una futura interfaz, el usuario debería ver una previsualización
-del descriptor del dataset, los formatos detectados, las limitaciones de
-extracción y si el manifiesto puede generarse directamente o requiere preparar
-una carpeta preextraída.
-
-Como primer paso ejecutable, el manifiesto NASA IMS se restringe a carpetas ya
-preextraídas. Cada snapshot temporal se representa como una fila común con
-etiqueta inicial desconocida, fallo final conocido a nivel de set y metadatos
-de frecuencia, canales y variante local. Esta decisión permite validar la
-generalización del pipeline sin incorporar todavía dependencias de extracción
-ni una política de etiquetado temporal.
-
-El perfilado se adapta para leer tanto el manifiesto histórico de CWRU como el
-manifiesto común de NASA IMS. En este segundo caso, los snapshots ASCII sin
-extensión se tratan como tablas numéricas y se convierten en canales
-normalizados (`channel\_1`, `channel\_2`, etc.), lo que permite obtener
-estadísticos ligeros sin cargar señales completas en el estado del grafo.
-
-La limpieza se generaliza de forma acotada mediante una selección explícita de
-canal. El contrato `CleaningConfig` permite indicar `selected\_channel` y el
-ejecutor valida esa elección contra los canales declarados en el manifiesto
-común. Así, NASA IMS puede limpiarse sobre un canal concreto sin habilitar
-transformaciones libres ni pasar todavía a estructuración o modelado.
-
-Los agentes no interpretarán directamente carpetas crudas. Recibirán
-descriptores, resúmenes de manifiesto y diagnósticos de calidad generados por
-código determinista. De este modo pueden aumentar su capacidad de decisión
---por ejemplo, recomendando canal, ventana, familia de features o modelo-- sin
-ejecutar código arbitrario ni saltarse los contratos del sistema.
-
-Esta elección responde a una limitación metodológica importante: los LLM locales
-empleados no deben considerarse fuentes autosuficientes de conocimiento sobre
-datasets industriales específicos. Su viabilidad se apoya en externalizar el
-conocimiento de dominio en expedientes verificables: métricas, candidatos,
-opciones ejecutables, advertencias y capacidades no soportadas. Así, el agente
-actúa como experto deliberativo sobre evidencia proporcionada por el sistema,
-no como una caja negra que recuerda parámetros de memoria.
-
-El mismo criterio se aplica a la estructuración temporal. En lugar de pedir al
-LLM que invente un tamaño de ventana, el sistema calcula alternativas
-soportadas, estima coste, número de ventanas y riesgos de fuga de información.
-El estructurador puede elegir entre configuraciones válidas y justificar el
-compromiso entre resolución temporal, coste y robustez experimental.
-
-Para disponer de metricas supervisadas multi-dataset sin forzar etiquetas sobre
-NASA IMS real, se introduce ademas un benchmark sintetico NASA IMS-like. Este
-benchmark conserva formato temporal, canales y frecuencia de muestreo
-compatibles con NASA IMS Set 2, pero genera etiquetas `normal` y `fault` por
-construccion. Su papel metodologico es probar decisiones agenticas,
-persistencia y evaluacion sobre un escenario no trivial; no se interpreta como
-resultado oficial del dataset NASA IMS.
-
-Sobre este benchmark se incorpora ademas una iteracion agentica acotada. Cuando
-una ejecucion no supera los umbrales, el sistema genera un expediente de fallo
-con matriz de confusion, falsos negativos, falsos positivos, umbral efectivo y
-convencion de puntuacion. El agente modelador recibe ese expediente y decide,
-mediante un contrato estructurado, si propone un unico reintento o si detiene
-el proceso. El numero maximo de intentos queda fijado antes de la ejecucion, de
-modo que el agente puede aprender de sus errores sin abrir una busqueda
-ilimitada de hiperparametros.
-
-La revision humana se plantea en esta fase como human-on-the-loop, no como una
-aprobacion manual de resultados. Al finalizar una ejecucion, el sistema puede
-presentar al revisor la hipotesis del agente, la evidencia usada, el cambio
-aplicado y el resultado observado. El humano etiqueta la calidad del
-razonamiento, por ejemplo como correcto, parcialmente correcto, incorrecto,
-inseguro o insuficiente. Esta etiqueta no modifica las metricas; se conserva
-como memoria supervisada para futuros prompts, RAG local o filtrado de
-comportamientos erroneos repetidos.
-
-\section{Control de reutilización técnica}
-
-Para evitar que la ampliación incremental genere contratos, scripts o servicios
-duplicados, se adopta una regla metodológica adicional: antes de implementar una
-nueva capacidad debe realizarse un inventario explícito de piezas existentes. El
-proceso consiste en describir la capacidad buscada, buscar en código,
-documentación y tests, identificar el propietario canónico de esa
-responsabilidad y decidir si se reutiliza, adapta, extiende o crea una pieza
-nueva.
-
-Esta regla es especialmente relevante a partir de la Fase 4, donde conviven
-runners multi-dataset, memoria agentica, API, revisión humana y políticas
-temporales por dataset. El objetivo no es frenar el desarrollo, sino preservar
-la trazabilidad arquitectónica: una capacidad debe vivir en una frontera clara y
-ser consumida por CLI, API o futura interfaz sin duplicar lógica. Por ejemplo,
-la API no debe reimplementar la planificación multi-dataset, sino delegar en el
-runner común; del mismo modo, la revisión humana debe reutilizar los contratos
-existentes de configuración y aprobación.
-
-\section{Manifiesto del dataset}
-
-El primer artefacto metodológico será un manifiesto con una fila por fichero
-crudo. Este manifiesto conectará los `.mat` originales con el resto del
-pipeline. Las columnas previstas son:
-
-\begin{longtable}{ll}
+\begin{table}[htbp]
+\centering
+\caption{Taxonomía de las fuentes de evidencia del trabajo.}\label{tab:taxonomia_evidencia}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.17\textwidth}Y>{\raggedright\arraybackslash}p{0.18\textwidth}Y}
 \toprule
-Campo & Descripción \\
+Fuente & Función metodológica & Unidad principal & Alcance de las conclusiones \\
 \midrule
-file\_id & identificador del fichero original \\
-dataset & nombre del dataset \\
-source\_path & ruta del fichero crudo \\
-label & clase `normal' o `fault' \\
-fault\_type & tipo de fallo si existe \\
-fault\_diameter\_inch & diámetro del defecto \\
-load\_hp & carga del motor \\
-rpm & régimen de giro \\
-sensor\_channel & canal de sensor usado \\
-source\_sample\_rate\_hz & frecuencia de muestreo original \\
-target\_sample\_rate\_hz & frecuencia objetivo del MVP \\
-source\_format & formato original \\
-notes & observaciones \\
+NASA IMS real & Escenario empírico principal \textit{run-to-failure} & Snapshot y trayectoria del activo & Evidencia sobre las trayectorias analizadas, sin generalización automática a planta \\
+CWRU & Benchmark secundario y prueba de regresión del pipeline & Fichero y ventana etiquetada & Validación del flujo binario y de compatibilidad, no de degradación longitudinal \\
+NASA IMS-like sintético & Piloto de integración y comportamiento de los agentes & Snapshot generado y trayectoria sintética & Contratos, trazabilidad y ejecución; nunca evidencia empírica sobre NASA IMS real \\
 \bottomrule
-\end{longtable}
+\end{tabularx}
+\end{table}
 
-\section{Extracción y perfilado}
+NASA IMS real constituye la fuente principal
+~\cite{nasa_pcoe_repository,nasa_ims_bearings_zip}. Su trayectoria se ha
+procesado con el protocolo causal definido en este capítulo; quedan pendientes
+las comparaciones agénticas, las réplicas y la validación externa. CWRU se
+mantiene como referencia secundaria etiquetada
+~\cite{cwru_bearing_data_center,cwru_normal_baseline,cwru_12k_drive_end}. Los
+pilotos sintéticos ya disponibles permiten comprobar el sistema, pero no se
+mezclarán con los resultados del dataset oficial ni se denominarán resultados
+NASA sin el calificativo explícito de sintéticos.
 
-El canal principal inicial será `DE\_time`, asociado al acelerómetro del lado
-drive-end. El perfilado generará resúmenes estadísticos por fichero y por
-etiqueta, incluyendo número de muestras, canales detectados, valores no finitos,
-media, desviación típica, RMS, curtosis, factor de cresta y energía.
+Toda ejecución deberá declarar la procedencia, la variante del dataset, la
+unidad temporal empleada y la fuente de las etiquetas. Una etiqueta creada por
+una política temporal o por un generador sintético no se tratará como
+\textit{ground truth} oficial. Esta regla también se aplica a los recuerdos: una
+experiencia sintética podrá ser útil como advertencia metodológica, pero no como
+evidencia directa de comportamiento de una señal NASA real.
 
-\section{Estructuración temporal}
+\section{Unidades de análisis}
 
-La frecuencia objetivo inicial será 12 kHz. Las ventanas candidatas serán de
-2048 o 4096 muestras con solapamiento del 50\%. Esta decisión permite comparar
-features tabulares con modelos clásicos y conservar ventanas crudas para
-autoencoders posteriores.
+El diseño distingue cuatro unidades relacionadas, pero no intercambiables:
 
-\section{Particiones}
+\begin{enumerate}
+  \item La \textbf{ventana intra-snapshot} es un segmento de señal utilizado
+        para extraer características o producir un score. Varias ventanas de una
+        misma adquisición comparten contexto y no son réplicas longitudinales
+        independientes.
+  \item El \textbf{snapshot} es la observación temporal básica del activo. Los
+        scores de sus ventanas se agregan antes de calcular persistencia,
+        alertas y evolución de salud.
+  \item La \textbf{trayectoria del activo} es la secuencia cronológica de
+        snapshots hasta el final registrado del ensayo. Es la unidad principal
+        para las métricas \textit{run-to-failure}.
+  \item El \textbf{episodio de decisión} es la unidad de análisis del
+        comportamiento de un agente. Reúne contexto, hipótesis, alternativas,
+        acción elegida, evidencia, memoria consultada, efecto esperado y
+        resultado observado.
+\end{enumerate}
 
-Para evitar fuga de información entre ventanas, no se usará un split aleatorio
-ingenuo. La estrategia inicial será:
+Una ejecución completa agrupa estas unidades y proporciona su identificador
+experimental, pero no sustituye a las réplicas. Si varias decisiones proceden
+de la misma trayectoria o del mismo corpus de memoria, esa dependencia se
+conservará al analizar los resultados.
+
+\section{Protocolo \textit{run-to-failure} por snapshot}
+
+\subsection{Preparación y procedencia}
+
+El protocolo temporal definitivo comienza con la extracción y validación del
+dataset oficial. La configuración de referencia utiliza NASA IMS Set 2,
+Bearing 1 y el primer canal, manteniendo un caso monocanal comparable con la
+capacidad actual. Antes de procesar la señal se verifican el número y orden de
+snapshots, sus marcas temporales, la frecuencia de muestreo, los canales y el
+evento final documentado.
+
+Cada registro conserva su procedencia como oficial, sintética o no verificada,
+separada de la fuente de sus etiquetas. La procedencia acompaña al manifiesto,
+las decisiones, las métricas y los candidatos de memoria. Una discrepancia
+entre procedencia y descripción del informe constituye un fallo de validación.
+
+\subsection{Procesamiento jerárquico de la señal}
+
+La señal de cada snapshot puede dividirse en ventanas para extraer
+características y aplicar los detectores. Sin embargo, la evolución temporal se
+construye después de agregar esas ventanas. La política fijada para el estudio
+emplea la mediana del score como medida central, conserva el percentil 90, la
+media y la desviación, y calcula la proporción de ventanas en alerta. Una
+captura se considera alertada cuando dicha proporción alcanza 0,5. Así se
+conserva información sobre eventos breves sin convertir el solapamiento
+intra-snapshot en persistencia temporal artificial.
+
+La secuencia agregada respeta el orden y los intervalos reales entre
+adquisiciones. Los gaps temporales se registran y una racha de alertas no puede
+atravesar un intervalo no observado sin una regla declarada. El indicador de
+salud se calcula de forma causal: en cada instante solo puede depender de la
+evidencia disponible hasta ese snapshot.
+
+\subsection{Partición temporal y prevención de fuga}
+
+La trayectoria se divide conceptualmente en tres bloques:
 
 \begin{itemize}
-  \item entrenamiento con ventanas normales;
-  \item validación con ventanas normales retenidas;
-  \item test con ventanas normales retenidas y ventanas con fallo.
+  \item \textbf{baseline de entrenamiento}, reservado para aprender el
+        comportamiento nominal y ajustar los modelos que lo requieran;
+  \item \textbf{calibración}, utilizado para fijar umbrales y políticas de
+        aviso sin consultar el tramo final;
+  \item \textbf{monitorización}, procesado en orden temporal como evaluación
+        fuera del ajuste.
 \end{itemize}
 
-\section{Métricas}
+Se mantienen dos vistas de la misma ejecución. La vista \textit{online blind}
+es la única disponible para los agentes durante la decisión: excluye tiempo
+hasta fallo, vida relativa, modo de fallo y cualquier información futura. La
+vista retrospectiva incorpora el evento final únicamente después de cerrar la
+decisión, para situar las alertas respecto al final registrado y evaluar la
+hipótesis. Ese intervalo retrospectivo no se interpreta como RUL, como tiempo
+prospectivo restante ni como validación de un onset físico.
 
-Las métricas iniciales serán precision, recall, F1-score, ROC-AUC, PR-AUC, tasa
-de falsos positivos y matriz de confusión. Desde el punto de vista industrial,
-el criterio principal será mantener alta sensibilidad ante fallos sin disparar
-en exceso los falsos positivos.
+Los snapshots de monitorización no se usarán para recalibrar el umbral, generar
+reintentos ni alimentar la memoria durante la familia experimental en la que se
+evalúan. Los episodios derivados de esa evidencia podrán considerarse para un
+corpus posterior, pero no retroalimentarán su propia prueba. Cuando solo exista
+una trayectoria, los resultados se describirán como estudio de caso temporal y
+no como estimación de generalización entre activos.
+
+\subsection{Modelos y papel de los agentes}
+
+Los ejecutores ofrecen un conjunto cerrado de familias comparables, entre ellas
+PCA por error de reconstrucción, Isolation Forest, One-Class SVM y autoencoder
+denso. Los hiperparámetros permitidos y el presupuesto de cálculo se fijan en el
+plan experimental. El agente modelador selecciona una alternativa y justifica
+su hipótesis a partir del expediente disponible; no diseña código ni modifica
+el conjunto de modelos durante una réplica.
+
+El evaluador recibe métricas reproducibles y emite una valoración estructurada.
+Las herramientas pueden calcular readiness, alertas e indicadores de salud,
+pero no aprueban por sí solas una ejecución ni sustituyen la interpretación del
+agente. La vida útil remanente (\textit{Remaining Useful Life}, RUL) no se
+comunica como estimada mientras no exista un protocolo específico y evidencia
+suficiente.
+
+\subsection{Replay causal y ramas de política}
+
+El funcionamiento híbrido se estudia mediante replay cronológico. Un tick
+corresponde a una adquisición NASA IMS completa y sincronizada; al cerrarlo se
+conservan su timestamp, el hash de la entrada, la versión de scoring y los
+estados calculados. En el instante $t$ solo pueden utilizarse la observación
+actual, el prefijo anterior y los parámetros ajustados con baseline y
+calibración. Truncar o modificar cualquier sufijo posterior a $t$ no debe
+cambiar la salida de ese tick. Esta propiedad define aquí la causalidad
+operativa; no se presenta como inferencia causal estadística.
+
+La primera rama mantiene detector, escalado, umbral y reglas de salud
+congelados. Las revisiones multiagente son consultivas y sus propuestas no
+alteran los scores de la trayectoria. Una segunda rama, reservada a la
+experimentación adaptativa, podría aplicar una propuesta validada desde el tick
+posterior a su aprobación. Cada cambio deberá crear una política inmutable con
+versión nueva y segmentar los resultados; nunca recalculará el pasado. Ambas
+ramas parten del mismo historial y la congelada se conserva como control. Los
+resultados de la rama adaptativa serán descriptivos, porque cada versión observa
+una fase temporal diferente de la degradación.
+
+Dentro de la rama congelada se distinguen dos políticas de activación. P0 es el
+observador determinista sin revisiones. P3 conserva exactamente el mismo
+scoring, pero emite expedientes de revisión al confirmar condiciones
+predefinidas. Por tanto, P0/P3 no son las ramas congelada/adaptativa: son dos
+formas de decidir cuándo solicitar supervisión dentro del mismo benchmark
+congelado.
+
+Para P3 se fija antes del replay un presupuesto máximo de $B=7$ solicitudes
+variables, una persistencia de entrada $K=3$ snapshots, una recuperación de
+$R=1$ snapshot y un \textit{cooldown} de 51.600 segundos de tiempo fuente.
+Estos valores no se recalculan a partir de la longitud ni de los scores del
+sufijo observado. Una entrada en estado crítico, una pérdida de continuidad y
+la confirmación de una alerta persistente pueden generar un expediente; el
+cierre de sesión es fijo y queda fuera de $B$.
+
+Sea $s$ el primer snapshot alertado de una racha y $c$ el snapshot en el que se
+observa por primera vez $K$ alertas consecutivas. La condición persistente solo
+puede emitirse después de cerrar $c$, aunque el ledger conserve $s$ para medir
+el retraso de confirmación. Ambos son instantes algorítmicos: ninguno se
+interpreta como inicio físico del defecto. Un hueco temporal abre un segmento y
+reinicia la candidatura. La precedencia, el rearme, el presupuesto y la
+deduplicación son deterministas; en este incremento P3 no invoca todavía al
+modelo de lenguaje ni consulta memoria RAG.
+
+\section{Observación del comportamiento de los agentes}
+
+El comportamiento se observa mediante campos declarados, no mediante una cadena
+de pensamiento privada. Para cada decisión relevante se conservan:
+
+\begin{itemize}
+  \item la pregunta y el expediente técnico que recibe el agente;
+  \item la hipótesis formulada y el efecto esperado;
+  \item las alternativas consideradas y la acción seleccionada;
+  \item las herramientas declaradas y, por separado, las observaciones de
+        herramienta realmente ejecutadas y las referencias de evidencia
+        utilizadas;
+  \item la confianza declarada y las limitaciones reconocidas;
+  \item los recuerdos recibidos y la relación declarada con cada uno;
+  \item la configuración realmente ejecutada y el resultado calculado;
+  \item la decisión de mantener, revisar o detener la estrategia.
+\end{itemize}
+
+La observación separa tres desenlaces. Una \textbf{decisión válida} cumple el
+contrato; una \textbf{decisión ejecutable} corresponde además a una acción
+soportada; y una \textbf{decisión respaldada} obtiene evidencia posterior
+coherente con su hipótesis. La validez sintáctica no se interpretará como calidad
+técnica.
+
+Las violaciones reparables del contrato se registran como correcciones de
+guardarrail. Los fallos del proveedor, de conexión o de salida irrecuperable se
+        registran aparte como mecanismos técnicos de respaldo. Esta distinción evita atribuir
+razonamiento a una decisión determinista de respaldo y permite medir cuánto
+participó realmente el modelo de lenguaje.
+
+Cuando se realice evaluación humana, el revisor recibirá la hipótesis, la
+evidencia declarada, la acción y el resultado, pero no conocerá la condición de
+memoria ni el modelo siempre que el material pueda anonimizarse. La valoración
+considerará corrección, suficiencia, coherencia, seguridad y utilidad. Si
+participan varios revisores, se informará también su acuerdo.
+
+\section{Ciclo experimental de memoria RAG}
+
+\subsection{Evidencia canónica e índice derivado}
+
+Los episodios y candidatos persistidos constituyen la evidencia canónica. El
+índice vectorial es una representación derivada y reconstruible. El
+almacenamiento JSON local se utiliza como baseline exacto y reproducible;
+Qdrant está implementado como índice filtrable opcional y pgvector permanece
+como alternativa futura detrás del mismo contrato. El motor se fija y verifica
+antes de cada familia experimental. Esta elección es de ingeniería y no se
+presenta como aportación científica ni como prueba de superioridad entre
+backends.
+
+La búsqueda densa exacta será el baseline científico del retrieval. La búsqueda
+aproximada se evaluará por separado cuando el tamaño del corpus justifique medir
+latencia y escalabilidad. De este modo, un cambio en el índice no se confundirá
+con un cambio en la capacidad de razonamiento del agente.
+
+\subsection{Captura, promoción y recuperación}
+
+El ciclo de memoria se define mediante los siguientes estados:
+
+\begin{enumerate}
+  \item La decisión produce automáticamente un episodio y, cuando procede, un
+        candidato de memoria trazable.
+  \item El candidato nace pendiente y no reutilizable. Capturar una experiencia
+        no equivale a convertirla en conocimiento válido.
+  \item La evidencia de procedencia, resultado y revisión permite promover el
+        candidato, mantenerlo como cautela o excluirlo.
+  \item Los recuerdos promovidos se indexan en el backend configurado, con el
+        mismo contenido canónico y metadatos de gobierno.
+  \item Una consulta recupera candidatos compatibles por agente, dataset, rol,
+        procedencia, perfil de supervisión y estado de reutilización.
+  \item Un control de calidad determinista clasifica los candidatos antes de
+        construir el contexto efectivo del agente.
+  \item El agente declara si siguió, adaptó, contradijo, rechazó o ignoró cada
+        recuerdo utilizado.
+  \item La auditoría compara esa declaración con la acción y el resultado, y
+        genera nueva evidencia sin promoverla automáticamente.
+\end{enumerate}
+
+La promoción automática permanece desactivada hasta definir evidencia
+suficiente. Una ejecución correcta aislada no debe generar una verdad que se
+refuerce a sí misma. La promoción futura distinguirá validación humana,
+repetición independiente, evidencia provisional, advertencia reutilizable y
+contradicción o contaminación experimental.
+
+\subsection{Control de calidad y fidelidad}
+
+El control de calidad aplica criterios de compatibilidad antes de que un
+recuerdo llegue al prompt. Se comprueban el agente destinatario, el dataset y su
+procedencia, el perfil experimental, la fuente y granularidad de etiquetas, la
+frecuencia de muestreo, el alcance de transferencia, la trayectoria y el grupo
+de evaluación, además del rol del recuerdo, su veredicto, su estado de
+reutilización, la similitud y las marcas de exclusión o riesgo. En un benchmark,
+un recuerdo procedente de la misma trayectoria o grupo de evaluación se
+considera contaminación. Un recuerdo incompatible, inseguro o expresamente
+excluido no forma parte del contexto efectivo.
+
+El contexto recuperado en bruto, el resultado del control y el contexto efectivo
+se conservan por separado. El agente solo puede citar identificadores presentes
+en este último. La validación defensiva se mantiene aunque el backend aplique
+filtros en servidor, porque el índice no constituye la fuente canónica.
+
+\section{Diseño de ablaciones de memoria}
+
+El efecto de la memoria se estudiará mediante condiciones controladas. La
+condición principal compara memoria desactivada con memoria filtrada e inyectada.
+Se añaden condiciones diagnósticas para separar recuperación de influencia:
+
+\begin{table}[htbp]
+\centering
+\caption{Condiciones previstas para la ablación de memoria.}\label{tab:ablaciones_memoria}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.16\textwidth}YYY}
+\toprule
+Condición & Recuperación & Contexto para el agente & Finalidad \\
+\midrule
+Memoria off & No & No & Baseline de comportamiento sin memoria \\
+Solo retrieval & Sí & No & Evaluar el buscador sin atribuirle influencia sobre la decisión \\
+Memoria filtrada & Sí & Sí, tras control de calidad & Intervención RAG principal \\
+Memoria completa controlada & Sí & Sí, sin el filtrado experimental objeto de ablación & Medir el valor del gate, solo si no expone contenido inseguro \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Todas las condiciones compartirán entradas, orden de snapshots, ejecutores,
+familias de modelo, prompts base, contratos, herramientas, presupuesto de
+contexto y corpus congelado. Se registrarán las semillas y los parámetros de
+muestreo cuando el proveedor permita fijarlos. La condición de memoria completa
+no anula los guardarrailes de seguridad: los recuerdos inseguros o contaminados
+seguirán excluidos.
+
+Las comparaciones serán pareadas por entrada y se repetirán para estimar la
+variabilidad del modelo. Un cambio de configuración, hipótesis o redacción se
+considerará efecto conductual; solo se calificará como ayuda o perjuicio después
+de contrastarlo con la auditoría y las métricas operacionales. No se atribuirá
+causalidad a la memoria si cambia simultáneamente el prompt, el corpus, el modelo
+de embeddings o una guía determinista.
+
+\section{Métricas de evaluación}
+
+\subsection{Métricas del comportamiento de los agentes}
+
+La participación y calidad del agente se describen mediante:
+
+\begin{itemize}
+  \item tasa de contratos válidos en el primer intento;
+  \item tasa de correcciones de guardarrail y de mecanismos técnicos de respaldo;
+  \item proporción de decisiones válidas, ejecutables y respaldadas;
+  \item calidad de la hipótesis, coherencia numérica y reconocimiento de
+        limitaciones;
+  \item número y diversidad de alternativas consideradas;
+  \item tasa de revisiones útiles, sobrecorrecciones y repeticiones de fallo;
+  \item cambio de confianza y calibración de la confianza frente al resultado;
+  \item acuerdo de la evaluación humana cuando esté disponible.
+\end{itemize}
+
+Estas métricas se calculan por rol y por tipo de decisión. No se combinarán en
+un único score sin justificar previamente su ponderación.
+
+La fiabilidad del flujo se evalúa antes que la calidad del resultado
+algorítmico. Se distinguen tres desenlaces: contrato válido al primer intento,
+contrato corregido por una segunda generación del mismo agente y mecanismo
+técnico de respaldo. Los dos primeros conservan autoría generativa, aunque la
+corrección se informa por separado; el tercero no se contabiliza como éxito
+agéntico. Del mismo modo, una decisión modificada después por una superposición
+determinista de seguridad se conserva para auditoría, pero no demuestra que el
+agente haya resuelto autónomamente el caso.
+
+La puerta inicial de ingeniería exige cero respaldos, cero decisiones no
+agénticas, cero superposiciones de seguridad y trazas completas, además de una
+tasa mínima del 90\,\% de validez al primer intento. Se aplica primero a
+decisiones pequeñas y sin memoria para aislar la conversación con el modelo de
+los ejecutores y del RAG. Esta puerta no acredita por sí sola el objetivo del
+99\,\%. Con cero fallos, serían necesarias aproximadamente 300 decisiones
+independientes para situar por debajo del 1\,\% el límite superior unilateral
+aproximado al 95\,\% de la tasa de fallo. Además se informará la fiabilidad del
+flujo completo: si una ejecución contiene $m$ decisiones y se adopta como
+aproximación la independencia, una fiabilidad por decisión $p$ produce
+$p^m$ como probabilidad de terminar sin respaldo.
+
+\subsection{Métricas de recuperación y uso de memoria}
+
+La evaluación RAG separa recuperación, fidelidad, comportamiento y resultado:
+
+\begin{itemize}
+  \item \textbf{Recuperación}: hit@k, precision@k, recall@k, MRR, relevancia por
+        rol y tasa de incompatibilidades retiradas por el control de calidad.
+  \item \textbf{Fidelidad}: proporción de citas existentes, citas inventadas,
+        recuerdos ignorados y consistencia entre la cita y la influencia
+        declarada.
+  \item \textbf{Comportamiento}: cambios de hipótesis, alternativas,
+        configuración, confianza, revisión o rechazo explícito del contexto.
+  \item \textbf{Resultado}: tasa de ayuda, tasa de perjuicio, deltas de métricas
+        temporales, latencia de recuperación y coste de contexto.
+\end{itemize}
+
+Las métricas que requieren relevancia conocida se calcularán sobre un conjunto
+de consultas con juicios de referencia preparados antes de la comparación. Los
+juicios se realizarán sin conocer el ranking cuando sea posible. El uso de un
+recuerdo no se considerará correcto solo porque haya sido citado.
+
+\subsection{Métricas PHM y \textit{run-to-failure}}
+
+Las métricas principales se calculan sobre la secuencia de snapshots agregados:
+
+\begin{itemize}
+  \item primer pico y primer aviso algorítmico persistente;
+  \item distancia retrospectiva entre el primer aviso persistente y el final
+        registrado;
+  \item tasa de snapshots alertados en baseline y calibración, declarando que
+        esta última participa en el ajuste del umbral;
+  \item episodios de alerta, picos aislados y racha máxima;
+  \item tendencia temporal del score y correlación de Spearman;
+  \item caída, monotonicidad, robustez y volatilidad nominal del indicador de
+        salud;
+  \item trayectorias sin aviso persistente.
+\end{itemize}
+
+Precision, recall, F1, ROC-AUC y PR-AUC se conservan como métricas auxiliares
+cuando existen etiquetas binarias defendibles. En señales sintéticas o bajo una
+política proxy deben aparecer identificadas como tales y no sustituyen la
+evaluación longitudinal. La unidad usada como denominador se declarará siempre;
+en particular, una tasa temporal no se calculará presentando ventanas solapadas
+como snapshots independientes.
+
+\section{Comparación posterior de modelos Qwen}
+
+La implementación actual utiliza Qwen 3.5 como modelo de los agentes. La
+comparación con Qwen 3 se realizará después de cerrar el protocolo temporal y
+la ablación de memoria. El diseño será factorial, cruzando modelo de agente y
+condición de memoria, con réplicas pareadas sobre las mismas entradas.
+
+Se mantendrán constantes el corpus y su hash, el modelo de embeddings, el orden
+de recuperación, los contratos, las herramientas, los ejecutores, el
+presupuesto de contexto y los criterios de evaluación. Se registrará el
+identificador exacto de cada modelo y su configuración. Las decisiones se
+evaluarán a ciegas siempre que sea posible. Hasta ejecutar este diseño, cualquier
+observación sobre Qwen 3.5 se limita a ese modelo y no permite afirmar ventaja o
+desventaja respecto a Qwen 3.
+
+\section{Reproducibilidad y análisis}
+
+Cada condición experimental se define mediante un manifiesto versionado que
+incluye:
+
+\begin{itemize}
+  \item dataset, procedencia, hash y unidad temporal;
+  \item activo, canal, partición y política temporal;
+  \item modelo de agente, parámetros de muestreo y presupuesto de contexto;
+  \item modo de memoria, hash del corpus, embedding y parámetros de retrieval;
+  \item versiones de prompts, contratos, herramientas y ejecutores;
+  \item semillas, límites de reintento y criterios de parada;
+  \item entorno de ejecución y marcas temporales relevantes.
+\end{itemize}
+
+El corpus de memoria se congela durante cada comparación. Reconstruir el índice
+no cambia la evidencia canónica y debe producir el mismo conjunto de registros.
+Los artefactos permiten reconstruir la secuencia expediente
+\(\rightarrow\) decisión \(\rightarrow\) acción \(\rightarrow\)
+resultado sin depender de rutas locales incluidas en la memoria académica.
+
+Las réplicas se resumirán mediante medidas de tendencia central y dispersión.
+Cuando el número de unidades independientes sea insuficiente para inferencia
+estadística, se presentará un estudio descriptivo y no se usarán intervalos o
+tests que presupongan independencia inexistente. Las comparaciones de memoria y
+modelo serán pareadas siempre que compartan la misma entrada experimental.
+
+\section{Amenazas a la validez}
+
+Las principales amenazas previstas son:
+
+\begin{itemize}
+  \item \textbf{Validez externa}: CWRU y los pilotos sintéticos no representan
+        la complejidad de una planta; una sola trayectoria NASA tampoco permite
+        generalizar entre activos y condiciones.
+  \item \textbf{Pseudorreplicación}: las ventanas de un snapshot están
+        correlacionadas. La agregación por snapshot evita contarlas como
+        observaciones longitudinales independientes.
+  \item \textbf{Etiquetas proxy}: una frontera temporal construida no equivale a
+        un onset de fallo oficial. Las métricas binarias derivadas se consideran
+        auxiliares.
+  \item \textbf{Fuga temporal}: datos del futuro, información de final de vida,
+        recalibración sobre monitorización o memoria creada con el propio test
+        pueden inflar artificialmente el rendimiento.
+  \item \textbf{Contaminación de memoria}: recuerdos incompatibles o derivados
+        de la misma evidencia evaluada pueden generar autorrefuerzo. Se mitiga
+        mediante procedencia, corpus congelado, promoción explícita y control
+        de calidad.
+  \item \textbf{Confusión experimental}: modificar a la vez prompt, guía,
+        memoria o modelo impide atribuir el cambio a un solo factor.
+  \item \textbf{Estocasticidad del LLM}: una única respuesta no caracteriza el
+        modelo. Se requieren réplicas y registro de la configuración.
+  \item \textbf{Subjetividad humana}: los juicios sobre hipótesis y relevancia
+        pueden variar. Se mitiga con rúbricas, evaluación ciega y acuerdo entre
+        revisores cuando sea posible.
+\end{itemize}
+
+\section{Estado de aplicación de la metodología}
+
+La infraestructura necesaria para observar el sistema ya dispone de
+orquestación multiagente, contratos estrictos, ejecutores deterministas,
+episodios de decisión, candidatos de memoria, recuperación mediante el backend
+configurado, control de calidad previo al contexto efectivo y auditoría de citas
+y uso. JSON constituye la fuente operativa reproducible en la implementación verificada;
+Qdrant permanece integrado como índice vectorial opcional y sustituible, al
+igual que una futura alternativa con pgvector. La elección definitiva del
+índice se pospone hasta disponer de un corpus congelado y una comparación
+equivalente de recuperación. También existe un primer perfil temporal con métricas de degradación,
+que ha servido para validar la integración con datos piloto.
+
+La procedencia y el inventario de NASA IMS Set~2 están verificados. La política
+causal versionada fija 197 snapshots de baseline, 98 de calibración y 689 de
+monitorización mediante una regla 20/10/70; los 983 intervalos observados
+coinciden con la cadencia esperada de 600 segundos y no introducen cortes. La
+vista online ciega ya elimina del contexto de los agentes de decisión etiquetas,
+vida relativa, tiempo hasta el final y metadatos de fallo. La vista
+retrospectiva se reserva para el evaluador y para artefactos posteriores a las
+decisiones.
+
+Se ha ejecutado un baseline determinista sobre la trayectoria oficial. Lo que
+permanece pendiente para responder a las hipótesis agénticas y de memoria es
+congelar el corpus experimental, definir consultas con juicios de relevancia,
+realizar ablaciones con réplicas y, posteriormente, comparar Qwen 3.5 con
+Qwen 3. Los pilotos sintéticos continúan presentándose solo como validación
+técnica; el baseline oficial se trata como estudio descriptivo de una única
+trayectoria, no como validación supervisada.

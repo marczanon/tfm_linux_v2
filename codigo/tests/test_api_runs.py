@@ -189,6 +189,149 @@ class APIRunsTests(unittest.TestCase):
         self.assertIn("# Debate controlado del informe run-api", debate_response.text)
         self.assertIn("text/markdown", debate_response.headers["content-type"])
 
+    def test_get_run_events_reconstructs_declared_historical_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            save_run_snapshot(_state(base, "run-historical", f1_score=0.94), runs_dir)
+            app = create_app(runs_dir=runs_dir)
+
+            response = _get(app, "/runs/run-historical/events")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload[0]["title"], "Traza historica reconstruida")
+        self.assertEqual(
+            payload[0]["payload"]["trace_origin"],
+            "reconstructed_from_decisions",
+        )
+        decision_events = [
+            event for event in payload if event["kind"] == "supervisor_decision"
+        ]
+        self.assertEqual(len(decision_events), 1)
+        self.assertEqual(
+            decision_events[0]["decision_id"],
+            "run-historical:supervisor:001",
+        )
+
+    def test_get_run_events_reconstructs_raw_gate_effective_and_unused_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_id = "run-historical-memory"
+            context_id = f"{run_id}:modeler:memory"
+            query = {
+                "query_id": f"{run_id}:modeler:query",
+                "target_agent": "modeler",
+                "dataset": "nasa_ims_bearing",
+                "top_k": 10,
+                "min_similarity": 0.1,
+            }
+            raw_path = base / "memory" / "retrieved_memory_context_raw.json"
+            effective_path = base / "memory" / "retrieved_memory_context.json"
+            gate_path = base / "memory" / "memory_quality_gate.json"
+            raw_path.parent.mkdir(parents=True)
+            raw_items = [
+                _memory_context_item("memory-compatible", similarity=0.81),
+                _memory_context_item("memory-filtered", similarity=0.74),
+            ]
+            raw_path.write_text(
+                json.dumps({"context_id": context_id, "query": query, "items": raw_items}),
+                encoding="utf-8",
+            )
+            effective_path.write_text(
+                json.dumps(
+                    {
+                        "context_id": context_id,
+                        "query": {**query, "top_k": 3},
+                        "items": raw_items[:1],
+                        "retrieval_backend": "test_backend",
+                        "embedding_model": "test_embedding:v1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            gate_path.write_text(
+                json.dumps(
+                    {
+                        "pass_count": 1,
+                        "caution_count": 0,
+                        "exclude_candidate_count": 1,
+                        "items": [
+                            {
+                                "memory_record_id": "memory-filtered",
+                                "recommendation": "exclude_candidate",
+                                "reason_codes": ["profile_conflict"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state = _state(base, run_id, f1_score=0.94)
+            state_dict = state.to_langgraph_state()
+            state_dict["artifacts"].extend(
+                [
+                    ArtifactRef(
+                        name="modeler_retrieved_memory_context_raw",
+                        artifact_type="config",
+                        path=raw_path.as_posix(),
+                        producer="memory_quality_gate",
+                    ).model_dump(mode="json"),
+                    ArtifactRef(
+                        name="modeler_memory_quality_gate",
+                        artifact_type="config",
+                        path=gate_path.as_posix(),
+                        producer="memory_quality_gate",
+                    ).model_dump(mode="json"),
+                    ArtifactRef(
+                        name="modeler_retrieved_memory_context",
+                        artifact_type="config",
+                        path=effective_path.as_posix(),
+                        producer="modeler",
+                    ).model_dump(mode="json"),
+                ]
+            )
+            state_dict["messages"].append(
+                StateMessage(
+                    role="agent",
+                    name="modeler",
+                    content=json.dumps(
+                        {
+                            "agent_name": "modeler",
+                            "decision_id": f"{run_id}:modeler:001",
+                            "rationale": "Observed memory but did not use it.",
+                            "memory_context_id": context_id,
+                            "used_memory_context": False,
+                            "memory_record_ids": [],
+                            "memory_record_uses": [],
+                        }
+                    ),
+                ).model_dump(mode="json")
+            )
+            runs_dir = base / "runs"
+            save_run_snapshot(validate_state(state_dict), runs_dir)
+            app = create_app(runs_dir=runs_dir)
+
+            response = _get(app, f"/runs/{run_id}/events")
+
+        self.assertEqual(response.status_code, 200)
+        memory_events = [
+            event
+            for event in response.json()
+            if event["agent_name"] == "modeler" and event["kind"] == "memory_retrieval"
+        ]
+        self.assertEqual(
+            [event["payload"]["retrieval_event"] for event in memory_events],
+            ["retrieval_requested", "retrieval_returned", "retrieval_rejected_by_agent"],
+        )
+        returned = memory_events[1]
+        self.assertEqual(returned["payload"]["raw_count"], 2)
+        self.assertEqual(returned["payload"]["effective_count"], 1)
+        self.assertEqual(returned["payload"]["filtered_count"], 1)
+        self.assertEqual(returned["memory_record_ids"], ["memory-compatible"])
+        self.assertEqual(memory_events[2]["payload"]["cited_memory_record_ids"], [])
+
     def test_compare_runs_returns_metric_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -399,6 +542,35 @@ class APIRunsTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_memory_stage_normalizes_use_memory_in_plan_and_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            raw_dir = base / "raw" / "cwru"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "97.mat").touch()
+            app = create_app(
+                runs_dir=base / "runs",
+                allowed_raw_roots=[base / "raw"],
+            )
+
+            response = _post(
+                app,
+                "/runs",
+                json={
+                    "run_id": "api-plan-memory-normalized",
+                    "dataset_id": "cwru_bearing",
+                    "adapter_id": "cwru_bearing",
+                    "raw_path": raw_dir.as_posix(),
+                    "requested_stages": ["memory"],
+                    "use_memory": False,
+                },
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["use_memory"])
+        self.assertEqual(payload["plan"]["request"]["use_memory"], True)
+
     def test_post_runs_execute_blocks_dataset_policy_violations(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -467,6 +639,62 @@ class APIRunsTests(unittest.TestCase):
         self.assertEqual(payload["final_stage"], "completed")
         self.assertFalse(payload["approved"])
         self.assertEqual(payload["snapshot"]["run_id"], "api-execute-cwru")
+
+    def test_post_runs_execute_connects_configured_memory_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            memory_dir = base / "memory"
+            raw_dir = base / "raw" / "cwru"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "97.mat").touch()
+            app = create_app(
+                runs_dir=runs_dir,
+                allowed_raw_roots=[base / "raw"],
+                memory_dir=memory_dir,
+            )
+            memory_store = object()
+            captured = {}
+
+            def fake_run_dataset_pipeline(pipeline_request, *, runs_dir, **kwargs):
+                captured["memory_config"] = kwargs.get("memory_config")
+                state = _state(base, pipeline_request.run_id, f1_score=0.88)
+                snapshot = save_run_snapshot(state, runs_dir)
+                return SimpleNamespace(
+                    state=state.to_langgraph_state(),
+                    snapshot=snapshot,
+                )
+
+            with (
+                patch(
+                    "codigo.app.api.routes.get_default_vector_memory_store",
+                    return_value=memory_store,
+                ) as memory_factory,
+                patch(
+                    "codigo.app.api.routes.run_dataset_pipeline",
+                    side_effect=fake_run_dataset_pipeline,
+                ),
+            ):
+                response = _post(
+                    app,
+                    "/runs",
+                    json={
+                        "run_id": "api-execute-cwru-memory",
+                        "dataset_id": "cwru_bearing",
+                        "adapter_id": "cwru_bearing",
+                        "raw_path": raw_dir.as_posix(),
+                        "dry_run": False,
+                        "use_memory": True,
+                    },
+                )
+
+        memory_config = captured["memory_config"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["use_memory"])
+        memory_factory.assert_called_once_with(memory_dir)
+        self.assertIs(memory_config.memory_store, memory_store)
+        self.assertEqual(Path(memory_config.output_root), Path("codigo/reports"))
+        self.assertFalse(memory_config.reusable_as_context)
 
     def test_post_runs_execute_allows_llm_when_ollama_model_is_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -679,9 +907,17 @@ class APIRunsTests(unittest.TestCase):
             raw_dir = base / "raw" / "cwru"
             raw_dir.mkdir(parents=True)
             (raw_dir / "97.mat").touch()
-            app = create_app(runs_dir=runs_dir, allowed_raw_roots=[base / "raw"])
+            memory_dir = base / "memory"
+            app = create_app(
+                runs_dir=runs_dir,
+                allowed_raw_roots=[base / "raw"],
+                memory_dir=memory_dir,
+            )
+            memory_store = object()
+            captured = {}
 
             def fake_run_dataset_pipeline(pipeline_request, *, runs_dir, **kwargs):
+                captured["memory_config"] = kwargs.get("memory_config")
                 runtime_recorder = kwargs.get("runtime_recorder")
                 if runtime_recorder is not None:
                     runtime_recorder.emit(
@@ -704,9 +940,15 @@ class APIRunsTests(unittest.TestCase):
                     snapshot=snapshot,
                 )
 
-            with patch(
-                "codigo.app.api.routes.run_dataset_pipeline",
-                side_effect=fake_run_dataset_pipeline,
+            with (
+                patch(
+                    "codigo.app.api.routes.get_default_vector_memory_store",
+                    return_value=memory_store,
+                ),
+                patch(
+                    "codigo.app.api.routes.run_dataset_pipeline",
+                    side_effect=fake_run_dataset_pipeline,
+                ),
             ):
                 response = _post(
                     app,
@@ -718,6 +960,7 @@ class APIRunsTests(unittest.TestCase):
                         "raw_path": raw_dir.as_posix(),
                         "dry_run": False,
                         "background": True,
+                        "use_memory": True,
                     },
                 )
 
@@ -750,6 +993,30 @@ class APIRunsTests(unittest.TestCase):
             snapshot_response = _get(app, "/runs/api-background-cwru")
             self.assertEqual(snapshot_response.status_code, 200)
             self.assertEqual(snapshot_response.json()["run_id"], "api-background-cwru")
+            self.assertTrue(snapshot_response.json()["runtime_events_path"])
+            self.assertTrue(
+                Path(snapshot_response.json()["runtime_events_path"]).exists()
+            )
+            persisted_events_response = _get(
+                app,
+                "/runs/api-background-cwru/events",
+            )
+            self.assertEqual(persisted_events_response.status_code, 200)
+            persisted_events = persisted_events_response.json()
+            self.assertIn(
+                "Job completado",
+                [event["title"] for event in persisted_events],
+            )
+            self.assertTrue(
+                all(
+                    event["payload"]["trace_origin"] == "persisted_runtime"
+                    for event in persisted_events
+                )
+            )
+            self.assertIs(
+                captured["memory_config"].memory_store,
+                memory_store,
+            )
 
     def test_post_runs_background_job_records_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -968,6 +1235,26 @@ def _state(
         ).model_dump(mode="json")
     ]
     return validate_state(state_dict)
+
+
+def _memory_context_item(memory_record_id: str, *, similarity: float) -> dict:
+    return {
+        "rank": 1,
+        "similarity": similarity,
+        "retrieval_use": "boundary_context",
+        "record": {
+            "memory_record_id": memory_record_id,
+            "collection_name": "modeler_memory",
+            "target_agent": "modeler",
+            "source_type": "human_review",
+            "dataset": "nasa_ims_bearing",
+            "memory_role": "boundary_case",
+            "human_verdict": "partially_correct",
+            "outcome": "partially_supported",
+            "summary": f"Summary for {memory_record_id}.",
+            "tags": ["boundary_case"],
+        },
+    }
 
 
 if __name__ == "__main__":

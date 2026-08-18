@@ -14,6 +14,7 @@ import {
   agentInitials,
   eventsForAgent,
 } from "../../lib/agentRuntime";
+import { buildStoryMemorySummary } from "../../lib/agentStory";
 import {
   memoryTargetForAgent,
   recordStateLabel,
@@ -24,6 +25,7 @@ import type {
   AgentRuntimeEvent,
   MemoryCollectionSummary,
   MemoryRecordSummary,
+  MemoryStatusResponse,
   ReasoningMemoryRecord,
 } from "../../types";
 
@@ -41,6 +43,7 @@ export function AgentMemoryShowcase({
   events,
   selectedAgentId,
   memoryCollections,
+  memoryStatus,
   memoryRecords,
   selectedMemoryRecord,
   memorySearchText,
@@ -55,6 +58,7 @@ export function AgentMemoryShowcase({
   events: AgentRuntimeEvent[];
   selectedAgentId: string;
   memoryCollections: MemoryCollectionSummary[];
+  memoryStatus: MemoryStatusResponse | null;
   memoryRecords: MemoryRecordSummary[];
   selectedMemoryRecord: ReasoningMemoryRecord | null;
   memorySearchText: string;
@@ -80,8 +84,9 @@ export function AgentMemoryShowcase({
   const selectedRecords = recordsForAgent(memoryRecords, selectedProfile.id);
   const selectedTools = toolsForAgent(events, selectedProfile.id);
   const selectedCitedIds = citedMemoryIds(selectedEvents);
+  const selectedRuntimeMemory = buildStoryMemorySummary(selectedEvents);
   const featuredRecords = featuredMemoryRecords(selectedRecords, selectedCitedIds);
-  const state = memoryState(selectedRecords, selectedCitedIds);
+  const state = memoryState(selectedRecords, selectedCitedIds, selectedCollection);
 
   return (
     <section className="panel agent-memory-showcase">
@@ -93,15 +98,33 @@ export function AgentMemoryShowcase({
         <Brain size={20} />
       </div>
 
-      <div className="memory-agent-select" aria-label="Seleccion de agente para memoria">
+      <MemoryReadinessPanel status={memoryStatus} loading={loadingMemory} />
+
+      <div
+        aria-label="Seleccion de agente para memoria"
+        className="memory-agent-select"
+        role="group"
+      >
         {AGENT_PROFILES.map((agent) => {
           const agentEvents = eventsForAgent(events, agent.id);
           const agentRecords = recordsForAgent(memoryRecords, agent.id);
           const agentCitedIds = citedMemoryIds(agentEvents);
           const agentTools = toolsForAgent(events, agent.id);
-          const agentState = memoryState(agentRecords, agentCitedIds);
+          const agentTarget = memoryTargetForAgent(agent.id);
+          const agentCollection =
+            memoryCollections.find((collection) => collection.target_agent === agentTarget) ??
+            null;
+          const agentState = memoryState(agentRecords, agentCitedIds, agentCollection);
+          const agentRecordCount = agentCollection?.n_records ?? agentRecords.length;
           return (
             <button
+              aria-label={memoryAgentAccessibleLabel(
+                agent.label,
+                agent.role,
+                agentState.label,
+                agentRecordCount,
+                agentTools.length,
+              )}
               aria-pressed={agent.id === selectedProfile.id}
               className={`memory-agent-card agent-tone-${agent.id} ${
                 agent.id === selectedProfile.id ? "selected" : ""
@@ -121,8 +144,8 @@ export function AgentMemoryShowcase({
                 {agentState.label}
               </span>
               <span className="memory-agent-card-meta">
-                <em>{agentRecords.length} rec</em>
-                <em>{agentTools.length} tools</em>
+                <em>{agentRecordCount} rec</em>
+                <em>{agentTools.length} capacidades</em>
               </span>
             </button>
           );
@@ -155,7 +178,30 @@ export function AgentMemoryShowcase({
               label="citados"
               value={selectedCitedIds.size}
             />
-            <MemoryMiniStat icon={<Wrench size={15} />} label="tools" value={selectedTools.length} />
+            <MemoryMiniStat icon={<Wrench size={15} />} label="capacidades" value={selectedTools.length} />
+          </div>
+
+          <div className="memory-character-runtime">
+            <div>
+              <span>En esta run</span>
+              <strong>{memoryRuntimeStateLabel(selectedRuntimeMemory.state)}</strong>
+            </div>
+            <div
+              aria-label="Flujo RAG del agente en esta run"
+              className="memory-character-flow"
+              role="group"
+            >
+              <span><small>consulta</small><strong>{selectedRuntimeMemory.contextCount}</strong></span>
+              <i aria-hidden="true">→</i>
+              <span><small>recupera</small><strong>{selectedRuntimeMemory.retrievedCount}</strong></span>
+              <i aria-hidden="true">→</i>
+              <span><small>usa</small><strong>{selectedRuntimeMemory.usedCount}</strong></span>
+              <i aria-hidden="true">→</i>
+              <span><small>no usa</small><strong>{selectedRuntimeMemory.ignoredCount}</strong></span>
+            </div>
+            {selectedRuntimeMemory.filteredCount > 0 ? (
+              <small>{selectedRuntimeMemory.filteredCount} recuerdo(s) filtrado(s) antes del agente</small>
+            ) : null}
           </div>
 
           <div className="memory-tool-row">
@@ -182,27 +228,31 @@ export function AgentMemoryShowcase({
             <p className="empty-state compact-empty">Sin recuerdos indexados para este agente</p>
           ) : (
             <div className="memory-brief-grid">
-              {featuredRecords.map((record) => (
-                <button
-                  className={`memory-brief-card ${
-                    selectedMemoryRecord?.memory_record_id === record.memory_record_id ? "selected" : ""
-                  } ${selectedCitedIds.has(record.memory_record_id) ? "cited" : ""}`}
-                  key={record.memory_record_id}
-                  type="button"
-                  onClick={() => onSelectMemoryRecord(record.memory_record_id)}
-                >
-                  <span className="memory-brief-card-top">
-                    <em>{roleLabel(record.memory_role)}</em>
-                    <em>{sourceTypeLabel(record.source_type)}</em>
-                    <em>{recordStateLabel(record)}</em>
-                  </span>
-                  <strong>{humanMemorySentence(record)}</strong>
-                  <span className="memory-brief-card-meta">
-                    <FileText size={14} />
-                    {record.dataset ?? record.run_id ?? "sin dataset"}
-                  </span>
-                </button>
-              ))}
+              {featuredRecords.map((record) => {
+                const selected = selectedMemoryRecord?.memory_record_id === record.memory_record_id;
+                const cited = selectedCitedIds.has(record.memory_record_id);
+                return (
+                  <button
+                    aria-label={memoryRecordAccessibleLabel(record, cited)}
+                    aria-pressed={selected}
+                    className={`memory-brief-card ${selected ? "selected" : ""} ${cited ? "cited" : ""}`}
+                    key={record.memory_record_id}
+                    type="button"
+                    onClick={() => onSelectMemoryRecord(record.memory_record_id)}
+                  >
+                    <span className="memory-brief-card-top">
+                      <em>{roleLabel(record.memory_role)}</em>
+                      <em>{sourceTypeLabel(record.source_type)}</em>
+                      <em>{recordStateLabel(record)}</em>
+                    </span>
+                    <strong>{humanMemorySentence(record)}</strong>
+                    <span className="memory-brief-card-meta">
+                      <FileText size={14} />
+                      {record.dataset ?? record.run_id ?? "sin dataset"}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
         </section>
@@ -227,6 +277,111 @@ export function AgentMemoryShowcase({
       </details>
     </section>
   );
+}
+
+function MemoryReadinessPanel({
+  status,
+  loading,
+}: {
+  status: MemoryStatusResponse | null;
+  loading: boolean;
+}) {
+  if (status === null) {
+    return (
+      <section className="memory-readiness-panel pending">
+        <div>
+          <span>Preparacion cientifica</span>
+          <strong>{loading ? "Comprobando memoria" : "Sin diagnostico"}</strong>
+        </div>
+      </section>
+    );
+  }
+
+  const ready = status.scientific_readiness.ready_for_memory_effect_benchmark;
+  const corpus = status.corpus;
+  const backend = status.backend;
+  return (
+    <section className={`memory-readiness-panel ${ready ? "ready" : "blocked"}`}>
+      <div className="memory-readiness-heading">
+        <div>
+          <span>Preparacion cientifica del RAG</span>
+          <strong>{ready ? "LISTO PARA BENCHMARK" : "BLOQUEADO ANTES DE QWEN"}</strong>
+        </div>
+        <em>{backend.operational ? "backend operativo" : "backend no disponible"}</em>
+      </div>
+
+      <div className="memory-readiness-flow" aria-label="Madurez del corpus de memoria">
+        <MemoryReadinessStep label="indexados" value={corpus.total_records} />
+        <MemoryReadinessStep label="habilitados" value={corpus.reusable_records} />
+        <MemoryReadinessStep label="oficiales utiles" value={corpus.official_reusable_records} />
+        <MemoryReadinessStep label="metodologia comun" value={corpus.shared_methodology_reusable_records} />
+      </div>
+
+      {!backend.operational ? (
+        <p className="memory-readiness-diagnostic">
+          {backend.diagnostic ?? "No se pudo leer el backend configurado."}
+        </p>
+      ) : null}
+
+      {ready ? (
+        <p className="memory-readiness-conclusion">
+          Corpus preparado. La influencia real se acredita en la traza de cada decision.
+        </p>
+      ) : (
+        <p className="memory-readiness-conclusion">
+          El corpus aun no permite medir de forma defendible el efecto de la memoria.
+        </p>
+      )}
+
+      <details className="memory-readiness-details compact-disclosure">
+        <summary>
+          {ready
+            ? "Ver gobierno y configuracion del corpus"
+            : `Ver ${status.scientific_readiness.blockers.length} bloqueo(s) cientifico(s)`}
+        </summary>
+        {!ready ? (
+          <div className="memory-readiness-blockers">
+            <strong>Condiciones pendientes antes del benchmark:</strong>
+            <ul>
+              {status.scientific_readiness.blockers.map((blocker) => (
+                <li key={blocker.code}>{blocker.message}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <div className="memory-readiness-meta">
+          <span>
+            motor <strong>{backend.configured_backend}</strong>
+          </span>
+          <span>
+            embedding <strong>{backend.embedding_model ?? "no disponible"}</strong>
+          </span>
+          <span>
+            candidatos pendientes <strong>{corpus.pending_candidates}</strong>
+          </span>
+          <span>
+            corpus congelado <strong>{corpus.frozen_manifest_available ? "si" : "no"}</strong>
+          </span>
+          <span title={corpus.corpus_fingerprint ?? undefined}>
+            huella <strong>{shortFingerprint(corpus.corpus_fingerprint)}</strong>
+          </span>
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function MemoryReadinessStep({ label, value }: { label: string; value: number }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function shortFingerprint(value: string | null): string {
+  return value === null ? "no disponible" : `${value.slice(0, 12)}...`;
 }
 
 function MemoryMiniStat({
@@ -282,7 +437,21 @@ function featuredMemoryRecords(
       }
       return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
     })
-    .slice(0, 5);
+    .slice(0, 3);
+}
+
+function memoryRuntimeStateLabel(state: ReturnType<typeof buildStoryMemorySummary>["state"]): string {
+  const labels: Record<ReturnType<typeof buildStoryMemorySummary>["state"], string> = {
+    not_observed: "Sin contexto observado",
+    unavailable: "Sin contexto disponible",
+    requested: "Consulta en curso",
+    returned: "Recuperada, sin uso acreditado",
+    returned_empty: "Sin recuerdos utilizables",
+    used: "Memoria utilizada",
+    rejected_by_agent: "Recuperada y no utilizada",
+    inconsistent: "Uso declarado sin IDs",
+  };
+  return labels[state];
 }
 
 function toolsForAgent(events: AgentRuntimeEvent[], agentId: string): string[] {
@@ -329,11 +498,17 @@ function stringFromUnknown(value: unknown): string | null {
 function citedMemoryIds(events: AgentRuntimeEvent[]): Set<string> {
   const ids = new Set<string>();
   for (const event of events) {
-    for (const memoryId of event.memory_record_ids) {
-      ids.add(memoryId);
-    }
     for (const memoryId of stringArrayFromUnknown(event.payload.cited_memory_record_ids)) {
       ids.add(memoryId);
+    }
+    if (
+      event.payload.retrieval_event === "retrieval_used" ||
+      event.kind === "agent_decision" ||
+      event.kind === "supervisor_decision"
+    ) {
+      for (const memoryId of event.memory_record_ids) {
+        ids.add(memoryId);
+      }
     }
   }
   return ids;
@@ -342,17 +517,24 @@ function citedMemoryIds(events: AgentRuntimeEvent[]): Set<string> {
 function memoryState(
   records: MemoryRecordSummary[],
   citedIds: Set<string>,
+  collection: MemoryCollectionSummary | null,
 ): { label: string; tone: "ok" | "warning" | "danger" | "muted" } {
-  if (records.some((record) => record.exclude_from_context || record.memory_role === "excluded")) {
+  if (
+    records.some((record) => record.exclude_from_context || record.memory_role === "excluded")
+    || (collection?.n_excluded ?? 0) > 0
+  ) {
     return { label: "revisar", tone: "danger" };
   }
   if (citedIds.size > 0) {
     return { label: "citada", tone: "ok" };
   }
-  if (records.some((record) => record.reusable_as_context)) {
-    return { label: "recuperable", tone: "ok" };
+  if (
+    records.some((record) => record.reusable_as_context)
+    || (collection?.n_reusable ?? 0) > 0
+  ) {
+    return { label: "indice activo", tone: "warning" };
   }
-  if (records.length > 0) {
+  if (records.length > 0 || (collection?.n_records ?? 0) > 0) {
     return { label: "indexada", tone: "warning" };
   }
   return { label: "sin memoria", tone: "muted" };
@@ -366,6 +548,31 @@ function humanMemorySentence(record: MemoryRecordSummary): string {
   const fallback = `${roleLabel(record.memory_role)} desde ${sourceTypeLabel(record.source_type)}`;
   const sentence = cleaned.length > 0 ? cleaned : fallback;
   return ensureSentence(shortLabel(sentence, 180));
+}
+
+function memoryAgentAccessibleLabel(
+  label: string,
+  role: string,
+  state: string,
+  recordCount: number,
+  toolCount: number,
+): string {
+  return `${label}. ${role}. Estado de memoria: ${state}. ${recordCount} recuerdos. ${toolCount} capacidades.`;
+}
+
+function memoryRecordAccessibleLabel(
+  record: MemoryRecordSummary,
+  cited: boolean,
+): string {
+  const source = record.dataset ?? record.run_id ?? "sin dataset";
+  return [
+    `Recuerdo ${roleLabel(record.memory_role)}.`,
+    `${sourceTypeLabel(record.source_type)}.`,
+    `${recordStateLabel(record)}.`,
+    humanMemorySentence(record),
+    `Origen: ${source}.`,
+    cited ? "Citado en esta run." : "No citado en esta run.",
+  ].join(" ");
 }
 
 function shortLabel(value: string, maxLength: number): string {

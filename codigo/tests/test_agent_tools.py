@@ -18,6 +18,7 @@ from codigo.app.services.agent_tools import (
     get_agent_tool_spec,
     run_agent_tool_request,
 )
+from codigo.app.services.online_blind import online_blind_forbidden_paths
 
 
 class AgentToolsTests(unittest.TestCase):
@@ -148,12 +149,93 @@ class AgentToolsTests(unittest.TestCase):
         self.assertEqual(observation.status, "blocked")
         self.assertIn("run_id does not match", observation.errors[0])
 
+    def test_online_blind_modeler_receives_only_safe_default_evidence(self):
+        request = AgentToolRequest(
+            request_id="run-tools-online-blind-001:modeler:tool:safe",
+            run_id="run-tools-online-blind-001",
+            agent_name="modeler",
+            tool_name="evidence_lookup",
+            purpose="Consultar solo el expediente causal disponible.",
+        )
+
+        observation = run_agent_tool_request(
+            _official_online_blind_tool_state(),
+            request,
+        )
+
+        self.assertEqual(observation.status, "success")
+        self.assertEqual(observation.payload["evidence_view"], "online_blind")
+        self.assertEqual(
+            observation.payload["requested_sections"],
+            ["project_context", "configs", "policy"],
+        )
+        self.assertEqual(online_blind_forbidden_paths(observation.payload), [])
+        serialized = json.dumps(observation.model_dump(mode="json"))
+        self.assertNotIn("SECRET_FAILURE_MODE", serialized)
+        self.assertNotIn("mean_lead_time_to_failure", serialized)
+        self.assertNotIn("relative_life", serialized)
+
+    def test_online_blind_modeler_blocks_retrospective_sections_and_tools(self):
+        state = _official_online_blind_tool_state()
+        requests = [
+            AgentToolRequest(
+                request_id="run-tools-online-blind-001:modeler:tool:metrics-section",
+                run_id="run-tools-online-blind-001",
+                agent_name="modeler",
+                tool_name="evidence_lookup",
+                purpose="Intentar consultar metricas retrospectivas.",
+                arguments={"include": ["metrics"]},
+            ),
+            *[
+                AgentToolRequest(
+                    request_id=f"run-tools-online-blind-001:modeler:tool:{tool_name}",
+                    run_id="run-tools-online-blind-001",
+                    agent_name="modeler",
+                    tool_name=tool_name,
+                    purpose="Intentar consultar evidencia held-out.",
+                )
+                for tool_name in (
+                    "temporal_health_lookup",
+                    "degradation_metrics_lookup",
+                    "temporal_model_readiness_assessor",
+                    "threshold_analysis",
+                )
+            ],
+        ]
+
+        for request in requests:
+            with self.subTest(tool=request.tool_name, request_id=request.request_id):
+                observation = run_agent_tool_request(state, request)
+                self.assertEqual(observation.status, "blocked")
+                self.assertIn("online_blind", observation.errors[0])
+
+    def test_online_blind_evaluator_can_use_retrospective_metrics_after_decision(self):
+        request = AgentToolRequest(
+            request_id="run-tools-online-blind-001:evaluator:tool:metrics",
+            run_id="run-tools-online-blind-001",
+            agent_name="evaluator",
+            tool_name="degradation_metrics_lookup",
+            purpose="Evaluar retrospectivamente una decision ya cerrada.",
+        )
+
+        observation = run_agent_tool_request(
+            _official_online_blind_tool_state(),
+            request,
+        )
+
+        self.assertEqual(observation.status, "success")
+        self.assertEqual(
+            observation.payload["primary_metrics"]["mean_lead_time_to_failure"],
+            300.0,
+        )
+
     def test_evidence_catalog_is_closed_and_report_verifier_compatible(self):
         catalog = build_state_evidence_catalog(_state())
 
         self.assertIn("report:final_report", catalog["allowed_evidence_refs"])
         self.assertIn("metric:f1_score", catalog["allowed_evidence_refs"])
         self.assertIn("limitation:1", catalog["allowed_evidence_refs"])
+        self.assertIn("data_provenance:official", catalog["allowed_evidence_refs"])
         self.assertEqual(catalog["metrics"]["precision"], 0.93)
 
     def test_evidence_catalog_exposes_temporal_profile_refs(self):
@@ -162,6 +244,7 @@ class AgentToolsTests(unittest.TestCase):
         refs = catalog["allowed_evidence_refs"]
         self.assertIn("supervision_profile:run_to_failure_degradation", refs)
         self.assertIn("label_source:temporal_proxy", refs)
+        self.assertIn("data_provenance:unknown", refs)
         self.assertIn("metric_extra:degradation_mean_lead_time_to_failure", refs)
         self.assertIn("metric:mean_lead_time_to_failure", refs)
         self.assertIn(
@@ -581,6 +664,24 @@ def _temporal_state_with_features(features_path: Path):
             "artifact_type": "features",
             "path": features_path.as_posix(),
             "producer": "structuring_executor",
+        }
+    )
+    return validate_state(state)
+
+
+def _official_online_blind_tool_state():
+    state = _temporal_state().to_langgraph_state()
+    state["run_id"] = "run-tools-online-blind-001"
+    state["project_context"].update(
+        {
+            "label_granularity": "event",
+            "label_source": "none",
+            "data_provenance": "official",
+            "provenance_detection_method": "official_dataset_provenance",
+            "notes": (
+                "failure_mode=SECRET_FAILURE_MODE; "
+                "relative_life=SECRET_RELATIVE_LIFE"
+            ),
         }
     )
     return validate_state(state)

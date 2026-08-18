@@ -59,6 +59,53 @@ MemoryControlledVariant = Literal[
 ]
 
 
+CAUSAL_V2_UNLABELED_METRICS = {
+    "degradation_persistent_alert_run_rate": True,
+    "degradation_mean_first_persistent_alert_time_to_trajectory_end": True,
+    "degradation_mean_pre_monitoring_alert_rate": False,
+    "degradation_mean_score_trend_spearman": True,
+    "degradation_mean_initial_final_separation": True,
+    "degradation_mean_isolated_alert_points": False,
+    "degradation_mean_alert_episodes": False,
+    "degradation_mean_longest_alert_streak": True,
+    "degradation_mean_health_index_drop": True,
+    "degradation_mean_health_monotonicity": True,
+    "degradation_mean_health_robustness": True,
+    "degradation_mean_health_nominal_volatility": False,
+    "degradation_mean_health_degradation_trend_strength": True,
+    "degradation_mean_health_indicator_score": True,
+    "degradation_health_trendability": True,
+    "degradation_health_prognosability": True,
+}
+
+LEGACY_OR_LABELED_METRICS = {
+    "precision": True,
+    "recall": True,
+    "f1_score": True,
+    "false_positive_rate": False,
+    "degradation_detected_before_failure_rate": True,
+    "degradation_confirmed_degradation_before_failure_rate": True,
+    "degradation_mean_lead_time_to_failure": True,
+    "degradation_mean_persistent_lead_time_to_failure": True,
+    "degradation_mean_false_alarm_rate_nominal": False,
+    "degradation_mean_score_trend_spearman": True,
+    "degradation_missed_runs": False,
+    "degradation_missed_confirmed_degradation_runs": False,
+    "degradation_mean_initial_final_separation": True,
+    "degradation_mean_isolated_alert_points": False,
+    "degradation_mean_alert_episodes": False,
+    "degradation_mean_longest_alert_streak": True,
+    "degradation_mean_health_index_drop": True,
+    "degradation_mean_health_monotonicity": True,
+    "degradation_mean_health_robustness": True,
+    "degradation_mean_health_nominal_volatility": False,
+    "degradation_mean_health_degradation_trend_strength": True,
+    "degradation_mean_health_indicator_score": True,
+    "degradation_health_trendability": True,
+    "degradation_health_prognosability": True,
+}
+
+
 class MetricDelta(StrictBaseModel):
     """Diferencia de una metrica respecto a una run baseline."""
 
@@ -505,32 +552,12 @@ def _metric_deltas(
     state: TFMStateModel,
     baseline_state: TFMStateModel,
 ) -> list[MetricDelta]:
-    metrics = {
-        "precision": True,
-        "recall": True,
-        "f1_score": True,
-        "false_positive_rate": False,
-        "degradation_detected_before_failure_rate": True,
-        "degradation_confirmed_degradation_before_failure_rate": True,
-        "degradation_mean_lead_time_to_failure": True,
-        "degradation_mean_persistent_lead_time_to_failure": True,
-        "degradation_mean_false_alarm_rate_nominal": False,
-        "degradation_mean_score_trend_spearman": True,
-        "degradation_missed_runs": False,
-        "degradation_missed_confirmed_degradation_runs": False,
-        "degradation_mean_initial_final_separation": True,
-        "degradation_mean_isolated_alert_points": False,
-        "degradation_mean_alert_episodes": False,
-        "degradation_mean_longest_alert_streak": True,
-        "degradation_mean_health_index_drop": True,
-        "degradation_mean_health_monotonicity": True,
-        "degradation_mean_health_robustness": True,
-        "degradation_mean_health_nominal_volatility": False,
-        "degradation_mean_health_degradation_trend_strength": True,
-        "degradation_mean_health_indicator_score": True,
-        "degradation_health_trendability": True,
-        "degradation_health_prognosability": True,
-    }
+    metrics = (
+        CAUSAL_V2_UNLABELED_METRICS
+        if _is_causal_v2_unlabeled(state)
+        or _is_causal_v2_unlabeled(baseline_state)
+        else LEGACY_OR_LABELED_METRICS
+    )
     return [
         _metric_delta(
             metric,
@@ -580,6 +607,15 @@ def _metric_value(state: TFMStateModel, metric: str) -> float | None:
         return _optional_float(value)
     extra_value = state.metrics.extra.get(metric)
     return _optional_float(extra_value)
+
+
+def _is_causal_v2_unlabeled(state: TFMStateModel) -> bool:
+    if state.metrics is None:
+        return False
+    return (
+        state.metrics.extra.get("degradation_interpretation_mode")
+        == "causal_v2_unlabeled"
+    )
 
 
 def _load_state(run_id: str, runs_dir: str | Path) -> TFMStateModel:

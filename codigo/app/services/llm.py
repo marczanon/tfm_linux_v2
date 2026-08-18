@@ -147,7 +147,10 @@ class OllamaJSONClient:
                 for message in messages
             ],
             "stream": False,
-            "format": "json",
+            # Ollama accepts either generic JSON mode or the complete JSON
+            # Schema in ``format``.  Sending the contract here constrains the
+            # generation itself instead of relying only on post-validation.
+            "format": json_schema if json_schema else "json",
         }
         if self.think is not None:
             payload["think"] = self.think

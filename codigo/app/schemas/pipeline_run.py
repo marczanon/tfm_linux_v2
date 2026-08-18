@@ -54,6 +54,10 @@ class PipelineRunRequest(StrictBaseModel):
         if self.requested_stages is not None:
             if len(self.requested_stages) != len(set(self.requested_stages)):
                 raise ValueError("requested_stages cannot contain duplicates")
+            if "memory" in self.requested_stages and not self.use_memory:
+                # La fase explicita es autoridad: evita que ejecucion, respuesta
+                # y artefacto de solicitud discrepen sobre si hubo RAG.
+                self.use_memory = True
         return self
 
 

@@ -2,14 +2,75 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
+from typing import Any
+
 from codigo.app.schemas.agent_decisions import MemoryRecordUse
 from codigo.app.schemas.reasoning import RetrievedMemoryContext
+from codigo.app.schemas.state import TFMStateModel
+
+
+# En una decision ``online_blind`` no se proyecta texto libre procedente de
+# ejecuciones previas. Solo estas etiquetas metodologicas se convierten en
+# instrucciones cerradas que no revelan resultados post-hoc ni valores de la
+# trayectoria monitorizada.
+ONLINE_BLIND_MEMORY_GUIDANCE_BY_TAG = {
+    "calibration_only": (
+        "Ajustar umbrales solo con baseline y calibracion, nunca con monitoring."
+    ),
+    "causal_partition": (
+        "Mantener el orden temporal y la separacion causal entre particiones."
+    ),
+    "compare_model_family_after_partial_threshold_gain": (
+        "Comparar familias de modelo si mover solo el umbral no resuelve el riesgo."
+    ),
+    "isolated_spike_not_failure": (
+        "Separar picos aislados de alertas sostenidas sin atribuir causa fisica."
+    ),
+    "leakage_prevention": (
+        "No usar etiquetas, metricas ni conocimiento del tramo de monitoring."
+    ),
+    "rul_not_estimated": (
+        "No presentar RUL como estimacion cuando no existe supervision causal."
+    ),
+    "sustained_alert": (
+        "Evaluar persistencia temporal antes de elevar una alerta."
+    ),
+    "sustained_alert_required": (
+        "Exigir persistencia temporal y no reaccionar a un unico pico."
+    ),
+}
+
+
+def call_agent_with_optional_memory(
+    agent: Callable[..., Any],
+    state: TFMStateModel,
+    memory_context: RetrievedMemoryContext | None,
+) -> Any:
+    """Inyecta memoria solo cuando el contrato del agente la admite."""
+
+    if memory_context is None or not _accepts_memory_context(agent):
+        return agent(state)
+    return agent(state, memory_context=memory_context)
+
+
+def _accepts_memory_context(agent: Callable[..., Any]) -> bool:
+    try:
+        signature = inspect.signature(agent)
+    except (TypeError, ValueError):
+        return False
+    return "memory_context" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
 
 
 def memory_context_for_llm(
     memory_context: RetrievedMemoryContext | None,
     *,
     content_excerpt_chars: int = 900,
+    online_blind: bool = False,
 ) -> dict[str, object]:
     """Convierte memoria recuperada en contexto compacto para un prompt."""
 
@@ -18,6 +79,8 @@ def memory_context_for_llm(
             "available": False,
             "reason": "memory retrieval disabled for this decision",
         }
+    if online_blind:
+        return _online_blind_memory_context_for_llm(memory_context)
     return {
         "available": True,
         "context_id": memory_context.context_id,
@@ -36,6 +99,8 @@ def memory_context_for_llm(
                 "outcome": item.record.outcome,
                 "run_id": item.record.run_id,
                 "source_path": item.record.source_path,
+                "data_provenance": item.record.data_provenance,
+                "provenance_caution": item.record.data_provenance == "unknown",
                 "summary": item.record.summary,
                 "content_excerpt": item.record.content[:content_excerpt_chars],
                 "metrics": item.record.metrics,
@@ -43,6 +108,57 @@ def memory_context_for_llm(
             }
             for item in memory_context.items
         ],
+    }
+
+
+def _online_blind_memory_context_for_llm(
+    memory_context: RetrievedMemoryContext,
+) -> dict[str, object]:
+    """Proyecta solo metodologia cerrada, nunca resultados retrospectivos."""
+
+    items: list[dict[str, object]] = []
+    for item in memory_context.items:
+        safe_tags = sorted(
+            set(item.record.tags) & set(ONLINE_BLIND_MEMORY_GUIDANCE_BY_TAG)
+        )
+        applicability = item.record.applicability
+        items.append(
+            {
+                "rank": item.rank,
+                "similarity": round(item.similarity, 6),
+                "retrieval_use": item.retrieval_use,
+                "memory_record_id": item.record.memory_record_id,
+                "source_type": item.record.source_type,
+                "memory_role": item.record.memory_role,
+                "data_provenance": item.record.data_provenance,
+                "provenance_caution": item.record.data_provenance == "unknown",
+                "applicability": (
+                    None
+                    if applicability is None
+                    else applicability.model_dump(mode="json")
+                ),
+                "safe_methodology_tags": safe_tags,
+                "methodological_guidance": [
+                    ONLINE_BLIND_MEMORY_GUIDANCE_BY_TAG[tag] for tag in safe_tags
+                ],
+            }
+        )
+    return {
+        "available": True,
+        "context_id": memory_context.context_id,
+        "query_id": memory_context.query.query_id,
+        "retrieval_backend": memory_context.retrieval_backend,
+        "embedding_model": memory_context.embedding_model,
+        "evidence_view": "online_blind_causal_projection_v1",
+        "retrospective_fields_omitted": [
+            "summary",
+            "content",
+            "metrics",
+            "outcome",
+            "run_id",
+            "source_path",
+        ],
+        "items": items,
     }
 
 
@@ -61,29 +177,20 @@ def memory_usage_json_template(
 ) -> dict[str, object]:
     """Campos JSON esperados para declarar uso de memoria en una decision."""
 
-    memory_ids = memory_record_ids(memory_context)[:max_records]
+    # Los IDs disponibles se muestran en ``memory_context_for_llm``. No se
+    # incluyen como campos extra del objeto de salida porque el contrato es
+    # estricto y, sobre todo, porque no deben parecer citas preseleccionadas.
+    _ = max_records
     return {
         "memory_context_id": None if memory_context is None else memory_context.context_id,
-        "used_memory_context": bool(memory_ids),
-        "memory_record_ids": memory_ids,
-        "memory_usage_summary": (
-            None
-            if not memory_ids
-            else "Como influyen los recuerdos recuperados en esta decision."
-        ),
-        "memory_record_uses": [
-            {
-                "memory_record_id": memory_id,
-                "usage": "adapted",
-                "influence_summary": (
-                    "Que aprendizaje concreto aporta este recuerdo a la decision."
-                ),
-                "risk_mitigation": (
-                    "Como se evita reutilizar el recuerdo fuera de contexto."
-                ),
-            }
-            for memory_id in memory_ids
-        ],
+        # El esquema parte de no uso para evitar anclar al LLM a copiar o citar
+        # todos los recuerdos recuperados. Los IDs disponibles ya aparecen en
+        # ``memory_context_for_llm`` y solo deben copiarse tras una decision
+        # explicita y justificable del agente.
+        "used_memory_context": False,
+        "memory_record_ids": [],
+        "memory_usage_summary": None,
+        "memory_record_uses": [],
     }
 
 

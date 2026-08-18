@@ -23,9 +23,12 @@ from codigo.app.executors.modeling import (
     SKLEARN_PCA_PARAMS,
 )
 from codigo.app.schemas.agent_decisions import ModelingDecision
+from codigo.app.schemas.agent_decisions import AgentHypothesis
 from codigo.app.schemas.agent_decisions import ModelingAlternative
 from codigo.app.schemas.agent_decisions import ModelingDecisionStrategy
 from codigo.app.schemas.agent_decisions import ModelingRetryDecision
+from codigo.app.schemas.agent_decisions import DecisionGenerationTrace
+from codigo.app.schemas.agent_decisions import require_agent_hypothesis
 from codigo.app.schemas.reasoning import AgentMemoryQuery, RetrievedMemoryContext
 from codigo.app.schemas.state import ModelingConfig, TFMStateModel
 from codigo.app.services.llm import (
@@ -35,6 +38,12 @@ from codigo.app.services.llm import (
     get_default_json_llm_client,
 )
 from codigo.app.services.agent_tools import agent_tool_catalog
+from codigo.app.services.agent_memory import memory_context_for_llm
+from codigo.app.services.online_blind import (
+    assert_online_blind_payload,
+    sanitize_online_blind_payload,
+    uses_online_blind_view,
+)
 from codigo.app.services.vector_memory import VectorMemoryStore
 
 
@@ -64,6 +73,32 @@ RUN_TO_FAILURE_REQUIRED_TARGETS = {
     "mean_false_alarm_rate_nominal",
     "mean_score_trend_spearman",
 }
+ONLINE_BLIND_REQUIRED_TARGETS = {
+    "calibration_false_alarm_rate",
+    "monitoring_alert_persistence",
+    "score_trend_stability",
+    "causal_leakage_prevention",
+}
+ONLINE_BLIND_REQUIRED_EVIDENCE_REFS = {
+    "data_provenance:official",
+    "label_source:none",
+    "policy:nasa_ims_run_to_failure_v2",
+    "temporal:causal_partition_20_10_70",
+    "temporal:monitoring_held_out",
+}
+ONLINE_BLIND_RETROSPECTIVE_TOOLS = {
+    "temporal_health_lookup",
+    "degradation_metrics_lookup",
+    "temporal_model_readiness_assessor",
+    "threshold_analysis",
+}
+ONLINE_BLIND_RETROSPECTIVE_TERMS = {
+    "detected_before_failure",
+    "failure",
+    "lead_time",
+    "relative_life",
+    "time_to_failure",
+}
 
 
 def decide_modeling_action(
@@ -77,17 +112,45 @@ def decide_modeling_action(
 
     should_use_llm = _should_use_llm(llm_client, use_llm)
     if should_use_llm:
+        attempt_tracker = [0]
         try:
             client = llm_client or get_default_json_llm_client()
             return decide_modeling_action_with_llm(
                 state,
                 client,
                 memory_context=memory_context,
+                _attempt_tracker=attempt_tracker,
             )
-        except (LLMCallError, ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError) as exc:
+            fallback = decide_modeling_action_deterministic(state)
+            fallback.rationale = (
+                f"{fallback.rationale} Guardrail correction after invalid "
+                f"LLM modeler decision: {exc}"
+            )
+            fallback.confidence = min(fallback.confidence, 0.82)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
+            return fallback
+        except LLMCallError as exc:
             fallback = decide_modeling_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
             fallback.confidence = min(fallback.confidence, 0.7)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
 
     return decide_modeling_action_deterministic(state)
@@ -98,16 +161,98 @@ def decide_modeling_action_with_llm(
     llm_client: JSONLLMClient,
     *,
     memory_context: RetrievedMemoryContext | None = None,
+    _attempt_tracker: list[int] | None = None,
 ) -> ModelingDecision:
     """Solicita al LLM una ModelingDecision y valida sus limites."""
 
+    attempt_tracker = _attempt_tracker if _attempt_tracker is not None else [0]
+    messages = _modeler_messages(state, memory_context=memory_context)
+    schema = ModelingDecision.model_json_schema()
+    attempt_tracker[0] = 1
     payload = llm_client.complete_json(
-        _modeler_messages(state, memory_context=memory_context),
-        json_schema=ModelingDecision.model_json_schema(),
+        messages,
+        json_schema=schema,
     )
-    decision = ModelingDecision.model_validate(payload)
-    _validate_modeling_decision_bounds(state, decision, memory_context=memory_context)
+    try:
+        decision = _validated_modeling_decision_from_payload(
+            state,
+            payload,
+            memory_context=memory_context,
+        )
+    except (ValidationError, ValueError) as exc:
+        attempt_tracker[0] = 2
+        repaired_payload = llm_client.complete_json(
+            _modeler_contract_repair_messages(
+                state,
+                messages,
+                invalid_payload=payload,
+                validation_error=exc,
+                memory_context=memory_context,
+            ),
+            json_schema=schema,
+        )
+        decision = _validated_modeling_decision_from_payload(
+            state,
+            repaired_payload,
+            memory_context=memory_context,
+        )
+        decision.generation_trace = DecisionGenerationTrace.for_decision(
+            decision.decision_id,
+            origin="llm",
+            attempt_index=2,
+            validation_status="repaired",
+        )
+        return decision
+    decision.generation_trace = DecisionGenerationTrace.for_decision(
+        decision.decision_id,
+        origin="llm",
+    )
     return decision
+
+
+def _validated_modeling_decision_from_payload(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+    *,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> ModelingDecision:
+    trusted_payload = _with_server_owned_modeling_envelope(state, payload)
+    decision = ModelingDecision.model_validate(trusted_payload)
+    _validate_modeling_decision_bounds(
+        state,
+        decision,
+        memory_context=memory_context,
+    )
+    return decision
+
+
+def _with_server_owned_modeling_envelope(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Impone identidad y ruta derivada sin modificar la configuración propuesta."""
+
+    trusted_payload = dict(payload)
+    trusted_payload.pop("created_at", None)
+    trusted_payload.pop("generation_trace", None)
+    trusted_payload.pop("protocol_trace", None)
+    trusted_payload["agent_name"] = "modeler"
+    trusted_payload["decision_id"] = (
+        f"{state.run_id}:modeler:{_modeler_turn(state):03d}"
+    )
+    config_payload = trusted_payload.get("modeling_config")
+    model_name = (
+        config_payload.get("model_name")
+        if isinstance(config_payload, dict)
+        else None
+    )
+    suffix = "pt" if model_name == "autoencoder_dense" else "joblib"
+    trusted_payload["expected_model_path"] = (
+        f"codigo/models/{state.project_context.dataset}/{model_name}.{suffix}"
+        if isinstance(model_name, str) and model_name
+        else _expected_model_path(state, DEFAULT_MODELING_CONFIG)
+    )
+    return trusted_payload
 
 
 def decide_modeling_action_deterministic(state: TFMStateModel) -> ModelingDecision:
@@ -124,6 +269,11 @@ def decide_modeling_action_deterministic(state: TFMStateModel) -> ModelingDecisi
             "and derive the anomaly threshold from the validation split."
         ),
         confidence=1.0,
+        hypothesis=_modeler_hypothesis(state),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
+            origin="deterministic",
+        ),
         decision_strategy=ModelingDecisionStrategy(
             strategy_type="baseline_conservation",
             hypothesis=(
@@ -142,6 +292,8 @@ def decide_modeling_action_deterministic(state: TFMStateModel) -> ModelingDecisi
 
 
 def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDecision:
+    if uses_online_blind_view(state):
+        return _online_blind_temporal_modeling_decision(state)
     return ModelingDecision(
         decision_id=f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
         rationale=(
@@ -151,6 +303,11 @@ def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDec
             "than optimizing F1 as the primary objective."
         ),
         confidence=1.0,
+        hypothesis=_modeler_hypothesis(state),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
+            origin="deterministic",
+        ),
         decision_strategy=ModelingDecisionStrategy(
             strategy_type="feature_model_fit",
             hypothesis=(
@@ -169,7 +326,7 @@ def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDec
                 "metric:mean_lead_time_to_failure",
                 "metric:mean_false_alarm_rate_nominal",
                 "metric:mean_score_trend_spearman",
-                "label_source:temporal_proxy",
+                f"label_source:{state.project_context.label_source}",
             ],
             risk_notes=[
                 "Las etiquetas proxy o sinteticas no deben tratarse como ground truth oficial.",
@@ -226,6 +383,77 @@ def _temporal_degradation_modeling_decision(state: TFMStateModel) -> ModelingDec
     )
 
 
+def _online_blind_temporal_modeling_decision(
+    state: TFMStateModel,
+) -> ModelingDecision:
+    """Fallback causal para Set 2: decide sin observar monitorizacion ni fallo."""
+
+    return ModelingDecision(
+        decision_id=f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
+        rationale=(
+            "Causal online-blind policy: fit PCA reconstruction error on the "
+            "baseline only, calibrate the alert threshold on the reserved "
+            "validation interval and keep monitoring entirely held out. F1 and "
+            "retrospective event timing are unavailable to this decision."
+        ),
+        confidence=1.0,
+        hypothesis=_modeler_hypothesis(state),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
+            origin="deterministic",
+        ),
+        decision_strategy=ModelingDecisionStrategy(
+            strategy_type="feature_model_fit",
+            hypothesis=(
+                "Un score de reconstruccion calibrado antes de monitorizacion "
+                "permitira observar cambios persistentes sin usar informacion "
+                "posterior del ensayo."
+            ),
+            evidence_refs=sorted(ONLINE_BLIND_REQUIRED_EVIDENCE_REFS),
+            risk_notes=[
+                "El baseline inicial es un supuesto operativo, no una etiqueta oficial.",
+                "El tramo de monitorizacion no puede ajustar modelo, umbral ni memoria.",
+                "La interpretacion retrospectiva se realiza solo tras cerrar la decision.",
+            ],
+            tool_names=[],
+            optimization_targets=sorted(ONLINE_BLIND_REQUIRED_TARGETS),
+            alert_policy=(
+                "Calibrar el umbral antes de monitorizacion y distinguir picos "
+                "aislados de avisos sostenidos sobre snapshots consecutivos."
+            ),
+        ),
+        modeling_config=DEFAULT_PCA_MODELING_CONFIG,
+        train_split="train",
+        validation_split="validation",
+        expected_model_path=_expected_model_path(state, DEFAULT_PCA_MODELING_CONFIG),
+        comparison_candidates=[
+            ModelingAlternative(
+                alternative_id="isolation_forest_causal_candidate",
+                modeling_config=DEFAULT_MODELING_CONFIG,
+                rationale=(
+                    "Comparar con aislamiento por arboles bajo los mismos splits "
+                    "causales y el mismo presupuesto de calibracion."
+                ),
+                expected_effect=(
+                    "Contrastar estabilidad y persistencia de alertas sin usar "
+                    "el tramo de monitorizacion para seleccionar el umbral."
+                ),
+            ),
+            ModelingAlternative(
+                alternative_id="one_class_svm_causal_candidate",
+                modeling_config=DEFAULT_OCSVM_MODELING_CONFIG,
+                rationale=(
+                    "Comparar una frontera no lineal ajustada solo al baseline."
+                ),
+                expected_effect=(
+                    "Evaluar una geometria distinta manteniendo identica barrera "
+                    "entre calibracion y monitorizacion."
+                ),
+            ),
+        ],
+    )
+
+
 def build_modeler_memory_query(
     state: TFMStateModel,
     *,
@@ -235,19 +463,36 @@ def build_modeler_memory_query(
     """Construye una consulta RAG para la primera decision del modelador."""
 
     features_path = _features_path_for_state(state)
+    evidence_need = (
+        "Need prior lessons about causal partitioning, calibration-only "
+        "thresholds, held-out monitoring, persistent alerts and leakage "
+        "prevention."
+        if uses_online_blind_view(state)
+        else (
+            "Need prior lessons about supported model family, temporal "
+            "run-to-failure guardrails, threshold policy, false alarms, "
+            "lead time and cases where F1 should remain auxiliary."
+        )
+    )
     query_text = "\n".join(
         [
             "Modeler initial decision for industrial anomaly detection.",
             f"Dataset: {state.project_context.dataset}",
+            f"Data provenance: {state.project_context.data_provenance}",
             f"Objective: {state.project_context.objective}",
             f"Supervision profile: {state.project_context.supervision_profile}",
             f"Label source: {state.project_context.label_source}",
-            f"Features summary: {json.dumps(_features_summary_for_llm(features_path), ensure_ascii=True)}",
             (
-                "Need prior lessons about supported model family, temporal "
-                "run-to-failure guardrails, threshold policy, false alarms, "
-                "lead time and cases where F1 should remain auxiliary."
+                "Features summary: "
+                + json.dumps(
+                    _features_summary_for_llm(
+                        features_path,
+                        online_blind=uses_online_blind_view(state),
+                    ),
+                    ensure_ascii=True,
+                )
             ),
+            evidence_need,
         ]
     )
     return AgentMemoryQuery(
@@ -255,12 +500,15 @@ def build_modeler_memory_query(
         target_agent="modeler",
         query_text=query_text,
         dataset=state.project_context.dataset,
+        data_provenance=state.project_context.data_provenance,
         run_id=state.run_id,
         decision_id=f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
         decision_context={
+            **state.project_context.to_memory_applicability().model_dump(
+                mode="python"
+            ),
             "current_stage": state.current_stage,
-            "supervision_profile": state.project_context.supervision_profile,
-            "label_source": state.project_context.label_source,
+            "data_provenance": state.project_context.data_provenance,
             "model_name": (
                 None if state.modeling_config is None else state.modeling_config.model_name
             ),
@@ -311,6 +559,7 @@ def decide_modeling_retry_action(
 
     should_use_llm = _should_use_llm(llm_client, use_llm)
     if should_use_llm:
+        attempt_tracker = [0]
         try:
             client = llm_client or get_default_json_llm_client()
             return decide_modeling_retry_action_with_llm(
@@ -321,8 +570,32 @@ def decide_modeling_retry_action(
                 max_attempts=max_attempts,
                 memory_context=memory_context,
                 llm_client=client,
+                _attempt_tracker=attempt_tracker,
             )
-        except (LLMCallError, ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError) as exc:
+            fallback = decide_modeling_retry_action_deterministic(
+                state,
+                failure_analysis=failure_analysis,
+                source_run_id=source_run_id,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+            )
+            fallback.rationale = (
+                f"{fallback.rationale} Guardrail correction after invalid "
+                f"LLM modeler retry decision: {exc}"
+            )
+            fallback.confidence = min(fallback.confidence, 0.82)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
+            return fallback
+        except LLMCallError as exc:
             fallback = decide_modeling_retry_action_deterministic(
                 state,
                 failure_analysis=failure_analysis,
@@ -332,6 +605,15 @@ def decide_modeling_retry_action(
             )
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
             fallback.confidence = min(fallback.confidence, 0.7)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
 
     return decide_modeling_retry_action_deterministic(
@@ -352,27 +634,145 @@ def decide_modeling_retry_action_with_llm(
     max_attempts: int,
     memory_context: RetrievedMemoryContext | None = None,
     llm_client: JSONLLMClient,
+    _attempt_tracker: list[int] | None = None,
 ) -> ModelingRetryDecision:
     """Solicita al LLM una decision de reintento y valida sus limites."""
 
+    attempt_tracker = _attempt_tracker if _attempt_tracker is not None else [0]
+    messages = _modeler_retry_messages(
+        state,
+        failure_analysis=failure_analysis,
+        source_run_id=source_run_id,
+        attempt_number=attempt_number,
+        max_attempts=max_attempts,
+        memory_context=memory_context,
+    )
+    schema = ModelingRetryDecision.model_json_schema()
+    attempt_tracker[0] = 1
     payload = llm_client.complete_json(
-        _modeler_retry_messages(
+        messages,
+        json_schema=schema,
+    )
+    try:
+        decision = _validated_modeling_retry_decision_from_payload(
             state,
-            failure_analysis=failure_analysis,
+            payload,
             source_run_id=source_run_id,
             attempt_number=attempt_number,
             max_attempts=max_attempts,
             memory_context=memory_context,
-        ),
-        json_schema=ModelingRetryDecision.model_json_schema(),
+        )
+    except (ValidationError, ValueError) as exc:
+        attempt_tracker[0] = 2
+        repaired_payload = llm_client.complete_json(
+            _modeler_retry_contract_repair_messages(
+                state,
+                messages,
+                invalid_payload=payload,
+                validation_error=exc,
+                source_run_id=source_run_id,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                memory_context=memory_context,
+            ),
+            json_schema=schema,
+        )
+        decision = _validated_modeling_retry_decision_from_payload(
+            state,
+            repaired_payload,
+            source_run_id=source_run_id,
+            attempt_number=attempt_number,
+            max_attempts=max_attempts,
+            memory_context=memory_context,
+        )
+        decision.generation_trace = DecisionGenerationTrace.for_decision(
+            decision.decision_id,
+            origin="llm",
+            attempt_index=2,
+            validation_status="repaired",
+        )
+        return decision
+    decision.generation_trace = DecisionGenerationTrace.for_decision(
+        decision.decision_id,
+        origin="llm",
     )
-    decision = ModelingRetryDecision.model_validate(payload)
+    return decision
+
+
+def _validated_modeling_retry_decision_from_payload(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+    *,
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> ModelingRetryDecision:
+    trusted_payload = _with_server_owned_modeling_retry_envelope(
+        state,
+        payload,
+        source_run_id=source_run_id,
+        attempt_number=attempt_number,
+        max_attempts=max_attempts,
+    )
+    decision = ModelingRetryDecision.model_validate(trusted_payload)
     _validate_modeling_retry_decision_bounds(
         state,
         decision,
         memory_context=memory_context,
     )
     return decision
+
+
+def _with_server_owned_modeling_retry_envelope(
+    state: TFMStateModel,
+    payload: dict[str, Any],
+    *,
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+) -> dict[str, Any]:
+    """Impone la identidad del intento recibida por la API/orquestador."""
+
+    trusted_payload = dict(payload)
+    trusted_payload.pop("created_at", None)
+    trusted_payload.pop("generation_trace", None)
+    detailed_memory_uses = trusted_payload.pop(
+        "memory_record_uses_details",
+        None,
+    )
+    if detailed_memory_uses is not None:
+        canonical_memory_uses = trusted_payload.get("memory_record_uses")
+        if canonical_memory_uses in (None, []):
+            # Alias de forma observado en proveedor: conserva la lista emitida
+            # bajo el campo canonico para que el contrato valide su contenido.
+            trusted_payload["memory_record_uses"] = detailed_memory_uses
+        elif detailed_memory_uses not in ([], canonical_memory_uses):
+            raise ValueError(
+                "memory_record_uses and memory_record_uses_details conflict"
+            )
+    trusted_payload["agent_name"] = "modeler"
+    trusted_payload["decision_id"] = (
+        f"{state.run_id}:modeler_retry:{attempt_number:03d}"
+    )
+    trusted_payload["source_run_id"] = source_run_id
+    trusted_payload["attempt_number"] = attempt_number
+    trusted_payload["max_attempts"] = max_attempts
+    strategy = trusted_payload.get("decision_strategy")
+    if isinstance(strategy, dict):
+        strategy_payload = dict(strategy)
+        strategy_type = strategy_payload.get("strategy_type")
+        strategy_aliases = {
+            "model_family_shift": "model_family_selection",
+            "model_family_comparison": "model_family_selection",
+            "threshold_calibration_with_alternative_comparison": (
+                "threshold_calibration"
+            ),
+        }
+        if strategy_type in strategy_aliases:
+            strategy_payload["strategy_type"] = strategy_aliases[strategy_type]
+        trusted_payload["decision_strategy"] = strategy_payload
+    return trusted_payload
 
 
 def decide_modeling_retry_action_deterministic(
@@ -392,6 +792,11 @@ def decide_modeling_retry_action_deterministic(
             "configuration without an agent decision."
         ),
         confidence=1.0,
+        hypothesis=_modeler_hypothesis(state, retry=True),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            f"{state.run_id}:modeler_retry:{attempt_number:03d}",
+            origin="deterministic",
+        ),
         source_run_id=source_run_id,
         attempt_number=attempt_number,
         max_attempts=max_attempts,
@@ -414,11 +819,18 @@ def build_modeler_retry_memory_query(
 ) -> AgentMemoryQuery:
     """Construye la consulta RAG para el reintento del modelador."""
 
+    if uses_online_blind_view(state):
+        raise ValueError(
+            "online_blind official monitoring evidence is held out; "
+            "modeler retries cannot consume its retrospective outcome"
+        )
+
     failure_modes = failure_analysis.get("failure_modes", [])
     query_text = "\n".join(
         [
             "Modeler retry decision for industrial anomaly detection.",
             f"Dataset: {state.project_context.dataset}",
+            f"Data provenance: {state.project_context.data_provenance}",
             f"Objective: {state.project_context.objective}",
             f"Failure modes: {json.dumps(failure_modes, ensure_ascii=True)}",
             f"Failure analysis: {json.dumps(failure_analysis, ensure_ascii=True)}",
@@ -430,12 +842,17 @@ def build_modeler_retry_memory_query(
         target_agent="modeler",
         query_text=query_text,
         dataset=state.project_context.dataset,
+        data_provenance=state.project_context.data_provenance,
         run_id=state.run_id,
         decision_id=f"{state.run_id}:modeler_retry:{attempt_number:03d}",
         decision_context={
+            **state.project_context.to_memory_applicability().model_dump(
+                mode="python"
+            ),
             "source_run_id": source_run_id,
             "attempt_number": attempt_number,
             "max_attempts": max_attempts,
+            "data_provenance": state.project_context.data_provenance,
             "precision": None if state.metrics is None else state.metrics.precision,
             "recall": None if state.metrics is None else state.metrics.recall,
             "f1_score": None if state.metrics is None else state.metrics.f1_score,
@@ -518,14 +935,28 @@ def _modeler_messages(
                     json.dumps(_state_summary_for_llm(state), indent=2, ensure_ascii=True),
                     "",
                     "Resumen de features:",
-                    json.dumps(_features_summary_for_llm(features_path), indent=2, ensure_ascii=True),
+                    json.dumps(
+                        _features_summary_for_llm(
+                            features_path,
+                            online_blind=uses_online_blind_view(state),
+                        ),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
                     "",
                     "Herramientas agenticas disponibles:",
-                    json.dumps(_modeler_tool_catalog_for_llm(), indent=2, ensure_ascii=True),
+                    json.dumps(
+                        _modeler_tool_catalog_for_llm(state),
+                        indent=2,
+                        ensure_ascii=True,
+                    ),
                     "",
                     "Memoria recuperada para el modelador:",
                     json.dumps(
-                        _memory_context_for_llm(memory_context),
+                        memory_context_for_llm(
+                            memory_context,
+                            online_blind=uses_online_blind_view(state),
+                        ),
                         indent=2,
                         ensure_ascii=True,
                     ),
@@ -547,10 +978,19 @@ def _modeler_messages(
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
                     (
+                        "- agent_name, decision_id y expected_model_path son "
+                        "campos informativos server-owned; el servidor derivará "
+                        "la ruta del model_name que propongas."
+                    ),
+                    (
                         "- decision_strategy debe declarar la hipotesis de "
                         "modelado: model_family_selection, threshold_calibration, "
                         "feature_model_fit, data_split_risk, "
                         "baseline_conservation o needs_more_evidence."
+                    ),
+                    (
+                        "- hypothesis es el contrato comun: debe conservar alcance, "
+                        "corte causal, observacion esperada, refutacion, evidencia y riesgos."
                     ),
                     (
                         "- No reduzcas la decision al umbral: si usas "
@@ -587,10 +1027,6 @@ def _modeler_messages(
                         "usar un model_name soportado."
                     ),
                     (
-                        "- expected_model_path debe ser la ruta esperada para "
-                        "el model_name elegido."
-                    ),
-                    (
                         "- La memoria recuperada es evidencia historica: puede "
                         "informar la decision, pero no sustituye metricas, "
                         "modelos soportados ni guardarrails."
@@ -604,10 +1040,71 @@ def _modeler_messages(
                         "- Si un recuerdo es warning o boundary_case, explica "
                         "en risk_mitigation como evitas repetir su fallo."
                     ),
-                    f"- decision_id debe ser: {state.run_id}:modeler:{_modeler_turn(state):03d}",
                 ]
             ),
         ),
+    ]
+
+
+def _modeler_contract_repair_messages(
+    state: TFMStateModel,
+    original_messages: list[LLMMessage],
+    *,
+    invalid_payload: dict[str, Any],
+    validation_error: Exception,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> list[LLMMessage]:
+    template = _modeler_json_template(state, memory_context=memory_context)
+    memory_contract = {
+        key: template[key]
+        for key in (
+            "memory_context_id",
+            "used_memory_context",
+            "memory_record_ids",
+            "memory_usage_summary",
+            "memory_record_uses",
+        )
+    }
+    rules = [
+        "La decision anterior no valida contra los guardarrails del modeler.",
+        f"Error de validacion: {validation_error}",
+        "Corrige solo lo necesario y reemite un unico objeto JSON valido.",
+        (
+            "agent_name, decision_id y expected_model_path son metadatos "
+            "server-owned; el servidor impondrá sus valores canónicos."
+        ),
+        "No entrenes modelos, no ejecutes codigo y no inventes evidencia.",
+        "Conserva train_split=train y validation_split=validation o null.",
+        "Usa solo modelos e hiperparametros soportados y random_state=42.",
+        (
+            "decision_strategy debe declarar una hipotesis verificable; las "
+            "alternativas deben respetar los mismos limites del ejecutor."
+        ),
+        (
+            "Incluye tambien hypothesis con kind=model_performance y criterios "
+            "observables; no la sustituyas por rationale."
+        ),
+        (
+            "La memoria es contexto historico y no puede relajar modelos, "
+            "splits, hiperparametros ni guardarrails."
+        ),
+        "Declaracion de memoria segura por defecto:",
+        json.dumps(memory_contract, indent=2, ensure_ascii=True),
+        (
+            "Si used_memory_context=true, cita solo recuerdos recuperados, "
+            "describe exactamente cada memory_record_id en memory_record_uses "
+            "y mitiga warning/boundary_case."
+        ),
+        *_profile_specific_modeler_rules(state),
+        "No incluyas texto fuera del JSON.",
+    ]
+    return [
+        *original_messages,
+        LLMMessage(
+            role="assistant",
+            content=json.dumps(invalid_payload, indent=2, ensure_ascii=True),
+        ),
+        LLMMessage(role="user", content="\n".join(rules)),
     ]
 
 
@@ -620,6 +1117,11 @@ def _modeler_retry_messages(
     max_attempts: int,
     memory_context: RetrievedMemoryContext | None = None,
 ) -> list[LLMMessage]:
+    if uses_online_blind_view(state):
+        raise ValueError(
+            "online_blind official monitoring evidence is held out; "
+            "modeler retries are disabled for this run"
+        )
     return [
         LLMMessage(
             role="system",
@@ -646,7 +1148,10 @@ def _modeler_retry_messages(
                     "",
                     "Memoria recuperada para el modelador:",
                     json.dumps(
-                        _memory_context_for_llm(memory_context),
+                        memory_context_for_llm(
+                            memory_context,
+                            online_blind=uses_online_blind_view(state),
+                        ),
                         indent=2,
                         ensure_ascii=True,
                     ),
@@ -674,12 +1179,21 @@ def _modeler_retry_messages(
                     "Reglas:",
                     "- No incluyas texto fuera del JSON.",
                     (
+                        "- agent_name, decision_id, source_run_id, "
+                        "attempt_number y max_attempts son campos informativos "
+                        "server-owned; el servidor impondrá los valores de la "
+                        "plantilla."
+                    ),
+                    (
                         "- decision_strategy debe declarar si el reintento se "
                         "basa en calibracion de umbral, cambio de familia, "
                         "riesgo de split, ajuste feature-modelo o falta de evidencia."
                     ),
+                    (
+                        "- hypothesis debe explicar que resultado futuro apoyaria "
+                        "el reintento y que resultado lo refutaria."
+                    ),
                     "- should_retry debe ser false si no queda margen real de mejora.",
-                    "- attempt_number y max_attempts deben coincidir con el formato esperado.",
                     (
                         "- Si attempt_number == max_attempts, este es el ultimo "
                         "reintento permitido; si decides ejecutarlo y falla, "
@@ -768,7 +1282,86 @@ def _modeler_retry_messages(
                         "- Si la memoria no aporta evidencia util, pon "
                         "used_memory_context=false y deja memory_record_ids vacio."
                     ),
-                    f"- decision_id debe ser: {state.run_id}:modeler_retry:{attempt_number:03d}",
+                ]
+            ),
+        ),
+    ]
+
+
+def _modeler_retry_contract_repair_messages(
+    state: TFMStateModel,
+    original_messages: list[LLMMessage],
+    *,
+    invalid_payload: dict[str, Any],
+    validation_error: Exception,
+    source_run_id: str,
+    attempt_number: int,
+    max_attempts: int,
+    memory_context: RetrievedMemoryContext | None = None,
+) -> list[LLMMessage]:
+    template = _modeler_retry_json_template(
+        state,
+        source_run_id=source_run_id,
+        attempt_number=attempt_number,
+        max_attempts=max_attempts,
+        memory_context=memory_context,
+    )
+    memory_contract = {
+        key: template[key]
+        for key in (
+            "memory_context_id",
+            "used_memory_context",
+            "memory_record_ids",
+            "memory_usage_summary",
+            "memory_record_uses",
+        )
+    }
+    return [
+        *original_messages,
+        LLMMessage(
+            role="assistant",
+            content=json.dumps(invalid_payload, indent=2, ensure_ascii=True),
+        ),
+        LLMMessage(
+            role="user",
+            content="\n".join(
+                [
+                    (
+                        "La decision anterior no valida contra los guardarrails "
+                        "del modeler retry."
+                    ),
+                    f"Error de validacion: {validation_error}",
+                    "Corrige solo lo necesario y reemite un unico objeto JSON valido.",
+                    (
+                        "Incluye hypothesis con kind=model_performance, evidencia "
+                        "visible y criterio de refutacion."
+                    ),
+                    (
+                        "agent_name, decision_id, source_run_id, attempt_number "
+                        "y max_attempts son metadatos server-owned; el servidor "
+                        "impondrá sus valores canónicos."
+                    ),
+                    "No entrenes modelos, no ejecutes codigo y no inventes evidencia.",
+                    (
+                        "Si should_retry=true, retry_config debe cambiar de forma "
+                        "real la configuracion fallida y respetar modelos, "
+                        "hiperparametros y random_state=42."
+                    ),
+                    (
+                        "Si should_retry=false, retry_config debe ser null y "
+                        "stop_reason debe explicar el cierre."
+                    ),
+                    (
+                        "No relajes limites por memoria ni repitas un ajuste de "
+                        "umbral que la guia marque como sobrecorreccion."
+                    ),
+                    "Declaracion de memoria segura por defecto:",
+                    json.dumps(memory_contract, indent=2, ensure_ascii=True),
+                    (
+                        "Si used_memory_context=true, cita solo recuerdos "
+                        "recuperados y describe cada cita y su mitigacion."
+                    ),
+                    "No incluyas texto fuera del JSON.",
                 ]
             ),
         ),
@@ -786,6 +1379,27 @@ def _modeler_json_template(
         else DEFAULT_MODELING_CONFIG
     )
     strategy = (
+        {
+            "strategy_type": "feature_model_fit",
+            "hypothesis": (
+                "Ajustar un score interpretable solo con baseline y calibrarlo "
+                "antes de observar la monitorizacion permite detectar cambios "
+                "persistentes sin fuga temporal."
+            ),
+            "evidence_refs": sorted(ONLINE_BLIND_REQUIRED_EVIDENCE_REFS),
+            "risk_notes": [
+                "El baseline inicial es un supuesto operativo, no ground truth oficial.",
+                "La monitorizacion no puede intervenir en ajuste ni calibracion.",
+            ],
+            "tool_names": [],
+            "optimization_targets": sorted(ONLINE_BLIND_REQUIRED_TARGETS),
+            "alert_policy": (
+                "Calibrar antes de monitorizacion y separar picos aislados de "
+                "avisos sostenidos sobre snapshots consecutivos."
+            ),
+        }
+        if uses_online_blind_view(state)
+        else
         {
             "strategy_type": "feature_model_fit",
             "hypothesis": (
@@ -839,15 +1453,15 @@ def _modeler_json_template(
             "alert_policy": "Umbral de anomalia binaria derivado de validation.",
         }
     )
-    memory_ids = [
-        item.record.memory_record_id
-        for item in ([] if memory_context is None else memory_context.items)
-    ]
     return {
         "agent_name": "modeler",
         "decision_id": f"{state.run_id}:modeler:{_modeler_turn(state):03d}",
         "rationale": "Motivo tecnico breve del modelo propuesto.",
         "confidence": 0.9,
+        "hypothesis": _modeler_hypothesis(
+            state,
+            statement=strategy["hypothesis"],
+        ).model_dump(mode="json"),
         "decision_strategy": strategy,
         "modeling_config": default_config.model_dump(mode="json"),
         "train_split": "train",
@@ -855,32 +1469,37 @@ def _modeler_json_template(
         "expected_model_path": _expected_model_path(state, default_config),
         "comparison_candidates": _modeler_comparison_candidates_template(state),
         "memory_context_id": None if memory_context is None else memory_context.context_id,
-        "used_memory_context": bool(memory_ids),
-        "memory_record_ids": memory_ids[:3],
-        "memory_usage_summary": (
-            None
-            if not memory_ids
-            else "Como influyen los recuerdos recuperados en la primera decision de modelado."
-        ),
-        "memory_record_uses": [
-            {
-                "memory_record_id": memory_id,
-                "usage": "adapted",
-                "influence_summary": (
-                    "Que aprendizaje concreto aporta este recuerdo a modelo, "
-                    "politica de alerta o guardarrail temporal."
-                ),
-                "risk_mitigation": (
-                    "Como se evita aplicar el recuerdo fuera de contexto o "
-                    "repetir un warning/caso frontera."
-                ),
-            }
-            for memory_id in memory_ids[:3]
-        ],
+        "used_memory_context": False,
+        "memory_record_ids": [],
+        "memory_usage_summary": None,
+        "memory_record_uses": [],
     }
 
 
 def _modeler_comparison_candidates_template(state: TFMStateModel) -> list[dict[str, Any]]:
+    if uses_online_blind_view(state):
+        return [
+            {
+                "alternative_id": "isolation_forest_causal_candidate",
+                "modeling_config": DEFAULT_MODELING_CONFIG.model_dump(mode="json"),
+                "rationale": (
+                    "Comparar aislamiento por arboles con los mismos splits "
+                    "causales y calibracion previa."
+                ),
+                "expected_effect": (
+                    "Contrastar persistencia y estabilidad de las alertas sin "
+                    "usar monitorizacion para elegir el umbral."
+                ),
+            },
+            {
+                "alternative_id": "one_class_svm_causal_candidate",
+                "modeling_config": DEFAULT_OCSVM_MODELING_CONFIG.model_dump(mode="json"),
+                "rationale": "Comparar una frontera no lineal ajustada al baseline.",
+                "expected_effect": (
+                    "Evaluar otra geometria manteniendo la barrera causal."
+                ),
+            },
+        ]
     if _uses_temporal_degradation_profile(state):
         return [
             {
@@ -959,27 +1578,29 @@ def _modeler_retry_json_template(
     max_attempts: int,
     memory_context: RetrievedMemoryContext | None = None,
 ) -> dict[str, Any]:
-    memory_ids = [
-        item.record.memory_record_id
-        for item in ([] if memory_context is None else memory_context.items)
-    ]
+    strategy_hypothesis = (
+        "Probar una familia soportada distinta cuando la memoria indica "
+        "que los ajustes de umbral se han estancado."
+        if _memory_suggests_model_family_retry(memory_context)
+        else "Evaluar un cambio acotado del umbral sin ignorar alternativas de familia."
+    )
     return {
         "agent_name": "modeler",
         "decision_id": f"{state.run_id}:modeler_retry:{attempt_number:03d}",
         "rationale": "Motivo tecnico para reintentar o parar.",
         "confidence": 0.85,
+        "hypothesis": _modeler_hypothesis(
+            state,
+            statement=strategy_hypothesis,
+            retry=True,
+        ).model_dump(mode="json"),
         "decision_strategy": {
             "strategy_type": (
                 "model_family_selection"
                 if _memory_suggests_model_family_retry(memory_context)
                 else "threshold_calibration"
             ),
-            "hypothesis": (
-                "Probar una familia soportada distinta cuando la memoria indica "
-                "que los ajustes de umbral se han estancado."
-                if _memory_suggests_model_family_retry(memory_context)
-                else "Evaluar un cambio acotado del umbral sin ignorar alternativas de familia."
-            ),
+            "hypothesis": strategy_hypothesis,
             "evidence_refs": ["failure_analysis"],
             "risk_notes": [
                 "No convertir el umbral en la unica palanca de decision.",
@@ -1001,27 +1622,10 @@ def _modeler_retry_json_template(
         "expected_effect": "Efecto esperado sobre recall, FPR y F1.",
         "stop_reason": None,
         "memory_context_id": None if memory_context is None else memory_context.context_id,
-        "used_memory_context": bool(memory_ids),
-        "memory_record_ids": memory_ids[:3],
-        "memory_usage_summary": (
-            None
-            if not memory_ids
-            else "Como se usa la memoria recuperada para evitar repetir errores previos."
-        ),
-        "memory_record_uses": [
-            {
-                "memory_record_id": memory_id,
-                "usage": "adapted",
-                "influence_summary": (
-                    "Que aprendizaje concreto aporta este recuerdo a la decision."
-                ),
-                "risk_mitigation": (
-                    "Como se evita repetir el fallo descrito si el recuerdo es "
-                    "un caso frontera o advertencia."
-                ),
-            }
-            for memory_id in memory_ids[:3]
-        ],
+        "used_memory_context": False,
+        "memory_record_ids": [],
+        "memory_usage_summary": None,
+        "memory_record_uses": [],
         "evidence_used": [
             "primary_metrics",
             "confusion_matrix",
@@ -1089,6 +1693,35 @@ def _retry_comparison_candidates_template(state: TFMStateModel) -> list[dict[str
 def _profile_specific_modeler_rules(state: TFMStateModel) -> list[str]:
     if not _uses_temporal_degradation_profile(state):
         return []
+    if uses_online_blind_view(state):
+        return [
+            (
+                "- Esta es una decision online_blind: usa solo baseline train y "
+                "calibracion validation; test/monitoring permanece oculto."
+            ),
+            (
+                "- No cites ni solicites temporal_health_lookup, "
+                "degradation_metrics_lookup, temporal_model_readiness_assessor "
+                "o threshold_analysis: dependen de evidencia held-out o "
+                "retrospectiva en este punto."
+            ),
+            (
+                "- No menciones resultados de fallo, lead time, relative_life, "
+                "time_to_failure ni metricas de clasificacion sin ground truth."
+            ),
+            (
+                "- optimization_targets debe contener exactamente las metas "
+                "causales declaradas en la plantilla: calibracion de falsas "
+                "alarmas, persistencia, estabilidad y prevencion de fuga."
+            ),
+            (
+                "- evidence_refs debe citar procedencia oficial, label_source "
+                "none, la politica v2, la particion causal y monitoring held-out."
+            ),
+            (
+                "- alert_policy debe distinguir pico aislado y aviso sostenido."
+            ),
+        ]
     return [
         (
             "- Para supervision_profile=run_to_failure_degradation, la "
@@ -1132,6 +1765,8 @@ def _profile_specific_modeler_rules(state: TFMStateModel) -> list[str]:
 
 
 def _supported_models_text(state: TFMStateModel) -> str:
+    if uses_online_blind_view(state):
+        return "isolation_forest, one_class_svm o pca_reconstruction_error"
     if _uses_temporal_degradation_profile(state):
         return (
             "isolation_forest, one_class_svm, pca_reconstruction_error "
@@ -1141,7 +1776,7 @@ def _supported_models_text(state: TFMStateModel) -> str:
 
 
 def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
-    return {
+    payload = {
         "thread_id": state.thread_id,
         "run_id": state.run_id,
         "current_stage": state.current_stage,
@@ -1167,6 +1802,23 @@ def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
         ),
         "artifact_types": [artifact.artifact_type for artifact in state.artifacts],
     }
+    if not uses_online_blind_view(state):
+        return payload
+
+    profile = state.dataset_profile
+    payload["dataset_profile"] = (
+        None
+        if profile is None
+        else {
+            "dataset_name": profile.dataset_name,
+            "channels": profile.channels,
+            "sample_rates_hz": profile.sample_rates_hz,
+        }
+    )
+    payload["evidence_view"] = "online_blind"
+    payload = sanitize_online_blind_payload(payload)
+    assert_online_blind_payload(payload)
+    return payload
 
 
 def _features_path_for_state(state: TFMStateModel) -> str | None:
@@ -1178,7 +1830,11 @@ def _features_path_for_state(state: TFMStateModel) -> str | None:
     return None
 
 
-def _features_summary_for_llm(features_path: str | None) -> dict[str, Any]:
+def _features_summary_for_llm(
+    features_path: str | None,
+    *,
+    online_blind: bool = False,
+) -> dict[str, Any]:
     if not features_path:
         return {"available": False}
     path = Path(features_path)
@@ -1193,37 +1849,46 @@ def _features_summary_for_llm(features_path: str | None) -> dict[str, Any]:
             label_counts: Counter[str] = Counter()
             sample_rows: list[dict[str, str]] = []
             n_rows = 0
+            held_out_monitoring_present = False
             for row in reader:
-                n_rows += 1
                 split = row.get("split")
+                if online_blind and split == "test":
+                    held_out_monitoring_present = True
+                    continue
+                n_rows += 1
                 label = row.get("label")
                 if split:
                     split_counts[split] += 1
-                if label:
+                if label and not online_blind:
                     label_counts[label] += 1
                 if len(sample_rows) < 3:
+                    allowed_sample_keys = {
+                        "window_id",
+                        "split",
+                        "run_id",
+                        "time_since_start_seconds",
+                    }
+                    if not online_blind:
+                        allowed_sample_keys.update(
+                            {
+                                "label",
+                                "target",
+                                "relative_life",
+                                "time_to_failure_seconds",
+                            }
+                        )
                     sample_rows.append(
                         {
                             key: value
                             for key, value in row.items()
-                            if key
-                            in {
-                                "window_id",
-                                "split",
-                                "label",
-                                "target",
-                                "run_id",
-                                "relative_life",
-                                "time_to_failure_seconds",
-                                "time_since_start_seconds",
-                            }
+                            if key in allowed_sample_keys
                         }
                     )
     except (OSError, csv.Error) as exc:
         return {"available": False, "path": features_path, "error": str(exc)}
 
     feature_columns = [column for column in columns if column not in METADATA_COLUMNS]
-    return {
+    payload = {
         "available": True,
         "path": features_path,
         "n_rows": n_rows,
@@ -1233,9 +1898,20 @@ def _features_summary_for_llm(features_path: str | None) -> dict[str, Any]:
         "label_counts": dict(label_counts),
         "sample_rows": sample_rows,
     }
+    if online_blind:
+        payload["evidence_view"] = "online_blind"
+        payload["held_out_monitoring_present"] = held_out_monitoring_present
+        payload = sanitize_online_blind_payload(payload)
+        assert_online_blind_payload(payload)
+    return payload
 
 
-def _modeler_tool_catalog_for_llm() -> list[dict[str, Any]]:
+def _modeler_tool_catalog_for_llm(state: TFMStateModel) -> list[dict[str, Any]]:
+    allowed_tool_names = (
+        {"evidence_lookup"}
+        if uses_online_blind_view(state)
+        else None
+    )
     return [
         {
             "tool_name": spec.tool_name,
@@ -1244,43 +1920,8 @@ def _modeler_tool_catalog_for_llm() -> list[dict[str, Any]]:
             "input_schema": spec.input_schema,
         }
         for spec in agent_tool_catalog(agent_name="modeler")
+        if allowed_tool_names is None or spec.tool_name in allowed_tool_names
     ]
-
-
-def _memory_context_for_llm(
-    memory_context: RetrievedMemoryContext | None,
-) -> dict[str, Any]:
-    if memory_context is None:
-        return {
-            "available": False,
-            "reason": "memory retrieval disabled for this modeler decision",
-        }
-    return {
-        "available": True,
-        "context_id": memory_context.context_id,
-        "query_id": memory_context.query.query_id,
-        "retrieval_backend": memory_context.retrieval_backend,
-        "embedding_model": memory_context.embedding_model,
-        "items": [
-            {
-                "rank": item.rank,
-                "similarity": round(item.similarity, 6),
-                "retrieval_use": item.retrieval_use,
-                "memory_record_id": item.record.memory_record_id,
-                "source_type": item.record.source_type,
-                "memory_role": item.record.memory_role,
-                "human_verdict": item.record.human_verdict,
-                "outcome": item.record.outcome,
-                "run_id": item.record.run_id,
-                "source_path": item.record.source_path,
-                "summary": item.record.summary,
-                "content_excerpt": item.record.content[:900],
-                "metrics": item.record.metrics,
-                "tags": item.record.tags[:12],
-            }
-            for item in memory_context.items
-        ],
-    }
 
 
 def _memory_modeling_guidance_for_llm(
@@ -1362,12 +2003,110 @@ def _memory_retry_guidance_for_llm(
     }
 
 
+def _modeler_hypothesis(
+    state: TFMStateModel,
+    *,
+    statement: str | None = None,
+    retry: bool = False,
+) -> AgentHypothesis:
+    online_blind = uses_online_blind_view(state)
+    temporal = _uses_temporal_degradation_profile(state)
+    if statement is None:
+        if online_blind:
+            statement = (
+                "Un score ajustado solo sobre baseline y calibrado antes de "
+                "monitoring mostrara cambios algoritmicos persistentes sin fuga temporal."
+            )
+        elif temporal:
+            statement = (
+                "La familia elegida producira un indicador temporal mas estable y "
+                "util que las alternativas bajo las metricas run-to-failure."
+            )
+        else:
+            statement = (
+                "La familia y configuracion elegidas mantendran el compromiso "
+                "esperado entre deteccion y falsas alarmas en datos no usados al ajustar."
+            )
+    if online_blind:
+        cutoff = (
+            "Features de baseline train y calibration validation; monitoring, final "
+            "registrado y analisis retrospectivo permanecen ocultos."
+        )
+        expected = (
+            "El score permanece estable en baseline y genera cambios sostenidos, no "
+            "solo picos aislados, al aplicarse sobre monitoring retenido."
+        )
+        falsifier = (
+            "El baseline es inestable, dominan alertas aisladas, el resultado depende "
+            "extremadamente del umbral o se uso monitoring para ajustar o seleccionar."
+        )
+        refs = sorted(ONLINE_BLIND_REQUIRED_EVIDENCE_REFS)
+        risks = [
+            "Una alerta algoritmica persistente no confirma fallo fisico, inicio real de degradacion ni RUL."
+        ]
+    elif temporal:
+        cutoff = (
+            "Features y particiones temporales disponibles antes de ejecutar la "
+            "configuracion propuesta."
+        )
+        expected = (
+            "La trayectoria del score muestra persistencia y tendencia utiles con "
+            "falsas alarmas nominales controladas frente a las alternativas."
+        )
+        falsifier = (
+            "No aparece cambio persistente, el score es inestable en nominal o una "
+            "alternativa soportada domina bajo el mismo protocolo."
+        )
+        refs = ["artifact:features", "policy:temporal_split", "metric:temporal_targets"]
+        risks = [
+            "Etiquetas proxy o sinteticas no constituyen ground truth fisico oficial."
+        ]
+    else:
+        cutoff = (
+            "Features de train y validation; test permanece sellado durante seleccion "
+            "y calibracion."
+        )
+        expected = (
+            "La evaluacion retenida satisface el compromiso declarado de recall, "
+            "false positive rate y estabilidad frente a las familias comparadas."
+        )
+        falsifier = (
+            "Incumple los umbrales operativos, generaliza peor que una alternativa o "
+            "requiere informacion del test para sostener la seleccion."
+        )
+        refs = ["artifact:features", "split:train", "split:validation"]
+        risks = [
+            "Un buen resultado local no demuestra generalizacion a otras condiciones o datasets."
+        ]
+    return AgentHypothesis(
+        kind="model_performance",
+        statement=statement,
+        scope=(
+            f"Dataset {state.project_context.dataset}; "
+            f"{'reintento tras fallo previo' if retry else 'seleccion de modelo'}; "
+            f"perfil {state.project_context.supervision_profile}."
+        ),
+        evidence_cutoff=cutoff,
+        expected_observation=expected,
+        falsification_criterion=falsifier,
+        evidence_refs=refs,
+        risk_notes=risks,
+        assumptions=[
+            "La accion solo queda contrastada tras ejecutar y enlazar sus metricas posteriores."
+        ],
+    )
+
+
 def _validate_modeling_decision_bounds(
     state: TFMStateModel,
     decision: ModelingDecision,
     *,
     memory_context: RetrievedMemoryContext | None = None,
 ) -> None:
+    require_agent_hypothesis(
+        decision,
+        allowed_kinds={"model_performance"},
+    )
     _validate_single_modeling_decision(state, decision)
     _validate_modeler_memory_usage(decision, memory_context=memory_context)
     for candidate in decision.comparison_candidates:
@@ -1442,7 +2181,7 @@ def _validate_single_modeling_decision(
             "as the primary strategy"
         )
     if _uses_temporal_degradation_profile(state):
-        _validate_run_to_failure_modeling_strategy(decision)
+        _validate_run_to_failure_modeling_strategy(state, decision)
     expected_model_path = _expected_model_path(state, config)
     if decision.expected_model_path != expected_model_path:
         raise ValueError(f"expected_model_path must be {expected_model_path}")
@@ -1455,6 +2194,10 @@ def _validate_modeling_retry_decision_bounds(
     *,
     memory_context: RetrievedMemoryContext | None = None,
 ) -> None:
+    require_agent_hypothesis(
+        decision,
+        allowed_kinds={"model_performance"},
+    )
     if decision.agent_name != "modeler":
         raise ValueError("retry decision must come from modeler")
     if decision.memory_context_id is not None:
@@ -1506,7 +2249,13 @@ def _validate_modeling_retry_decision_bounds(
         _validate_supported_modeling_config(candidate.modeling_config)
 
 
-def _validate_run_to_failure_modeling_strategy(decision: ModelingDecision) -> None:
+def _validate_run_to_failure_modeling_strategy(
+    state: TFMStateModel,
+    decision: ModelingDecision,
+) -> None:
+    if uses_online_blind_view(state):
+        _validate_online_blind_modeling_strategy(decision)
+        return
     strategy = decision.decision_strategy
     missing_tools = sorted(RUN_TO_FAILURE_REQUIRED_TOOLS - set(strategy.tool_names))
     if missing_tools:
@@ -1574,12 +2323,86 @@ def _validate_run_to_failure_modeling_strategy(decision: ModelingDecision) -> No
             raise ValueError("advanced temporal models must cite readiness refs")
 
 
+def _validate_online_blind_modeling_strategy(decision: ModelingDecision) -> None:
+    strategy = decision.decision_strategy
+    assert_online_blind_payload(decision.hypothesis.model_dump(mode="json"))
+    retrospective_tools = sorted(
+        set(strategy.tool_names) & ONLINE_BLIND_RETROSPECTIVE_TOOLS
+    )
+    if retrospective_tools:
+        raise ValueError(
+            "online_blind modeler cannot use retrospective tools: "
+            + ", ".join(retrospective_tools)
+        )
+
+    evidence_refs = set(strategy.evidence_refs)
+    hypothesis_evidence_refs = set(decision.hypothesis.evidence_refs)
+    extra_hypothesis_refs = (
+        hypothesis_evidence_refs - ONLINE_BLIND_REQUIRED_EVIDENCE_REFS
+    )
+    if extra_hypothesis_refs:
+        raise ValueError(
+            "online_blind hypothesis contains unsupported evidence refs: "
+            + ", ".join(sorted(extra_hypothesis_refs))
+        )
+    extra_evidence_refs = evidence_refs - ONLINE_BLIND_REQUIRED_EVIDENCE_REFS
+    declared_evidence = " ".join(extra_evidence_refs).lower()
+    declared_targets = " ".join(strategy.optimization_targets).lower()
+    forbidden_terms = sorted(
+        term
+        for term in ONLINE_BLIND_RETROSPECTIVE_TERMS
+        if term in declared_evidence or term in declared_targets
+    )
+    if forbidden_terms:
+        raise ValueError(
+            "online_blind strategy contains retrospective evidence or targets: "
+            + ", ".join(forbidden_terms)
+        )
+
+    missing_refs = sorted(ONLINE_BLIND_REQUIRED_EVIDENCE_REFS - evidence_refs)
+    if missing_refs:
+        raise ValueError(
+            "online_blind strategy missing causal evidence refs: "
+            + ", ".join(missing_refs)
+        )
+
+    missing_targets = sorted(
+        ONLINE_BLIND_REQUIRED_TARGETS - set(strategy.optimization_targets)
+    )
+    if missing_targets:
+        raise ValueError(
+            "online_blind strategy missing causal optimization targets: "
+            + ", ".join(missing_targets)
+        )
+    extra_targets = sorted(
+        set(strategy.optimization_targets) - ONLINE_BLIND_REQUIRED_TARGETS
+    )
+    if extra_targets:
+        raise ValueError(
+            "online_blind strategy contains undeclared optimization targets: "
+            + ", ".join(extra_targets)
+        )
+
+    if strategy.alert_policy is None:
+        raise ValueError("online_blind strategy requires alert_policy")
+    alert_policy = strategy.alert_policy.lower()
+    if "sosten" not in alert_policy and "persistent" not in alert_policy:
+        raise ValueError("online_blind alert_policy must address sustained alerts")
+    if "pico" not in alert_policy and "spike" not in alert_policy:
+        raise ValueError("online_blind alert_policy must address isolated spikes")
+
+
 def _validate_advanced_model_scope(
     state: TFMStateModel,
     config: ModelingConfig,
 ) -> None:
     if config.model_name not in ADVANCED_TEMPORAL_MODEL_NAMES:
         return
+    if uses_online_blind_view(state):
+        raise ValueError(
+            "advanced temporal models require a separate causal readiness "
+            "assessment before the official online_blind benchmark"
+        )
     if not _uses_temporal_degradation_profile(state):
         raise ValueError("advanced temporal models are only supported for run-to-failure")
     _validate_autoencoder_dense_decision_hyperparameters(config.hyperparameters)

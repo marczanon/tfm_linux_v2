@@ -54,12 +54,505 @@ export interface RunSnapshot {
   evidence_pack_path?: string | null;
   evidence_pack_markdown_path?: string | null;
   audit_report_path?: string | null;
+  runtime_events_path?: string | null;
   summary_path: string;
   metadata_path: string;
   created_at: string;
   n_artifacts: number;
   n_decisions: number;
   n_errors: number;
+}
+
+export type ReplayMode = "manual" | "accelerated";
+export type ReplayExperimentMode =
+  | "frozen_benchmark"
+  | "adaptive_replay_exploratory";
+export type ReplaySessionStatus =
+  | "ready"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed";
+export type MonitoringAnalysisStatus =
+  | "modeled"
+  | "telemetry_only"
+  | "unavailable";
+export type AgentActivationPolicyKind = "P0" | "P1" | "P2" | "P3";
+export type MonitoringAgentRole =
+  | "supervisor"
+  | "cleaner"
+  | "structurer"
+  | "modeler"
+  | "evaluator"
+  | "report_writer"
+  | "report_verifier";
+export type MonitoringTriggerType =
+  | "preflight"
+  | "periodic_review"
+  | "persistent_alert"
+  | "state_transition"
+  | "continuity_gap"
+  | "session_close"
+  | "manual";
+export type MonitoringTriggerLifecycle =
+  | "emitted"
+  | "suppressed"
+  | "coalesced"
+  | "dispatched"
+  | "running"
+  | "resolved"
+  | "failed";
+export type MonitoringChildRunStatus =
+  | "dispatched"
+  | "running"
+  | "resolved"
+  | "failed"
+  | "interrupted";
+export type MonitoringReviewDispatchOutcome =
+  | "dispatched"
+  | "idempotent_replay"
+  | "revision_conflict"
+  | "rejected";
+export type MonitoringTriggerSuppressionReason =
+  | "cooldown"
+  | "budget"
+  | "not_rearmed"
+  | "episode_already_covered";
+export type MonitoringTriggerReasonCode =
+  | "preflight_review"
+  | "periodic_schedule"
+  | "persistent_confirmation"
+  | "health_state_escalation"
+  | "continuity_gap"
+  | "session_completed"
+  | "manual_request";
+export type TriggerRearmPolicy =
+  | "after_cooldown"
+  | "after_recovery"
+  | "once_per_session"
+  | "manual";
+export type ReplayStepOutcome =
+  | "applied"
+  | "idempotent_replay"
+  | "revision_conflict"
+  | "rejected";
+
+export interface MonitoringReplaySourceSummary {
+  scenario_id: string;
+  title: string;
+  dataset_id: string;
+  trajectory_id: string;
+  source_label: string;
+  available: boolean;
+  unavailable_reason: string | null;
+  total_monitoring_ticks: number;
+  modeled_channel_id: string;
+  channel_ids: string[];
+  available_activation_policy_kinds: AgentActivationPolicyKind[];
+}
+
+export interface ActivePolicyRefs {
+  scoring_version: string;
+  activation_version: string;
+}
+
+export interface ReplayAssetSpec {
+  asset_id: string;
+  channel_id: string;
+  analysis_status: MonitoringAnalysisStatus;
+}
+
+export interface ReplaySessionConfig {
+  schema_version: "monitoring_replay_session_config_v1";
+  session_id: string;
+  pilot_id: string;
+  dataset_id: string;
+  trajectory_id: string;
+  manifest_ref: string;
+  manifest_sha256: string;
+  source_fingerprint_sha256: string;
+  bootstrap_checkpoints_sha256: string;
+  partition_policy_id: string;
+  asset_ids: string[];
+  asset_specs: ReplayAssetSpec[];
+  activation_policy_kind: AgentActivationPolicyKind;
+  experiment_mode: ReplayExperimentMode;
+  initial_mode: ReplayMode;
+  initial_speed_multiplier: number;
+  initial_policy_refs: ActivePolicyRefs;
+  source_timezone: string | null;
+  created_at: string;
+}
+
+export interface ReplayAssetCheckpoint {
+  asset_id: string;
+  analysis_status: MonitoringAnalysisStatus;
+  segment_id: number;
+  alert_persistence_count: number;
+  recovery_persistence_count: number;
+  raw_health_history: number[];
+  smoothed_health_history: number[];
+  last_source_time: string | null;
+  last_frame_id: string | null;
+  last_health_state: HealthState | null;
+  scoring_version: string | null;
+}
+
+export interface ReplayActivationRuleCheckpoint {
+  trigger_type: MonitoringTriggerType;
+  last_effective_trigger_id: string;
+  last_effective_source_time: string;
+}
+
+export interface ReplayActivationCheckpoint {
+  activation_version: string;
+  next_event_sequence: number;
+  variable_run_slots_reserved: number;
+  persistent_alert_armed: boolean;
+  alert_episode_start_cursor: number | null;
+  alert_episode_start_snapshot_id: string | null;
+  alert_episode_id: string | null;
+  alert_episode_handled_trigger_id: string | null;
+  last_evaluated_cursor: number | null;
+  last_evaluated_tick_id: string | null;
+  rule_checkpoints: ReplayActivationRuleCheckpoint[];
+}
+
+export interface ReplaySessionState {
+  schema_version: "monitoring_replay_session_state_v1";
+  session_id: string;
+  config_sha256: string;
+  status: ReplaySessionStatus;
+  execution_cursor: number | null;
+  sequence: number;
+  revision: number;
+  mode: ReplayMode;
+  speed_multiplier: number;
+  active_policy_refs: ActivePolicyRefs;
+  activation_checkpoint: ReplayActivationCheckpoint | null;
+  asset_checkpoints: ReplayAssetCheckpoint[];
+  last_committed_tick_id: string | null;
+  last_trigger_id: string | null;
+  child_run_ids: string[];
+  active_child_run_id: string | null;
+  last_command_id: string | null;
+  failure_reason: string | null;
+  updated_at: string;
+}
+
+export interface MonitoringTelemetrySummary {
+  signal_rms: number;
+  signal_peak_abs: number;
+  n_samples: number;
+}
+
+interface MonitoringFrameBase {
+  schema_version: "monitoring_frame_v1";
+  frame_id: string;
+  tick_id: string;
+  asset_id: string;
+  channel_id: string;
+  interval_seconds: number | null;
+  gap_detected: boolean;
+  evidence_refs: string[];
+}
+
+export interface ModeledMonitoringFrame extends MonitoringFrameBase {
+  analysis_status: "modeled";
+  segment_id: number;
+  telemetry: MonitoringTelemetrySummary | null;
+  score: number;
+  threshold: number;
+  predicted_anomaly: boolean;
+  score_ratio: number;
+  health_index: number;
+  risk_index: number;
+  health_state: HealthState;
+  scoring_version: string;
+  unavailable_reason: null;
+}
+
+export interface TelemetryOnlyMonitoringFrame extends MonitoringFrameBase {
+  analysis_status: "telemetry_only";
+  segment_id: number | null;
+  telemetry: MonitoringTelemetrySummary;
+  score: null;
+  threshold: null;
+  predicted_anomaly: null;
+  score_ratio: null;
+  health_index: null;
+  risk_index: null;
+  health_state: null;
+  scoring_version: null;
+  unavailable_reason: null;
+}
+
+export interface UnavailableMonitoringFrame extends MonitoringFrameBase {
+  analysis_status: "unavailable";
+  segment_id: number | null;
+  telemetry: null;
+  score: null;
+  threshold: null;
+  predicted_anomaly: null;
+  score_ratio: null;
+  health_index: null;
+  risk_index: null;
+  health_state: null;
+  scoring_version: null;
+  unavailable_reason: string;
+}
+
+export type MonitoringFrame =
+  | ModeledMonitoringFrame
+  | TelemetryOnlyMonitoringFrame
+  | UnavailableMonitoringFrame;
+
+export interface ReplayTick {
+  schema_version: "monitoring_replay_tick_v1";
+  commit_status: "committed";
+  tick_id: string;
+  session_id: string;
+  cursor: number;
+  sequence: number;
+  snapshot_id: string;
+  source_time: string;
+  input_record_hash: string;
+  active_policy_refs: ActivePolicyRefs;
+  frames: MonitoringFrame[];
+  committed_at: string;
+}
+
+export interface MonitoringTriggerEvent {
+  schema_version: "monitoring_trigger_event_v1";
+  event_id: string;
+  trigger_id: string;
+  session_id: string;
+  sequence: number;
+  lifecycle_revision: number;
+  previous_event_id: string | null;
+  trigger_type: MonitoringTriggerType;
+  lifecycle_status: MonitoringTriggerLifecycle;
+  priority: number;
+  reason_code: MonitoringTriggerReasonCode;
+  reason: string;
+  episode_id: string | null;
+  asset_id: string | null;
+  snapshot_start_id: string | null;
+  snapshot_end_id: string | null;
+  condition_start_cursor: number | null;
+  cutoff_cursor: number | null;
+  cutoff_source_time: string | null;
+  previous_state: HealthState | null;
+  new_state: HealthState | null;
+  cooldown_source_seconds: number;
+  coalescing_group: string | null;
+  rearm_policy: TriggerRearmPolicy;
+  requested_roles: MonitoringAgentRole[];
+  counts_toward_variable_budget: boolean;
+  budget_reservation_index: number | null;
+  dedupe_key: string;
+  activation_version: string;
+  activation_policy_sha256: string;
+  origin_tick_id: string | null;
+  frame_ids: string[];
+  evidence_refs: string[];
+  suppressed_by_trigger_id: string | null;
+  suppression_reason: MonitoringTriggerSuppressionReason | null;
+  coalesced_into_trigger_id: string | null;
+  child_run_id: string | null;
+  recorded_at: string;
+}
+
+export interface MonitoringChildRunAttempt {
+  schema_version: "monitoring_child_run_attempt_v1";
+  session_id: string;
+  trigger_id: string;
+  trigger_event_id: string;
+  child_run_id: string;
+  job_id: string;
+  run_id: string;
+  attempt_no: number;
+  child_revision: number;
+  lifecycle_status: MonitoringChildRunStatus;
+  request_ref: string;
+  request_sha256: string;
+  causal_view_ref: string;
+  causal_view_sha256: string;
+  result_ref: string | null;
+  result_sha256: string | null;
+  dispatched_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  error: string | null;
+}
+
+export interface MonitoringReviewDispatchReceipt {
+  schema_version: "monitoring_review_dispatch_receipt_v1";
+  receipt_id: string;
+  receipt_sha256: string;
+  command_id: string;
+  command_sha256: string;
+  session_id: string;
+  trigger_id: string;
+  trigger_event_id: string;
+  child_run_id: string;
+  job_id: string;
+  run_id: string;
+  attempt_no: number;
+  expected_child_revision: number;
+  child_revision: number;
+  request_ref: string;
+  request_sha256: string;
+  causal_view_ref: string;
+  causal_view_sha256: string;
+  outcome: MonitoringReviewDispatchOutcome;
+  attempt: MonitoringChildRunAttempt | null;
+  error: string | null;
+  recorded_at: string;
+}
+
+export interface ReplayStepReceipt {
+  schema_version: "monitoring_replay_step_receipt_v1";
+  command_id: string;
+  session_id: string;
+  expected_revision: number;
+  outcome: ReplayStepOutcome;
+  accepted_revision: number;
+  tick_id: string | null;
+  reason: string | null;
+  recorded_at: string;
+}
+
+export interface MonitoringSessionCreateRequest {
+  scenario_id: string;
+  session_id?: string;
+  activation_policy_kind?: AgentActivationPolicyKind;
+  experiment_mode?: ReplayExperimentMode;
+}
+
+export interface MonitoringStepRequest {
+  command_id: string;
+  expected_revision: number;
+}
+
+export interface MonitoringReviewDispatchRequest {
+  command_id: string;
+  expected_child_revision: number;
+}
+
+export interface MonitoringSessionView {
+  source: MonitoringReplaySourceSummary;
+  config: ReplaySessionConfig;
+  state: ReplaySessionState;
+  total_monitoring_ticks: number;
+  ticks: ReplayTick[];
+  triggers: MonitoringTriggerEvent[];
+  child_revision: number;
+  child_runs: MonitoringChildRunAttempt[];
+  active_child_run_id: string | null;
+}
+
+export interface MonitoringStepResponse {
+  receipt: ReplayStepReceipt;
+  state: ReplaySessionState;
+  tick: ReplayTick | null;
+  triggers: MonitoringTriggerEvent[];
+}
+
+export interface MonitoringReviewDispatchResponse {
+  session: MonitoringSessionView;
+  attempt: MonitoringChildRunAttempt | null;
+  receipt: MonitoringReviewDispatchReceipt;
+}
+
+export type MonitoringReviewGateOutcome =
+  | "first_pass"
+  | "llm_repaired"
+  | "fallback"
+  | "non_agentic"
+  | "error"
+  | "missing";
+export type MonitoringReviewRecommendedAction =
+  | "maintain_policy"
+  | "intensify_observation"
+  | "request_human_review"
+  | "pause_replay"
+  | "insufficient_evidence";
+export type MonitoringReviewGateCoverageKind =
+  | "hypothesis_structure"
+  | "causal_grounding"
+  | "trigger_decision_result_binding";
+
+export interface MonitoringReviewGateOutcomeCounts {
+  expected_count: number;
+  observed_count: number;
+  first_pass_count: number;
+  repaired_count: number;
+  fallback_count: number;
+  non_agentic_count: number;
+  error_count: number;
+  missing_count: number;
+}
+
+export interface MonitoringReviewGateRoleSummary {
+  agent_name: MonitoringAgentRole;
+  outcomes: MonitoringReviewGateOutcomeCounts;
+}
+
+export interface MonitoringReviewGateRoleResult {
+  agent_name: MonitoringAgentRole;
+  outcome: MonitoringReviewGateOutcome;
+  validation_status: "validated" | "repaired" | "fallback_applied" | "unknown" | null;
+  recommended_action: MonitoringReviewRecommendedAction | null;
+}
+
+export interface MonitoringReviewGateCase {
+  case_id: string;
+  context_id: string;
+  context_ordinal: number;
+  repetition: number;
+  trigger_type: MonitoringTriggerType;
+  reason_code: MonitoringTriggerReasonCode;
+  condition_start_cursor: number;
+  cutoff_cursor: number;
+  session_id: string | null;
+  trigger_id: string | null;
+  child_run_id: string | null;
+  child_lifecycle_status: MonitoringChildRunStatus | null;
+  bridge_lifecycle_status: MonitoringTriggerLifecycle | null;
+  observed_role_count: number;
+  expected_role_count: number;
+  role_results: MonitoringReviewGateRoleResult[];
+}
+
+export interface MonitoringReviewGateCoverage {
+  kind: MonitoringReviewGateCoverageKind;
+  passed_count: number;
+  expected_count: number;
+}
+
+export interface MonitoringReviewGateView {
+  schema_version: "monitoring_review_gate_view_v1";
+  publication_status: "published";
+  gate_id: string;
+  verdict: "passed" | "blocked";
+  blockers: string[];
+  completed_at: string;
+  provider: string;
+  model: string;
+  memory_mode: "off";
+  policy_application_status: "not_applied";
+  complete_repetition_count: number;
+  expected_repetition_count: number;
+  complete_context_count: number;
+  expected_context_count: number;
+  resolved_child_run_count: number;
+  expected_child_run_count: number;
+  outcomes: MonitoringReviewGateOutcomeCounts;
+  roles: MonitoringReviewGateRoleSummary[];
+  cases: MonitoringReviewGateCase[];
+  coverage: MonitoringReviewGateCoverage[];
 }
 
 export interface RunFilters {
@@ -93,6 +586,9 @@ export interface RunComparisonRow {
   false_positive_rate: number | null;
   degradation_available: boolean | null;
   degradation_n_runs: number | null;
+  degradation_persistent_alert_run_rate: number | null;
+  degradation_mean_first_persistent_alert_time_to_trajectory_end: number | null;
+  degradation_mean_pre_monitoring_alert_rate: number | null;
   degradation_detected_before_failure_rate: number | null;
   degradation_mean_lead_time_to_failure: number | null;
   degradation_mean_false_alarm_rate_nominal: number | null;
@@ -237,6 +733,13 @@ export interface AgentOperationalRecommendation {
   title: string;
   summary: string;
   confidence: number | null;
+  decision_origin:
+    | "llm"
+    | "deterministic"
+    | "guardrail_fallback"
+    | "protocol_restricted"
+    | "unknown";
+  origin_evidence: string | null;
   next_action: string | null;
   operational_assessment: string | null;
   evidence_refs: string[];
@@ -277,6 +780,7 @@ export type AgentRuntimeEventKind =
   | "supervisor_decision"
   | "agent_decision"
   | "memory_retrieval"
+  | "policy_proposal"
   | "executor_result"
   | "error";
 
@@ -285,6 +789,7 @@ export type AgentRuntimeEventSource =
   | "supervisor"
   | "agent"
   | "memory"
+  | "system"
   | "executor";
 
 export interface AgentRuntimeEvent {
@@ -357,6 +862,7 @@ export interface MemoryRecordSummary {
   run_id: string | null;
   decision_id: string | null;
   dataset: string | null;
+  data_provenance: "official" | "synthetic" | "unknown";
   source_agent_name: string | null;
   outcome: string | null;
   human_verdict: string | null;
@@ -367,6 +873,48 @@ export interface MemoryRecordSummary {
   source_path: string | null;
   tags: string[];
   created_at: string;
+}
+
+export interface MemoryReadinessBlocker {
+  code: string;
+  message: string;
+}
+
+export interface MemoryStatusResponse {
+  backend: {
+    configured_backend: string;
+    backend_name: string;
+    operational: boolean;
+    embedding_model: string | null;
+    error_type: string | null;
+    diagnostic: string | null;
+  };
+  corpus: {
+    available: boolean;
+    total_records: number;
+    reusable_records: number;
+    official_records: number;
+    official_reusable_records: number;
+    shared_methodology_records: number;
+    shared_methodology_reusable_records: number;
+    corpus_fingerprint: string | null;
+    frozen_manifest_available: boolean;
+    reusable_dataset_coverage: string[];
+    reusable_agent_coverage: AgentMemoryTarget[];
+    n_reusable_datasets: number;
+    n_reusable_agents: number;
+    candidate_queue_available: boolean;
+    pending_candidates: number;
+    candidate_queue_error_type: string | null;
+    candidate_queue_diagnostic: string | null;
+  };
+  scientific_readiness: {
+    ready_for_memory_effect_benchmark: boolean;
+    minimum_reusable_datasets: number;
+    minimum_reusable_agents: number;
+    blockers: MemoryReadinessBlocker[];
+  };
+  checked_at: string;
 }
 
 export interface ReasoningMemoryRecord extends MemoryRecordSummary {

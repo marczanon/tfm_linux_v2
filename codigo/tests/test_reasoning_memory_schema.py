@@ -4,6 +4,7 @@ import unittest
 from pydantic import ValidationError
 
 from codigo.app.schemas.reasoning import (
+    AgentHypothesis,
     AgentMemoryQuery,
     DecisionEpisode,
     DecisionOption,
@@ -16,6 +17,26 @@ from codigo.app.schemas.reasoning import (
 
 
 class ReasoningMemorySchemaTests(unittest.TestCase):
+    def test_legacy_memory_payloads_default_to_unknown_provenance(self):
+        record_payload = _memory_record(
+            memory_role="boundary_case",
+            outcome="partially_supported",
+            human_verdict="partially_correct",
+            reusable_as_context=True,
+        ).model_dump(mode="json")
+        record_payload.pop("data_provenance")
+        query_payload = {
+            "query_id": "legacy-query",
+            "target_agent": "modeler",
+            "query_text": "legacy memory without provenance",
+        }
+
+        record = ReasoningMemoryRecord.model_validate(record_payload)
+        query = AgentMemoryQuery.model_validate(query_payload)
+
+        self.assertEqual(record.data_provenance, "unknown")
+        self.assertEqual(query.data_provenance, "unknown")
+
     def test_human_review_mode_is_off_by_default(self):
         settings = HumanReviewSettings()
 
@@ -205,6 +226,7 @@ class ReasoningMemorySchemaTests(unittest.TestCase):
         )
 
         self.assertEqual(episode.options_considered[0].parameters["threshold_quantile"], 0.95)
+        self.assertIsNone(episode.hypothesis)
 
         with self.assertRaises(ValidationError):
             DecisionEpisode(
@@ -219,6 +241,39 @@ class ReasoningMemorySchemaTests(unittest.TestCase):
                 outcome="overcorrected",
                 lesson_learned="The threshold movement was too large.",
             )
+
+    def test_decision_episode_preserves_common_hypothesis_without_assessing_it(self):
+        hypothesis = AgentHypothesis(
+            kind="model_performance",
+            statement="A conservative threshold should reduce held-out false alarms.",
+            scope="Current dataset and held-out split.",
+            evidence_cutoff="Only training and validation evidence is available.",
+            expected_observation="Held-out FPR decreases without collapsing recall.",
+            falsification_criterion="Held-out FPR rises or recall collapses.",
+            evidence_refs=["metric:false_positive_rate", "metric:recall"],
+            risk_notes=["Threshold selection can overfit validation."],
+            assumptions=["The split is leakage-free."],
+        )
+        episode = DecisionEpisode(
+            episode_id="episode-hypothesis-001",
+            run_id="run-hypothesis-001",
+            decision_id="modeler-decision-hypothesis-001",
+            agent_name="modeler",
+            target_agent="modeler",
+            decision_type="modeling",
+            context_summary="Model choice made before held-out evaluation.",
+            hypothesis=hypothesis,
+            chosen_action="Fit the declared model and threshold.",
+            execution_result_summary="The executor wrote its artifacts successfully.",
+            outcome="inconclusive",
+            lesson_learned="Held-out contrast remains pending.",
+        )
+
+        restored = DecisionEpisode.model_validate(episode.model_dump(mode="json"))
+
+        self.assertEqual(restored.hypothesis, hypothesis)
+        self.assertEqual(restored.outcome, "inconclusive")
+        self.assertNotIn("assessment", restored.model_dump(mode="json"))
 
     def test_memory_candidate_requires_reuse_guidance(self):
         candidate = MemoryCandidate(

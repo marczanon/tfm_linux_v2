@@ -25,6 +25,7 @@ class StateSchemaTests(unittest.TestCase):
         self.assertEqual(validated.current_stage, "dataset_manifest")
         self.assertEqual(validated.next_node, "manifest_executor")
         self.assertEqual(validated.project_context.dataset, "cwru_bearing")
+        self.assertEqual(validated.project_context.data_provenance, "official")
         self.assertEqual(validated.raw_path, "codigo/data/raw/cwru_bearing/mat")
         json.dumps(state)
 
@@ -71,6 +72,14 @@ class StateSchemaTests(unittest.TestCase):
         self.assertEqual(context.supervision_profile, "binary_fault_classification")
         self.assertEqual(context.label_granularity, "file")
         self.assertEqual(context.label_source, "official")
+        self.assertEqual(context.data_provenance, "official")
+        self.assertEqual(context.provenance_detection_method, "trusted_adapter")
+
+    def test_project_context_does_not_assume_nasa_data_are_official(self):
+        context = ProjectContext(dataset="nasa_ims_bearing")
+
+        self.assertEqual(context.data_provenance, "unknown")
+        self.assertEqual(context.provenance_detection_method, "unverified")
 
 
 if __name__ == "__main__":

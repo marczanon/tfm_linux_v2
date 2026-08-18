@@ -68,7 +68,7 @@ export function recordStateLabel(record: MemoryRecordSummary): string {
     return "excluido";
   }
   if (record.reusable_as_context) {
-    return "recuperable";
+    return "habilitado en indice";
   }
   return "indexado";
 }

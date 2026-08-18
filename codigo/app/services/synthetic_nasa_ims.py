@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from datetime import datetime, timedelta
@@ -123,6 +124,12 @@ def generate_synthetic_nasa_ims_binary_manifest(
     manifest_path = output / "manifest.csv"
     write_common_manifest(manifest_path, records)
     label_counts = dict(Counter(record.label for record in records))
+    spec_path = root / "synthetic_dataset_spec.json"
+    spec_sha256 = (
+        hashlib.sha256(spec_path.read_bytes()).hexdigest()
+        if spec_path.is_file()
+        else None
+    )
     artifact = ArtifactRef(
         name="nasa_ims_synthetic_binary_manifest",
         artifact_type="manifest",
@@ -131,6 +138,12 @@ def generate_synthetic_nasa_ims_binary_manifest(
         metadata={
             "dataset": "nasa_ims_bearing",
             "synthetic": True,
+            "data_provenance": "synthetic",
+            "provenance_detection_method": "synthetic_generator",
+            "provenance_evidence_path": (
+                spec_path.as_posix() if spec_path.is_file() else None
+            ),
+            "provenance_evidence_sha256": spec_sha256,
             "n_rows": len(records),
             "sampling_rate_hz": SYNTHETIC_NASA_SAMPLE_RATE_HZ,
             **label_counts,
@@ -146,6 +159,7 @@ def generate_synthetic_nasa_ims_binary_manifest(
             "manifest_path": manifest_path.as_posix(),
             "dataset_id": "nasa_ims_bearing",
             "adapter_id": "nasa_ims_synthetic_binary",
+            "data_provenance": "synthetic",
         },
         manifest_path=manifest_path.as_posix(),
         n_rows=len(records),
@@ -241,6 +255,7 @@ def _record_for_file(
         dataset="nasa_ims_bearing",
         source_path=file_path.as_posix(),
         source_format="txt",
+        data_provenance="synthetic",
         label=label,
         label_detail="synthetic_outer_race_like_degradation" if label == "fault" else None,
         condition_id=SYNTHETIC_NASA_CONDITION_ID,
@@ -255,6 +270,8 @@ def _record_for_file(
         n_channels=len(SYNTHETIC_NASA_CHANNELS),
         metadata_json={
             "synthetic": True,
+            "data_provenance": "synthetic",
+            "provenance_detection_method": "synthetic_generator",
             "supervision_profile": "run_to_failure_degradation",
             "label_source": "synthetic",
             "label_granularity": "file",

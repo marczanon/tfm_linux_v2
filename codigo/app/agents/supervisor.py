@@ -8,7 +8,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from codigo.app.schemas.agent_decisions import SupervisorDecision
+from codigo.app.schemas.agent_decisions import (
+    AgentHypothesis,
+    DecisionGenerationTrace,
+    SupervisorDecision,
+    require_agent_hypothesis,
+)
 from codigo.app.schemas.state import TFMStateModel
 from codigo.app.services.llm import (
     JSONLLMClient,
@@ -36,9 +41,14 @@ def decide_supervisor_action(
 
     should_use_llm = _should_use_llm(llm_client, use_llm)
     if should_use_llm:
+        attempt_tracker = [0]
         try:
             client = llm_client or get_default_json_llm_client()
-            return decide_supervisor_action_with_llm(state, client)
+            return decide_supervisor_action_with_llm(
+                state,
+                client,
+                _attempt_tracker=attempt_tracker,
+            )
         except (ValidationError, ValueError) as exc:
             fallback = decide_supervisor_action_deterministic(state)
             fallback.rationale = (
@@ -46,11 +56,29 @@ def decide_supervisor_action(
                 f"LLM supervisor decision: {exc}"
             )
             fallback.confidence = min(fallback.confidence, 0.82)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
         except LLMCallError as exc:
             fallback = decide_supervisor_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
             fallback.confidence = min(fallback.confidence, 0.7)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
 
     return decide_supervisor_action_deterministic(state)
@@ -59,18 +87,23 @@ def decide_supervisor_action(
 def decide_supervisor_action_with_llm(
     state: TFMStateModel,
     llm_client: JSONLLMClient,
+    *,
+    _attempt_tracker: list[int] | None = None,
 ) -> SupervisorDecision:
     """Solicita una decision al LLM y la valida contra el contrato."""
 
+    attempt_tracker = _attempt_tracker if _attempt_tracker is not None else [0]
     messages = _supervisor_messages(state)
     schema = SupervisorDecision.model_json_schema()
+    attempt_tracker[0] = 1
     payload = llm_client.complete_json(
         messages,
         json_schema=schema,
     )
     try:
-        return _validated_supervisor_decision_from_payload(state, payload)
+        decision = _validated_supervisor_decision_from_payload(state, payload)
     except (ValidationError, ValueError) as exc:
+        attempt_tracker[0] = 2
         repaired_payload = llm_client.complete_json(
             _supervisor_contract_repair_messages(
                 state,
@@ -80,7 +113,19 @@ def decide_supervisor_action_with_llm(
             ),
             json_schema=schema,
         )
-        return _validated_supervisor_decision_from_payload(state, repaired_payload)
+        decision = _validated_supervisor_decision_from_payload(state, repaired_payload)
+        decision.generation_trace = DecisionGenerationTrace.for_decision(
+            decision.decision_id,
+            origin="llm",
+            attempt_index=2,
+            validation_status="repaired",
+        )
+        return decision
+    decision.generation_trace = DecisionGenerationTrace.for_decision(
+        decision.decision_id,
+        origin="llm",
+    )
+    return decision
 
 
 def decide_supervisor_action_deterministic(state: TFMStateModel) -> SupervisorDecision:
@@ -147,6 +192,16 @@ def decide_supervisor_action_deterministic(state: TFMStateModel) -> SupervisorDe
         stop_reason=None,
         rationale=f"Stage {state.current_stage!r} is ready; routing to {next_node}.",
         confidence=1.0,
+        hypothesis=_supervisor_hypothesis(
+            state,
+            next_stage=next_stage,
+            next_node=next_node,
+            stop_reason=None,
+        ),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            decision_id,
+            origin="deterministic",
+        ),
     )
 
 
@@ -154,7 +209,9 @@ def _validated_supervisor_decision_from_payload(
     state: TFMStateModel,
     payload: dict[str, Any],
 ) -> SupervisorDecision:
-    decision = SupervisorDecision.model_validate(payload)
+    trusted_payload = dict(payload)
+    trusted_payload.pop("generation_trace", None)
+    decision = SupervisorDecision.model_validate(trusted_payload)
     _validate_supervisor_decision_bounds(state, decision)
     return decision
 
@@ -178,7 +235,10 @@ def _supervisor_contract_repair_messages(
                 [
                     "La transicion anterior no valida contra el supervisor.",
                     f"Error de validacion: {validation_error}",
-                    "Corrige solo next_stage, next_node, stop_reason y rationale si procede.",
+                    (
+                        "Corrige solo la hipotesis operativa, next_stage, next_node, "
+                        "stop_reason y rationale si procede."
+                    ),
                     "No cambies decision_id ni current_stage.",
                     "Transicion obligatoria:",
                     _allowed_transition_text(state),
@@ -240,16 +300,18 @@ def _supervisor_messages(state: TFMStateModel) -> list[LLMMessage]:
 
 
 def _supervisor_json_template(state: TFMStateModel) -> dict[str, Any]:
+    transition = decide_supervisor_action_deterministic(state)
     return {
         "agent_name": "supervisor",
         "decision_id": f"{state.run_id}:supervisor:{_supervisor_turn(state):03d}",
         "rationale": "Motivo breve y tecnico de la decision.",
         "confidence": 0.9,
+        "hypothesis": transition.hypothesis.model_dump(mode="json"),
         "current_stage": state.current_stage,
-        "next_stage": "dataset_manifest | profiling | cleaning | structuring | modeling | evaluation | reporting | completed | failed",
-        "next_node": "manifest_executor | profiler_executor | cleaner_agent | cleaning_executor | structuring_agent | structuring_executor | modeling_agent | modeling_executor | evaluator | evaluation_agent | report_writer | null",
+        "next_stage": transition.next_stage,
+        "next_node": transition.next_node,
         "requires_human_review": False,
-        "stop_reason": None,
+        "stop_reason": transition.stop_reason,
     }
 
 
@@ -307,6 +369,10 @@ def _validate_supervisor_decision_bounds(
     state: TFMStateModel,
     decision: SupervisorDecision,
 ) -> None:
+    require_agent_hypothesis(
+        decision,
+        allowed_kinds={"routing_readiness"},
+    )
     if decision.current_stage != state.current_stage:
         raise ValueError("LLM supervisor decision current_stage does not match state")
     if decision.requires_human_review:
@@ -385,6 +451,73 @@ def _terminal_decision(
         stop_reason=stop_reason,
         rationale=rationale,
         confidence=confidence,
+        hypothesis=_supervisor_hypothesis(
+            state,
+            next_stage=next_stage,
+            next_node=None,
+            stop_reason=stop_reason,
+        ),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            decision_id,
+            origin="deterministic",
+        ),
+    )
+
+
+def _supervisor_hypothesis(
+    state: TFMStateModel,
+    *,
+    next_stage: str,
+    next_node: str | None,
+    stop_reason: str | None,
+) -> AgentHypothesis:
+    target = next_node or next_stage
+    terminal = next_node is None
+    return AgentHypothesis(
+        kind="routing_readiness",
+        statement=(
+            f"El estado actual permite cerrar el flujo como {next_stage!r} de "
+            "forma coherente con sus evidencias persistidas."
+            if terminal
+            else (
+                f"El estado actual contiene los prerrequisitos para enrutar a "
+                f"{target!r} sin una transicion invalida."
+            )
+        ),
+        scope=(
+            f"Run {state.run_id}; etapa {state.current_stage}; decision de "
+            "enrutamiento, no resultado interno del nodo siguiente."
+        ),
+        evidence_cutoff=(
+            "Estado y artefactos persistidos antes de ejecutar la transicion propuesta."
+        ),
+        expected_observation=(
+            f"El flujo permanece terminal en {next_stage!r} con motivo trazable."
+            if terminal
+            else (
+                f"El nodo {target!r} acepta el estado y produce la siguiente "
+                "transicion o artefacto previsto."
+            )
+        ),
+        falsification_criterion=(
+            "El cierre contradice el estado o carece de una causa terminal verificable."
+            if terminal
+            else (
+                "La transicion es rechazada, faltaba un prerrequisito detectable "
+                "o el flujo entra en un ciclo sin progreso."
+            )
+        ),
+        evidence_refs=[
+            "state:current_stage",
+            "state:available_artifacts",
+            *(["state:stop_reason"] if stop_reason else []),
+        ],
+        risk_notes=[
+            "La ruta esta acotada por el grafo y no demuestra autonomia abierta del supervisor."
+        ],
+        assumptions=[
+            "Un fallo interno imprevisible del ejecutor no refuta por si solo una ruta valida."
+        ],
     )
 
 

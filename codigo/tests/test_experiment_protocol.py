@@ -4,17 +4,24 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from codigo.app.graph.pipeline import PipelineExecutors
+from codigo.app.graph.pipeline import PipelineAgents, PipelineExecutors
+from codigo.app.graph.state import create_initial_cwru_state, validate_state
 from codigo.app.schemas.agent_decisions import (
+    DecisionGenerationTrace,
     ModelingAlternative,
     ModelingDecision,
+    ModelingDecisionStrategy,
     StructuringAlternative,
     StructuringDecision,
 )
 from codigo.app.services.experiment_protocol import (
     ExperimentPlan,
     ExperimentSpec,
+    PreQwenCheckEvidence,
+    assess_pre_qwen_readiness,
+    current_pre_qwen_capability_evidence,
     cwru_model_experiment_plan_from_decision,
     cwru_window_experiment_plan_from_decision,
     default_cwru_experiment_plan,
@@ -22,6 +29,12 @@ from codigo.app.services.experiment_protocol import (
     run_cwru_experiment_plan,
     run_run_to_failure_experiment_plan,
     run_to_failure_model_experiment_plan_from_decision,
+    write_pre_qwen_readiness_artifacts,
+    _experiment_agents,
+    _run_to_failure_experiment_agents,
+)
+from codigo.app.services.nasa_ims_temporal_policy import (
+    NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
 )
 from codigo.app.services.run_persistence import RunSnapshot
 from codigo.app.services.run_registry import MetricComparison, RunComparison, RunComparisonRow
@@ -35,9 +48,165 @@ from codigo.app.schemas.executor_results import (
     StructuringResult,
 )
 from codigo.app.schemas.state import ArtifactRef, ModelingConfig, StructuringConfig
+from codigo.scripts.run_run_to_failure_model_suite import (
+    DEFAULT_RUN_TO_FAILURE_V1_RAW_PATH,
+    DEFAULT_RUN_TO_FAILURE_V2_RAW_PATH,
+    _effective_plan_id,
+    _effective_raw_path,
+    _execution_manifest,
+    _parse_model_families,
+    _summary,
+)
 
 
 class ExperimentProtocolTests(unittest.TestCase):
+    def test_pre_qwen_matrix_is_complete_and_current_evidence_stays_blocked(self):
+        assessment = assess_pre_qwen_readiness(
+            current_pre_qwen_capability_evidence()
+        )
+        checks = {check.check_id: check for check in assessment.checks}
+        expected_perturbations = {
+            "perturbation_channels",
+            "perturbation_sample_rate",
+            "perturbation_gain_offset_polarity",
+            "perturbation_nan_dropout",
+            "perturbation_temporal_order",
+            "perturbation_truncated_trajectory",
+            "perturbation_future_label_bait",
+            "perturbation_adversarial_memory_corpus",
+        }
+
+        self.assertEqual(assessment.verdict, "blocked")
+        self.assertIn("BLOCKED", assessment.verdict_reason)
+        self.assertTrue(all(check.required for check in assessment.checks))
+        self.assertTrue(expected_perturbations.issubset(checks))
+        self.assertIn("trace_origin_attempt_fallback", checks)
+        self.assertIn("trace_decision_config_artifact_link", checks)
+        self.assertIn("corpus_frozen_versioned", checks)
+        self.assertIn("corpus_no_future_or_label_leakage", checks)
+        self.assertIn("dataset_nasa_ims_official", checks)
+        self.assertIn("dataset_cwru_official", checks)
+        self.assertIn("dataset_generic_third_format", checks)
+        self.assertEqual(
+            checks["dataset_nasa_ims_official"].availability,
+            "available",
+        )
+        self.assertEqual(
+            checks["dataset_nasa_ims_official"].outcome,
+            "not_run",
+        )
+        self.assertTrue(checks["dataset_nasa_ims_official"].blocking)
+        self.assertEqual(
+            checks["trace_origin_attempt_fallback"].availability,
+            "available",
+        )
+        self.assertEqual(
+            checks["trace_origin_attempt_fallback"].outcome,
+            "not_run",
+        )
+        self.assertEqual(
+            checks["dataset_generic_third_format"].availability,
+            "pending",
+        )
+        self.assertIn(
+            "dataset_nasa_ims_official",
+            assessment.available_check_ids,
+        )
+        self.assertIn(
+            "dataset_generic_third_format",
+            assessment.pending_check_ids,
+        )
+        self.assertEqual(assessment.passed_check_ids, [])
+        self.assertEqual(
+            checks["perturbation_channels"].criterion_kind,
+            "invariance",
+        )
+        self.assertEqual(
+            checks["perturbation_sample_rate"].criterion_kind,
+            "adaptation",
+        )
+
+    def test_pre_qwen_readiness_requires_every_check_to_pass_with_evidence(self):
+        matrix = assess_pre_qwen_readiness()
+        evidence = [
+            PreQwenCheckEvidence(
+                check_id=check.check_id,
+                availability="available",
+                outcome="passed",
+                evidence_refs=[f"test-evidence:{check.check_id}"],
+            )
+            for check in reversed(matrix.checks)
+        ]
+
+        assessment = assess_pre_qwen_readiness(evidence)
+
+        self.assertEqual(assessment.verdict, "ready")
+        self.assertEqual(assessment.blocker_ids, [])
+        self.assertEqual(assessment.pending_check_ids, [])
+        self.assertEqual(assessment.not_run_check_ids, [])
+        self.assertEqual(
+            assessment.passed_check_ids,
+            [check.check_id for check in assessment.checks],
+        )
+
+    def test_pre_qwen_evidence_rejects_unverifiable_or_ambiguous_states(self):
+        with self.assertRaisesRegex(ValueError, "at least one evidence ref"):
+            PreQwenCheckEvidence(
+                check_id="dataset_cwru_official",
+                availability="available",
+            )
+
+        with self.assertRaisesRegex(ValueError, "pending checks"):
+            PreQwenCheckEvidence(
+                check_id="dataset_cwru_official",
+                availability="pending",
+                outcome="passed",
+                evidence_refs=["invalid:pending-check"],
+            )
+
+        with self.assertRaisesRegex(ValueError, "unknown pre-Qwen check_id"):
+            assess_pre_qwen_readiness(
+                [PreQwenCheckEvidence(check_id="unknown_requirement")]
+            )
+
+        duplicated = PreQwenCheckEvidence(check_id="dataset_cwru_official")
+        with self.assertRaisesRegex(ValueError, "duplicated pre-Qwen evidence"):
+            assess_pre_qwen_readiness([duplicated, duplicated])
+
+    def test_pre_qwen_artifacts_are_deterministic_and_do_not_claim_execution(self):
+        assessment = assess_pre_qwen_readiness(
+            current_pre_qwen_capability_evidence()
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_pre_qwen_readiness_artifacts(
+                assessment,
+                output_dir=Path(tmp),
+            )
+            json_path = Path(paths.json_path)
+            markdown_path = Path(paths.markdown_path)
+            first_json = json_path.read_text(encoding="utf-8")
+            first_markdown = markdown_path.read_text(encoding="utf-8")
+
+            write_pre_qwen_readiness_artifacts(
+                assessment,
+                output_dir=Path(tmp),
+            )
+
+            self.assertEqual(first_json, json_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                first_markdown,
+                markdown_path.read_text(encoding="utf-8"),
+            )
+
+        payload = json.loads(first_json)
+        self.assertEqual(payload["verdict"], "blocked")
+        self.assertNotIn("generated_at", payload)
+        self.assertTrue(payload["not_run_check_ids"])
+        self.assertIn("# Preparacion pre-Qwen: BLOCKED", first_markdown)
+        self.assertIn("no acredita ejecuciones", first_markdown)
+        self.assertIn("Decision de reutilizacion", first_markdown)
+        self.assertNotIn("| ID |", first_markdown)
+
     def test_default_plan_defines_two_supported_isolation_forest_runs(self):
         plan = default_cwru_experiment_plan()
 
@@ -62,6 +231,26 @@ class ExperimentProtocolTests(unittest.TestCase):
             all(spec.modeling_config.hyperparameters["n_jobs"] == 1 for spec in plan.experiments)
         )
         self.assertTrue(all(spec.structuring_config is None for spec in plan.experiments))
+
+    def test_experiment_report_writer_records_protocol_generation_trace(self):
+        spec = default_cwru_experiment_plan().experiments[0]
+        agents = _experiment_agents(spec, Path("reports/controlled-experiment"))
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="experiment-report-trace-thread",
+                run_id="experiment-report-trace-run",
+            )
+        )
+
+        decision = agents.report_writer(state)
+
+        self.assertIsNotNone(decision.generation_trace)
+        assert decision.generation_trace is not None
+        self.assertEqual(decision.generation_trace.origin, "protocol_restricted")
+        self.assertEqual(
+            decision.generation_trace.attempt_id,
+            f"{decision.decision_id}:attempt:001",
+        )
 
     def test_window_plan_is_built_from_agent_structuring_decision(self):
         decision = StructuringDecision(
@@ -281,6 +470,137 @@ class ExperimentProtocolTests(unittest.TestCase):
             ],
         )
 
+    def test_causal_v2_suite_excludes_advanced_model_until_causal_readiness(self):
+        plan = default_run_to_failure_model_suite_plan(
+            plan_id="rtf_causal_v2",
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        )
+
+        self.assertEqual(
+            plan.dataset_policy_id,
+            NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        )
+        self.assertEqual(
+            [spec.modeling_config.model_name for spec in plan.experiments],
+            [
+                "pca_reconstruction_error",
+                "isolation_forest",
+                "one_class_svm",
+            ],
+        )
+        structuring_configs = [
+            spec.structuring_config for spec in plan.experiments
+        ]
+        self.assertTrue(all(config is not None for config in structuring_configs))
+        self.assertTrue(
+            all(config == structuring_configs[0] for config in structuring_configs)
+        )
+        fixed = structuring_configs[0]
+        assert fixed is not None
+        self.assertEqual(fixed.window_size, 2048)
+        self.assertEqual(fixed.overlap, 0.5)
+        self.assertEqual(fixed.window_size * (1.0 - fixed.overlap), 1024)
+        self.assertEqual(fixed.main_channel, "channel_1")
+        self.assertEqual(fixed.target_sample_rate_hz, 20000)
+        for spec in plan.experiments:
+            effect = (spec.expected_effect or "").lower()
+            self.assertNotIn("alerta temprana", effect)
+            self.assertNotIn("falsas alarmas", effect)
+            self.assertNotIn("lead time", effect)
+        self.assertNotIn("F1", plan.description)
+        self.assertIn("monitorizacion ciega", plan.description)
+        self.assertIn("compatibilidad del contrato legacy", plan.description)
+        self.assertIn("target vacio en calibracion y monitorizacion", plan.description)
+
+    def test_causal_v2_suite_rejects_autoencoder_and_single_family_plans(self):
+        with self.assertRaisesRegex(ValueError, "autoencoder_dense is disabled"):
+            default_run_to_failure_model_suite_plan(
+                dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+                model_families=["pca_reconstruction_error", "autoencoder_dense"],
+            )
+
+        with self.assertRaisesRegex(ValueError, "at least two distinct"):
+            default_run_to_failure_model_suite_plan(
+                dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+                model_families=["pca_reconstruction_error"],
+            )
+
+    def test_suite_cli_family_parser_accepts_repeated_and_csv_values(self):
+        selected = _parse_model_families(
+            [
+                "pca_reconstruction_error,isolation_forest",
+                "one_class_svm",
+                "isolation_forest",
+            ]
+        )
+
+        self.assertEqual(
+            selected,
+            [
+                "pca_reconstruction_error",
+                "isolation_forest",
+                "one_class_svm",
+            ],
+        )
+        plan = default_run_to_failure_model_suite_plan(
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+            model_families=selected,
+        )
+        self.assertEqual(len(plan.experiments), 3)
+
+    def test_suite_cli_uses_policy_specific_defaults_without_breaking_v1(self):
+        v1 = SimpleNamespace(
+            plan_id=None,
+            raw_path=None,
+            dataset_policy_id="nasa_ims_temporal_v1",
+        )
+        v2 = SimpleNamespace(
+            plan_id=None,
+            raw_path=None,
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        )
+
+        self.assertEqual(_effective_plan_id(v1), "run_to_failure_agentic_model_suite_v1")
+        self.assertEqual(_effective_raw_path(v1), DEFAULT_RUN_TO_FAILURE_V1_RAW_PATH)
+        self.assertEqual(_effective_plan_id(v2), "run_to_failure_agentic_model_suite_v2")
+        self.assertEqual(_effective_raw_path(v2), DEFAULT_RUN_TO_FAILURE_V2_RAW_PATH)
+
+    def test_execution_manifest_persists_llm_configuration_without_hosts(self):
+        args = _suite_args(use_memory=False)
+
+        manifest = _execution_manifest(args)
+        plan = default_run_to_failure_model_suite_plan(
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        ).model_copy(update={"execution_manifest": manifest})
+        payload = plan.model_dump(mode="json")["execution_manifest"]
+
+        self.assertTrue(payload["use_llm"])
+        self.assertEqual(payload["llm_backend"], "ollama")
+        self.assertEqual(payload["llm_model"], "qwen3.5:4b")
+        self.assertTrue(payload["llm_think"])
+        self.assertEqual(payload["llm_timeout_seconds"], 180.0)
+        self.assertFalse(payload["use_memory"])
+        self.assertEqual(payload["memory_backend"], "disabled")
+        self.assertNotIn("host", json.dumps(payload).lower())
+
+    def test_execution_manifest_persists_memory_backend_embedding_and_top_k(self):
+        args = _suite_args(use_memory=True)
+
+        with patch.dict("os.environ", {"TFM_MEMORY_BACKEND": "qdrant"}):
+            manifest = _execution_manifest(args)
+
+        self.assertTrue(manifest.use_memory)
+        self.assertEqual(manifest.memory_backend, "qdrant")
+        self.assertEqual(manifest.embedding_provider, "ollama")
+        self.assertEqual(manifest.embedding_model, "qwen3-embedding:0.6b")
+        self.assertEqual(manifest.embedding_timeout_seconds, 60.0)
+        self.assertEqual(manifest.structurer_top_k, 4)
+        self.assertEqual(manifest.modeler_top_k, 5)
+        self.assertEqual(manifest.evaluator_top_k, 6)
+        self.assertEqual(manifest.memory_min_similarity, 0.2)
+        self.assertTrue(manifest.generate_decision_memory)
+        self.assertTrue(manifest.require_human_review_before_reuse)
+
     def test_run_to_failure_model_plan_is_built_from_modeler_decision(self):
         decision = ModelingDecision(
             decision_id="rtf:modeler:001",
@@ -331,6 +651,241 @@ class ExperimentProtocolTests(unittest.TestCase):
             ],
         )
 
+    def test_run_to_failure_suite_preserves_agent_memory_reasoning_under_fixed_model(self):
+        spec = default_run_to_failure_model_suite_plan().experiments[0]
+        seen_memory_contexts = []
+        seen_agent_proposals = []
+
+        def base_modeler(state, *, memory_context=None):
+            seen_memory_contexts.append(memory_context)
+            proposal = ModelingDecision(
+                decision_id=f"{state.run_id}:modeler:base",
+                rationale="The recalled warning changes the temporal hypothesis.",
+                confidence=0.82,
+                generation_trace=DecisionGenerationTrace.for_decision(
+                    f"{state.run_id}:modeler:base",
+                    origin="llm",
+                ),
+                decision_strategy=ModelingDecisionStrategy(
+                    strategy_type="feature_model_fit",
+                    hypothesis="Prioritize stable lead time over isolated score peaks.",
+                    evidence_refs=["memory:warning-lead-time"],
+                ),
+                modeling_config=_modeling_config(
+                    "isolation_forest",
+                    {"threshold_quantile": 0.99},
+                ),
+                expected_model_path="codigo/models/base.joblib",
+                memory_context_id="memory-context-001",
+                used_memory_context=True,
+                memory_record_ids=["memory-warning-lead-time"],
+                memory_usage_summary="Used as a warning against isolated peaks.",
+                memory_record_uses=[
+                    {
+                        "memory_record_id": "memory-warning-lead-time",
+                        "usage": "adapted",
+                        "influence_summary": "Favours persistent lead time.",
+                        "risk_mitigation": "The suite still fixes the model family.",
+                    }
+                ],
+            )
+            seen_agent_proposals.append(proposal)
+            return proposal
+
+        agents = _run_to_failure_experiment_agents(
+            spec,
+            base_agents=PipelineAgents(modeler=base_modeler),
+        )
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="rtf-agent-memory-thread",
+                run_id="rtf-agent-memory",
+                raw_path="codigo/data/raw/nasa_ims_bearing",
+            )
+        )
+        memory_context = object()
+
+        decision = agents.modeler(state, memory_context=memory_context)
+
+        self.assertEqual(seen_memory_contexts, [memory_context])
+        self.assertEqual(decision.modeling_config, spec.modeling_config)
+        self.assertNotIn(
+            "Prioritize stable lead time over isolated score peaks.",
+            decision.decision_strategy.hypothesis,
+        )
+        self.assertIn("pca_reconstruction_error", decision.decision_strategy.hypothesis)
+        self.assertFalse(decision.used_memory_context)
+        self.assertEqual(decision.memory_record_ids, [])
+        self.assertIsNotNone(decision.protocol_trace)
+        trace = decision.protocol_trace
+        assert trace is not None
+        self.assertEqual(
+            trace.agent_proposal.model_dump(),
+            seen_agent_proposals[0].model_dump(exclude={"protocol_trace"}),
+        )
+        self.assertTrue(trace.proposal_influenced_by_memory)
+        self.assertFalse(trace.execution_influenced_by_memory)
+        self.assertEqual(
+            trace.agent_proposal.memory_record_ids,
+            ["memory-warning-lead-time"],
+        )
+        self.assertEqual(
+            trace.agent_proposal.decision_strategy.hypothesis,
+            "Prioritize stable lead time over isolated score peaks.",
+        )
+        self.assertIn("modeling_config", trace.overridden_fields)
+        self.assertIn("used_memory_context", trace.overridden_fields)
+        self.assertIn("generation_trace", trace.overridden_fields)
+        self.assertEqual(decision.generation_trace.origin, "protocol_restricted")
+        self.assertEqual(decision.generation_trace.attempt_index, 2)
+        self.assertEqual(trace.agent_proposal.generation_trace.origin, "llm")
+        restored = ModelingDecision.model_validate_json(decision.model_dump_json())
+        self.assertEqual(restored.protocol_trace, trace)
+
+    def test_causal_v2_fixed_strategy_hides_future_and_binary_evidence(self):
+        spec = default_run_to_failure_model_suite_plan(
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        ).experiments[0]
+
+        def base_modeler(state, *, memory_context=None):
+            del memory_context
+            return ModelingDecision(
+                decision_id=f"{state.run_id}:modeler:base",
+                rationale="Historical proposal retained only for audit.",
+                confidence=0.7,
+                decision_strategy=ModelingDecisionStrategy(
+                    strategy_type="feature_model_fit",
+                    hypothesis="Maximize lead time before failure and binary F1.",
+                    evidence_refs=[
+                        "metric:mean_lead_time_to_failure",
+                        "metric:f1_score",
+                    ],
+                ),
+                modeling_config=_modeling_config(
+                    "isolation_forest",
+                    {"threshold_quantile": 0.99},
+                ),
+                expected_model_path="codigo/models/proposal.joblib",
+            )
+
+        agents = _run_to_failure_experiment_agents(
+            spec,
+            base_agents=PipelineAgents(modeler=base_modeler),
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        )
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="rtf-causal-v2-thread",
+                run_id="rtf-causal-v2",
+                raw_path="codigo/data/raw/nasa_ims_bearing/official/2nd_test",
+            )
+        )
+
+        decision = agents.modeler(state)
+
+        executed_strategy = json.dumps(
+            decision.decision_strategy.model_dump(mode="json")
+        ).lower()
+        for unavailable in (
+            "lead_time",
+            "before_failure",
+            "time_to_failure",
+            "f1_score",
+            "precision",
+            "recall",
+        ):
+            self.assertNotIn(unavailable, executed_strategy)
+        self.assertIn("partition:baseline_train", executed_strategy)
+        self.assertIn("constraint:monitoring_held_out", executed_strategy)
+        trace = decision.protocol_trace
+        assert trace is not None
+        self.assertEqual(
+            trace.agent_proposal.decision_strategy.hypothesis,
+            "Maximize lead time before failure and binary F1.",
+        )
+        self.assertFalse(trace.execution_influenced_by_memory)
+
+    def test_causal_v2_suite_observes_structurer_before_fixed_config(self):
+        spec = default_run_to_failure_model_suite_plan(
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        ).experiments[0]
+        seen_memory_contexts = []
+        seen_agent_proposals = []
+
+        def base_structurer(state, *, memory_context=None):
+            seen_memory_contexts.append(memory_context)
+            proposal = StructuringDecision(
+                decision_id=f"{state.run_id}:structurer:base",
+                rationale="Memory suggests shorter windows for earlier changes.",
+                confidence=0.78,
+                generation_trace=DecisionGenerationTrace.for_decision(
+                    f"{state.run_id}:structurer:base",
+                    origin="llm",
+                ),
+                structuring_config=_structuring_config(1024, 0.5),
+                expected_features_path="codigo/data/tensors/proposal/features.csv",
+                expected_tensors_path="codigo/data/tensors/proposal/windows.npz",
+                expected_splits_path="codigo/data/tensors/proposal/splits.json",
+                memory_context_id="memory-context-structurer",
+                used_memory_context=True,
+                memory_record_ids=["memory-short-window"],
+                memory_usage_summary="Adapted a prior temporal-resolution lesson.",
+                memory_record_uses=[
+                    {
+                        "memory_record_id": "memory-short-window",
+                        "usage": "adapted",
+                        "influence_summary": "Favours earlier temporal changes.",
+                        "risk_mitigation": "Keep the fixed suite config for execution.",
+                    }
+                ],
+            )
+            seen_agent_proposals.append(proposal)
+            return proposal
+
+        agents = _run_to_failure_experiment_agents(
+            spec,
+            base_agents=PipelineAgents(structurer=base_structurer),
+            dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+        )
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="rtf-structurer-memory-thread",
+                run_id="rtf-structurer-memory",
+                raw_path="codigo/data/raw/nasa_ims_bearing",
+            )
+        )
+        memory_context = object()
+
+        decision = agents.structurer(state, memory_context=memory_context)
+
+        self.assertEqual(seen_memory_contexts, [memory_context])
+        self.assertEqual(decision.structuring_config, spec.structuring_config)
+        self.assertEqual(decision.structuring_config.window_size, 2048)
+        self.assertEqual(decision.structuring_config.overlap, 0.5)
+        self.assertFalse(decision.used_memory_context)
+        self.assertEqual(decision.memory_record_ids, [])
+        self.assertIsNotNone(decision.protocol_trace)
+        trace = decision.protocol_trace
+        assert trace is not None
+        self.assertEqual(
+            trace.agent_proposal.model_dump(),
+            seen_agent_proposals[0].model_dump(exclude={"protocol_trace"}),
+        )
+        self.assertEqual(
+            trace.agent_proposal.structuring_config,
+            _structuring_config(1024, 0.5),
+        )
+        self.assertTrue(trace.proposal_influenced_by_memory)
+        self.assertFalse(trace.execution_influenced_by_memory)
+        self.assertIn("structuring_config", trace.overridden_fields)
+        self.assertIn("used_memory_context", trace.overridden_fields)
+        self.assertIn("generation_trace", trace.overridden_fields)
+        self.assertEqual(decision.generation_trace.origin, "protocol_restricted")
+        self.assertEqual(decision.generation_trace.attempt_index, 2)
+        self.assertEqual(trace.agent_proposal.generation_trace.origin, "llm")
+        restored = StructuringDecision.model_validate_json(decision.model_dump_json())
+        self.assertEqual(restored.protocol_trace, trace)
+
     def test_run_to_failure_plan_uses_temporal_results_table_with_fake_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -353,6 +908,78 @@ class ExperimentProtocolTests(unittest.TestCase):
         self.assertIn("HI mono", table)
         self.assertIn("F1 aux", table)
         self.assertIn("Las metricas binarias se muestran como auxiliares/proxy", table)
+
+    def test_causal_v2_results_table_omits_binary_and_future_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plan = default_run_to_failure_model_suite_plan(
+                plan_id="rtf_causal_v2",
+                dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+            )
+            result = run_run_to_failure_experiment_plan(
+                plan,
+                raw_path=str(base / "official"),
+                experiments_dir=base / "experiments",
+                runs_dir=base / "runs",
+                run_factory=_fake_run_to_failure_run,
+                comparison_factory=_fake_run_to_failure_comparison,
+            )
+            table = Path(result.results_table_path).read_text(encoding="utf-8")
+            comparison_payload = json.loads(
+                Path(result.comparison_path).read_text(encoding="utf-8")
+            )
+            stdout_payload = _summary(
+                result,
+                SimpleNamespace(
+                    dataset_policy_id=NASA_IMS_RUN_TO_FAILURE_POLICY_V2,
+                    use_llm=True,
+                    use_memory=False,
+                ),
+                str(base / "official"),
+            )
+
+        self.assertEqual(len(result.runs), 3)
+        self.assertNotIn("Lead persistente", table)
+        self.assertNotIn("Onset confirmado", table)
+        self.assertNotIn("F1 aux", table)
+        self.assertNotIn("FPR aux", table)
+        self.assertIn("Controles internos", table)
+        self.assertIn("Alerta persistente", table)
+        self.assertIn("Intervalo al fin registrado", table)
+        self.assertIn("Tasa alerta premonitorizacion", table)
+        self.assertNotIn("FAR nominal", table)
+        self.assertNotIn("degradation_mean_persistent_lead_time_to_failure", table)
+        self.assertNotIn(
+            "degradation_confirmed_degradation_before_failure_rate",
+            table,
+        )
+        self.assertIn("omite deliberadamente precision, recall, F1 y FPR", table)
+        self.assertEqual(comparison_payload["metrics"], [])
+        forbidden = {
+            "degradation_detected_before_failure_rate",
+            "degradation_confirmed_degradation_before_failure_rate",
+            "degradation_mean_lead_time_to_failure",
+            "degradation_mean_persistent_lead_time_to_failure",
+            "degradation_missed_runs",
+            "degradation_missed_confirmed_degradation_runs",
+        }
+        self.assertTrue(
+            forbidden.isdisjoint(
+                metric["metric"]
+                for metric in comparison_payload["degradation_metrics"]
+            )
+        )
+        for row in comparison_payload["rows"]:
+            self.assertTrue(forbidden.isdisjoint(row))
+            self.assertNotIn("f1_score", row)
+            self.assertNotIn("false_positive_rate", row)
+        self.assertFalse(stdout_payload["binary_metrics_reported"])
+        self.assertTrue(
+            forbidden.isdisjoint(
+                metric["metric"]
+                for metric in stdout_payload["degradation_best_by_metric"]
+            )
+        )
 
 
 def _spec(
@@ -380,6 +1007,27 @@ def _spec(
             },
         ),
         structuring_config=structuring_config,
+    )
+
+
+def _suite_args(*, use_memory: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        use_llm=True,
+        model="qwen3.5:4b",
+        think=True,
+        timeout_seconds=180.0,
+        use_memory=use_memory,
+        memory_dir=Path("codigo/reports/reasoning_memory"),
+        embedding_provider="ollama",
+        embedding_model="qwen3-embedding:0.6b",
+        embedding_timeout_seconds=60.0,
+        hash_dimension=128,
+        structurer_top_k=4,
+        modeler_top_k=5,
+        evaluator_top_k=6,
+        memory_min_similarity=0.2,
+        skip_decision_memory=False,
+        require_human_review_before_reuse=True,
     )
 
 
@@ -734,6 +1382,11 @@ def _fake_run_to_failure_comparison(
                 false_positive_rate=0.2 + index * 0.1,
                 degradation_available=True,
                 degradation_n_runs=1,
+                degradation_persistent_alert_run_rate=1.0,
+                degradation_mean_first_persistent_alert_time_to_trajectory_end=(
+                    900.0 - index * 100.0
+                ),
+                degradation_mean_pre_monitoring_alert_rate=0.1 + index * 0.05,
                 degradation_detected_before_failure_rate=1.0,
                 degradation_confirmed_degradation_before_failure_rate=(
                     1.0 if index != 1 else 0.0
@@ -765,6 +1418,29 @@ def _fake_run_to_failure_comparison(
             )
         ],
         degradation_metrics=[
+            MetricComparison(
+                metric="degradation_persistent_alert_run_rate",
+                metric_family="run_to_failure_degradation",
+                higher_is_better=True,
+                best_run_id=run_ids[0],
+                best_value=1.0,
+            ),
+            MetricComparison(
+                metric=(
+                    "degradation_mean_first_persistent_alert_time_to_trajectory_end"
+                ),
+                metric_family="run_to_failure_degradation",
+                higher_is_better=True,
+                best_run_id=run_ids[0],
+                best_value=900.0,
+            ),
+            MetricComparison(
+                metric="degradation_mean_pre_monitoring_alert_rate",
+                metric_family="run_to_failure_degradation",
+                higher_is_better=False,
+                best_run_id=run_ids[0],
+                best_value=0.1,
+            ),
             MetricComparison(
                 metric="degradation_confirmed_degradation_before_failure_rate",
                 metric_family="run_to_failure_degradation",

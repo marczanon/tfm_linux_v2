@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 from typing import Any
 
 from pydantic import ValidationError
 
 from codigo.app.schemas.agent_decisions import (
+    AgentHypothesis,
+    DecisionGenerationTrace,
     ReportDecision,
     ReportRevisionDecision,
     ReportSection,
     ReportVerificationDecision,
     ReportVerificationIssue,
+    require_agent_hypothesis,
 )
 from codigo.app.schemas.state import TFMStateModel
 from codigo.app.services.llm import (
@@ -21,6 +25,10 @@ from codigo.app.services.llm import (
     LLMCallError,
     LLMMessage,
     get_default_json_llm_client,
+)
+from codigo.app.services.online_blind import (
+    assert_official_v2_claims_are_scoped,
+    uses_online_blind_view,
 )
 
 
@@ -33,6 +41,14 @@ REQUIRED_SECTION_TITLES = [
     "Artefactos generados",
     "Limitaciones y siguientes pasos",
 ]
+CANONICAL_SECTION_TITLES_BY_KEY = {
+    "resumen ejecutivo": "Resumen ejecutivo",
+    "contexto y datos": "Contexto y datos",
+    "configuraciones del pipeline": "Configuraciones del pipeline",
+    "metricas y evaluacion": "Metricas y evaluacion",
+    "artefactos generados": "Artefactos generados",
+    "limitaciones y siguientes pasos": "Limitaciones y siguientes pasos",
+}
 
 
 def decide_report_action(
@@ -45,9 +61,14 @@ def decide_report_action(
 
     should_use_llm = _should_use_llm(llm_client, use_llm)
     if should_use_llm:
+        attempt_tracker = [0]
         try:
             client = llm_client or get_default_json_llm_client()
-            return decide_report_action_with_llm(state, client)
+            return decide_report_action_with_llm(
+                state,
+                client,
+                _attempt_tracker=attempt_tracker,
+            )
         except (ValidationError, ValueError) as exc:
             fallback = decide_report_action_deterministic(state)
             fallback.rationale = (
@@ -55,11 +76,29 @@ def decide_report_action(
                 f"LLM report decision: {exc}"
             )
             fallback.confidence = min(fallback.confidence, 0.82)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
         except LLMCallError as exc:
             fallback = decide_report_action_deterministic(state)
             fallback.rationale = f"{fallback.rationale} Fallback after LLM failure: {exc}"
             fallback.confidence = min(fallback.confidence, 0.7)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
 
     return decide_report_action_deterministic(state)
@@ -68,39 +107,63 @@ def decide_report_action(
 def decide_report_action_with_llm(
     state: TFMStateModel,
     llm_client: JSONLLMClient,
+    *,
+    _attempt_tracker: list[int] | None = None,
 ) -> ReportDecision:
     """Solicita al LLM una ReportDecision y valida sus limites."""
 
+    attempt_tracker = _attempt_tracker if _attempt_tracker is not None else [0]
     messages = _report_writer_messages(state)
     schema = ReportDecision.model_json_schema()
+    attempt_tracker[0] = 1
     payload = llm_client.complete_json(
         messages,
         json_schema=schema,
     )
     try:
-        return _validated_report_decision_from_payload(state, payload)
+        decision = _validated_report_decision_from_payload(state, payload)
     except (ValidationError, ValueError) as exc:
+        attempt_tracker[0] = 2
         repaired_payload = llm_client.complete_json(
             _report_contract_repair_messages(
                 messages,
+                state=state,
                 invalid_payload=payload,
                 validation_error=exc,
             ),
             json_schema=schema,
         )
-        return _validated_report_decision_from_payload(state, repaired_payload)
+        decision = _validated_report_decision_from_payload(state, repaired_payload)
+        decision.generation_trace = DecisionGenerationTrace.for_decision(
+            decision.decision_id,
+            origin="llm",
+            attempt_index=2,
+            validation_status="repaired",
+        )
+        return decision
+    decision.generation_trace = DecisionGenerationTrace.for_decision(
+        decision.decision_id,
+        origin="llm",
+    )
+    return decision
 
 
 def decide_report_action_deterministic(state: TFMStateModel) -> ReportDecision:
     """Fallback reproducible para generar el informe final Markdown."""
 
+    decision_id = f"{state.run_id}:report_writer:{_report_turn(state):03d}"
     return ReportDecision(
-        decision_id=f"{state.run_id}:report_writer:{_report_turn(state):03d}",
+        decision_id=decision_id,
         rationale=(
             "Deterministic report policy: generate a concise Markdown report with "
             "context, pipeline configuration, metrics, artifacts and limitations."
         ),
         confidence=1.0,
+        hypothesis=_report_hypothesis(state),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            decision_id,
+            origin="deterministic",
+        ),
         output_path=_default_report_path(state),
         output_format=DEFAULT_REPORT_FORMAT,
         sections=_default_sections(state),
@@ -120,6 +183,7 @@ def decide_report_revision_action(
 
     should_use_llm = _should_use_llm(llm_client, use_llm)
     if should_use_llm:
+        attempt_tracker = [0]
         try:
             client = llm_client or get_default_json_llm_client()
             return decide_report_revision_action_with_llm(
@@ -128,6 +192,7 @@ def decide_report_revision_action(
                 client,
                 original_decision=original_decision,
                 revision_round=revision_round,
+                _attempt_tracker=attempt_tracker,
             )
         except (ValidationError, ValueError) as exc:
             fallback = decide_report_revision_action_deterministic(
@@ -141,6 +206,15 @@ def decide_report_revision_action(
                 f"LLM report revision: {exc}"
             )
             fallback.confidence = min(fallback.confidence, 0.82)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
         except LLMCallError as exc:
             fallback = decide_report_revision_action_deterministic(
@@ -153,6 +227,15 @@ def decide_report_revision_action(
                 f"{fallback.rationale} Fallback after revision LLM failure: {exc}"
             )
             fallback.confidence = min(fallback.confidence, 0.7)
+            failed_attempt_index = max(attempt_tracker[0], 1)
+            fallback.generation_trace = DecisionGenerationTrace.for_decision(
+                fallback.decision_id,
+                origin="guardrail_fallback",
+                attempt_index=failed_attempt_index + 1,
+                validation_status="fallback_applied",
+                fallback_cause=f"{type(exc).__name__}: {exc}",
+                fallback_from_attempt_index=failed_attempt_index,
+            )
             return fallback
 
     return decide_report_revision_action_deterministic(
@@ -170,9 +253,11 @@ def decide_report_revision_action_with_llm(
     *,
     original_decision: ReportDecision | None = None,
     revision_round: int = 1,
+    _attempt_tracker: list[int] | None = None,
 ) -> ReportRevisionDecision:
     """Solicita al LLM una revision del informe validada."""
 
+    attempt_tracker = _attempt_tracker if _attempt_tracker is not None else [0]
     messages = _report_revision_messages(
         state,
         verification,
@@ -180,30 +265,45 @@ def decide_report_revision_action_with_llm(
         revision_round=revision_round,
     )
     schema = ReportRevisionDecision.model_json_schema()
+    attempt_tracker[0] = 1
     payload = llm_client.complete_json(
         messages,
         json_schema=schema,
     )
     try:
-        return _validated_report_revision_decision_from_payload(
+        decision = _validated_report_revision_decision_from_payload(
             state,
             verification,
             payload,
         )
     except (ValidationError, ValueError) as exc:
+        attempt_tracker[0] = 2
         repaired_payload = llm_client.complete_json(
             _report_contract_repair_messages(
                 messages,
+                state=state,
                 invalid_payload=payload,
                 validation_error=exc,
             ),
             json_schema=schema,
         )
-        return _validated_report_revision_decision_from_payload(
+        decision = _validated_report_revision_decision_from_payload(
             state,
             verification,
             repaired_payload,
         )
+        decision.generation_trace = DecisionGenerationTrace.for_decision(
+            decision.decision_id,
+            origin="llm",
+            attempt_index=2,
+            validation_status="repaired",
+        )
+        return decision
+    decision.generation_trace = DecisionGenerationTrace.for_decision(
+        decision.decision_id,
+        origin="llm",
+    )
+    return decision
 
 
 def decide_report_revision_action_deterministic(
@@ -233,15 +333,23 @@ def decide_report_revision_action_deterministic(
         for issue in issues
         if issue.suggested_fix
     ] or ["No se requieren cambios factuales; se conserva el informe validado."]
+    decision_id = f"{state.run_id}:report_writer_revision:{revision_round:03d}"
     return ReportRevisionDecision(
-        decision_id=(
-            f"{state.run_id}:report_writer_revision:{revision_round:03d}"
-        ),
+        decision_id=decision_id,
         rationale=(
             "Deterministic revision policy: regenerate a conservative report from "
             "validated state and explicitly address verifier findings."
         ),
         confidence=0.82 if issues else 0.9,
+        hypothesis=_report_hypothesis(
+            state,
+            revision=True,
+            verification=verification,
+        ),
+        generation_trace=DecisionGenerationTrace.for_decision(
+            decision_id,
+            origin="deterministic",
+        ),
         revision_round=revision_round,
         revision_of_decision_id=(
             original_decision.decision_id
@@ -264,7 +372,10 @@ def _validated_report_decision_from_payload(
     state: TFMStateModel,
     payload: dict[str, Any],
 ) -> ReportDecision:
-    decision = ReportDecision.model_validate(payload)
+    trusted_payload = dict(payload)
+    trusted_payload.pop("generation_trace", None)
+    trusted_payload = _normalize_report_section_titles(trusted_payload)
+    decision = ReportDecision.model_validate(trusted_payload)
     _validate_report_decision_bounds(state, decision)
     return decision
 
@@ -274,14 +385,51 @@ def _validated_report_revision_decision_from_payload(
     verification: ReportVerificationDecision,
     payload: dict[str, Any],
 ) -> ReportRevisionDecision:
-    decision = ReportRevisionDecision.model_validate(payload)
+    trusted_payload = dict(payload)
+    trusted_payload.pop("generation_trace", None)
+    trusted_payload = _normalize_report_section_titles(trusted_payload)
+    decision = ReportRevisionDecision.model_validate(trusted_payload)
     _validate_report_revision_bounds(state, verification, decision)
     return decision
+
+
+def _normalize_report_section_titles(payload: dict[str, Any]) -> dict[str, Any]:
+    """Canoniza solo variantes ortograficas equivalentes de titulos requeridos."""
+
+    sections = payload.get("sections")
+    if not isinstance(sections, list):
+        return payload
+    normalized_sections: list[Any] = []
+    for raw_section in sections:
+        if not isinstance(raw_section, dict):
+            normalized_sections.append(raw_section)
+            continue
+        section = dict(raw_section)
+        title = section.get("title")
+        if isinstance(title, str):
+            canonical = CANONICAL_SECTION_TITLES_BY_KEY.get(
+                _report_section_title_key(title)
+            )
+            if canonical is not None:
+                section["title"] = canonical
+        normalized_sections.append(section)
+    return {**payload, "sections": normalized_sections}
+
+
+def _report_section_title_key(title: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", title)
+    without_marks = "".join(
+        character
+        for character in decomposed
+        if not unicodedata.combining(character)
+    )
+    return " ".join(without_marks.casefold().split())
 
 
 def _report_contract_repair_messages(
     original_messages: list[LLMMessage],
     *,
+    state: TFMStateModel,
     invalid_payload: dict[str, Any],
     validation_error: Exception,
 ) -> list[LLMMessage]:
@@ -299,8 +447,22 @@ def _report_contract_repair_messages(
                     f"Error de validacion: {validation_error}",
                     "Corrige solo lo necesario y reemite un unico objeto JSON valido.",
                     "No inventes rutas, evidencias ni metricas.",
+                    (
+                        "Incluye hypothesis con report_grounding para borrador o "
+                        "revision_effectiveness para revision, siempre contrastable."
+                    ),
                     "No cambies decision_id, output_path ni output_format.",
                     "Conserva todas las secciones obligatorias.",
+                    *(
+                        [
+                            "Para NASA IMS oficial v2, usa 'aceptada por controles operativos internos', nunca aprobacion del detector.",
+                            "Describe alerta algoritmica persistente, tiempo retrospectivo hasta el final registrado y tasa de alertas pre-monitorizacion.",
+                            "Reescribe toda magnitud temporal con esas dos expresiones, tambien en rationale y limitaciones; no cites las etiquetas rechazadas.",
+                            "No afirmes onset fisico, deteccion o diagnostico validados, evento fisico predicho ni RUL.",
+                        ]
+                        if uses_online_blind_view(state)
+                        else []
+                    ),
                     "No incluyas texto fuera del JSON.",
                 ]
             ),
@@ -319,6 +481,19 @@ def _should_use_llm(
     return os.getenv("TFM_REPORT_WRITER_MODE", "").strip().lower() == "llm"
 
 
+def _report_writer_system_scope(state: TFMStateModel) -> str:
+    if not uses_online_blind_view(state):
+        return ""
+    return (
+        " Para NASA IMS oficial causal v2 aplica un vocabulario obligatorio en "
+        f"todo el JSON, incluido rationale. Estado textual exacto: '{_approval_status(state)}'. "
+        "Usa 'trayectorias con alerta algoritmica persistente' y 'tiempo "
+        "retrospectivo hasta el final registrado'. Describe la limitacion como "
+        "'sin ground truth fisico por snapshot' y no cites etiquetas internas "
+        "alternativas, ni siquiera para negarlas."
+    )
+
+
 def _report_writer_messages(state: TFMStateModel) -> list[LLMMessage]:
     return [
         LLMMessage(
@@ -331,6 +506,7 @@ def _report_writer_messages(state: TFMStateModel) -> list[LLMMessage]:
                 "evidencias que no aparezcan en el estado. Debes devolver "
                 "exclusivamente un objeto JSON compatible con ReportDecision; "
                 "usa body, key_findings y recommendations para el texto humano."
+                f"{_report_writer_system_scope(state)}"
             ),
         ),
         LLMMessage(
@@ -348,6 +524,10 @@ def _report_writer_messages(state: TFMStateModel) -> list[LLMMessage]:
                     "- output_format debe ser markdown.",
                     f"- output_path debe ser {_default_report_path(state)}.",
                     "- Incluye todas las secciones obligatorias.",
+                    (
+                        "- hypothesis debe anticipar como el verificador podria "
+                        "apoyar o refutar la trazabilidad del informe."
+                    ),
                     "- Redacta las secciones en castellano tecnico claro.",
                     "- Manten cada body por debajo de 280 caracteres.",
                     "- Usa como maximo 3 key_findings y 2 recommendations por seccion.",
@@ -419,6 +599,10 @@ def _report_revision_messages(
                     "- output_format debe ser markdown.",
                     f"- output_path debe ser {_default_report_path(state)}.",
                     "- Conserva todas las secciones obligatorias.",
+                    (
+                        "- hypothesis debe usar kind=revision_effectiveness y "
+                        "declarar cuando una correccion se consideraria fallida."
+                    ),
                     "- Manten cada body por debajo de 280 caracteres.",
                     "- Usa como maximo 3 key_findings y 2 recommendations por seccion.",
                     "- accepted_issue_ids y rejected_issue_ids deben responder a las incidencias.",
@@ -439,6 +623,7 @@ def _report_json_template(state: TFMStateModel) -> dict[str, Any]:
         "decision_id": f"{state.run_id}:report_writer:{_report_turn(state):03d}",
         "rationale": "Motivo tecnico breve de la estructura propuesta.",
         "confidence": 0.9,
+        "hypothesis": _report_hypothesis(state).model_dump(mode="json"),
         "output_path": _default_report_path(state),
         "output_format": DEFAULT_REPORT_FORMAT,
         "sections": _compact_report_sections_template(state),
@@ -459,6 +644,11 @@ def _revision_json_template(
         "decision_id": f"{state.run_id}:report_writer_revision:{revision_round:03d}",
         "rationale": "Como se responde a la verificacion sin inventar evidencia.",
         "confidence": 0.86,
+        "hypothesis": _report_hypothesis(
+            state,
+            revision=True,
+            verification=verification,
+        ).model_dump(mode="json"),
         "revision_round": revision_round,
         "revision_of_decision_id": (
             original_decision.decision_id
@@ -490,7 +680,11 @@ def _compact_report_sections_template(state: TFMStateModel) -> list[dict[str, An
     return [
         {
             "title": "Resumen ejecutivo",
-            "body": "Sintesis breve de aprobacion, objetivo y cautelas.",
+            "body": (
+                "Sintesis: aceptada por controles operativos internos, objetivo y cautelas."
+                if uses_online_blind_view(state)
+                else "Sintesis breve de aprobacion, objetivo y cautelas."
+            ),
             "key_findings": ["Hallazgo principal."],
             "recommendations": ["Siguiente paso recomendado."],
             "evidence_refs": [],
@@ -500,7 +694,10 @@ def _compact_report_sections_template(state: TFMStateModel) -> list[dict[str, An
         },
         {
             "title": "Contexto y datos",
-            "body": "Dataset, perfil de supervision y fuente de etiquetas.",
+            "body": (
+                "Dataset, procedencia de las senales, perfil de supervision y "
+                "fuente de etiquetas."
+            ),
             "key_findings": ["Contexto relevante."],
             "recommendations": [],
             "evidence_refs": [],
@@ -520,8 +717,19 @@ def _compact_report_sections_template(state: TFMStateModel) -> list[dict[str, An
         },
         {
             "title": "Metricas y evaluacion",
-            "body": "Lectura principal de metricas y decision operacional.",
-            "key_findings": ["Metrica temporal clave."],
+            "body": (
+                "Trayectorias con alerta algoritmica persistente, tiempo "
+                "retrospectivo hasta el final registrado y tendencia del score."
+                if uses_online_blind_view(state)
+                else "Lectura principal de metricas y decision operacional."
+            ),
+            "key_findings": [
+                (
+                    "Tasa de alertas pre-monitorizacion y alcance descriptivo."
+                    if uses_online_blind_view(state)
+                    else "Metrica temporal clave."
+                )
+            ],
             "recommendations": ["Revisar evidencia temporal."],
             "evidence_refs": [],
             "include_metrics": True,
@@ -540,7 +748,11 @@ def _compact_report_sections_template(state: TFMStateModel) -> list[dict[str, An
         },
         {
             "title": "Limitaciones y siguientes pasos",
-            "body": "Limitaciones metodologicas y cautelas de uso.",
+            "body": (
+                "Sin ground truth fisico por snapshot; alcance descriptivo interno."
+                if uses_online_blind_view(state)
+                else "Limitaciones metodologicas y cautelas de uso."
+            ),
             "key_findings": ["Limitacion principal."],
             "recommendations": ["No extrapolar sin validacion adicional."],
             "evidence_refs": [],
@@ -556,12 +768,21 @@ def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
         "thread_id": state.thread_id,
         "run_id": state.run_id,
         "dataset": state.project_context.dataset,
+        "data_provenance": state.project_context.data_provenance,
+        "provenance_detection_method": (
+            state.project_context.provenance_detection_method
+        ),
+        "provenance_evidence_path": state.project_context.provenance_evidence_path,
+        "provenance_evidence_sha256": (
+            state.project_context.provenance_evidence_sha256
+        ),
         "objective": state.project_context.objective,
         "supervision_profile": state.project_context.supervision_profile,
         "label_source": state.project_context.label_source,
         "label_granularity": state.project_context.label_granularity,
-        "metrics": None if state.metrics is None else state.metrics.model_dump(mode="json"),
-        "evaluation": None if state.evaluation is None else state.evaluation.model_dump(mode="json"),
+        "reporting_semantics": _reporting_semantics_for_llm(state),
+        "metrics": _report_metrics_for_llm(state),
+        "evaluation": _report_evaluation_for_llm(state),
         "cleaning_config": None
         if state.cleaning_config is None
         else state.cleaning_config.model_dump(mode="json"),
@@ -583,6 +804,80 @@ def _state_summary_for_llm(state: TFMStateModel) -> dict[str, Any]:
         ],
         "errors": [error.model_dump(mode="json") for error in state.errors],
         "report_path": state.report_path,
+    }
+
+
+def _reporting_semantics_for_llm(state: TFMStateModel) -> dict[str, str] | None:
+    if not uses_online_blind_view(state):
+        return None
+    return {
+        "estado": _approval_status(state),
+        "magnitud_trayectorias": "trayectorias con alerta algoritmica persistente",
+        "magnitud_tiempo": "tiempo retrospectivo hasta el final registrado",
+        "alcance": "sin ground truth fisico por snapshot; descripcion interna",
+    }
+
+
+def _report_metrics_for_llm(state: TFMStateModel) -> dict[str, Any] | None:
+    if state.metrics is None:
+        return None
+    if not uses_online_blind_view(state):
+        return state.metrics.model_dump(mode="json")
+    return {
+        "vista": "official_v2_retrospective_reporting",
+        "metricas_binarias_aplicables": False,
+        "familia": state.metrics.extra.get("metric_families"),
+        "proporcion_trayectorias_con_alerta_algoritmica_persistente": (
+            _metric_extra_float_any(
+                state,
+                "degradation_confirmed_degradation_before_failure_rate",
+                "degradation_detected_before_failure_rate",
+            )
+        ),
+        "tiempo_retrospectivo_medio_hasta_final_registrado_segundos": (
+            _metric_extra_float_any(
+                state,
+                "degradation_mean_persistent_lead_time_to_failure",
+                "degradation_mean_lead_time_to_failure",
+            )
+        ),
+        "tasa_media_alertas_pre_monitorizacion": _metric_extra_float(
+            state,
+            "degradation_mean_false_alarm_rate_nominal",
+        ),
+        "caida_media_health_index": _metric_extra_float(
+            state,
+            "degradation_mean_health_index_drop",
+        ),
+        "monotonicidad_media_health_index": _metric_extra_float(
+            state,
+            "degradation_mean_health_monotonicity",
+        ),
+        "robustez_media_health_index": _metric_extra_float(
+            state,
+            "degradation_mean_health_robustness",
+        ),
+        "tendencia_media_spearman_score": _metric_extra_float(
+            state,
+            "degradation_mean_score_trend_spearman",
+        ),
+    }
+
+
+def _report_evaluation_for_llm(state: TFMStateModel) -> dict[str, Any] | None:
+    if state.evaluation is None:
+        return None
+    if not uses_online_blind_view(state):
+        return state.evaluation.model_dump(mode="json")
+    return {
+        "estado_controles_operativos_internos": (
+            "aceptada"
+            if state.evaluation.approved
+            else "no aceptada"
+        ),
+        "resumen": state.evaluation.summary,
+        "siguiente_accion": state.evaluation.next_action,
+        "limitaciones": state.evaluation.limitations,
     }
 
 
@@ -678,6 +973,8 @@ def _context_findings(state: TFMStateModel) -> list[str]:
         f"Modo de etiquetas: {state.project_context.label_mode}.",
         f"Perfil de supervision: {state.project_context.supervision_profile}.",
         f"Fuente de etiquetas: {state.project_context.label_source}.",
+        f"Procedencia de datos: {state.project_context.data_provenance}.",
+        _data_provenance_statement(state),
     ]
     if state.project_context.notes:
         findings.append(state.project_context.notes)
@@ -708,6 +1005,25 @@ def _metrics_body(state: TFMStateModel) -> str:
             "emitir un juicio cuantitativo cerrado."
         )
     if _uses_temporal_degradation_profile(state):
+        if uses_online_blind_view(state):
+            return (
+                "La evaluacion principal corresponde al protocolo oficial causal "
+                "run-to-failure. La lectura descriptiva usa trayectorias con primera "
+                "alerta algoritmica persistente="
+                f"{_format_metric(_metric_extra_float_any(state, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}, "
+                "tiempo retrospectivo desde esa alerta hasta el final registrado="
+                f"{_format_metric(_metric_extra_float_any(state, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}, "
+                "tasa de alertas pre-monitorizacion="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_false_alarm_rate_nominal'))}, "
+                "caida del Health Index="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_index_drop'))}, "
+                "monotonicidad del Health Index="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_monotonicity'))} "
+                "y tendencia Spearman del score="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_score_trend_spearman'))}. "
+                "No hay ground truth fisico por snapshot: estas magnitudes no validan "
+                "deteccion, diagnostico, inicio fisico ni RUL."
+            )
         return (
             "La evaluacion principal corresponde al perfil temporal "
             "run-to-failure. El informe interpreta el detector por trayectoria: "
@@ -739,6 +1055,39 @@ def _metrics_findings(state: TFMStateModel) -> list[str]:
     if state.metrics is None:
         return ["No hay metricas persistidas para esta run."]
     if _uses_temporal_degradation_profile(state):
+        if uses_online_blind_view(state):
+            return [
+                "Familia principal: run_to_failure_degradation.",
+                (
+                    "Trayectorias con alerta algoritmica persistente: "
+                    f"{_format_metric(_metric_extra_float_any(state, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}."
+                ),
+                (
+                    "Tiempo retrospectivo medio hasta el final registrado: "
+                    f"{_format_metric(_metric_extra_float_any(state, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}."
+                ),
+                (
+                    "Tasa media de alertas pre-monitorizacion: "
+                    f"{_format_metric(_metric_extra_float(state, 'degradation_mean_false_alarm_rate_nominal'))}."
+                ),
+                (
+                    "Caida media del Health Index: "
+                    f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_index_drop'))}."
+                ),
+                (
+                    "Monotonicidad media del Health Index: "
+                    f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_monotonicity'))}."
+                ),
+                (
+                    "Robustez media del Health Index: "
+                    f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_robustness'))}."
+                ),
+                (
+                    "Tendencia Spearman media del score: "
+                    f"{_format_metric(_metric_extra_float(state, 'degradation_mean_score_trend_spearman'))}."
+                ),
+                "Las metricas binarias no son aplicables sin etiquetas oficiales por snapshot.",
+            ]
         findings = [
             "Familia principal: run_to_failure_degradation.",
             (
@@ -791,6 +1140,11 @@ def _metrics_recommendations(state: TFMStateModel) -> list[str]:
     if state.evaluation is None:
         return ["Ejecutar evaluacion antes de usar el resultado como evidencia final."]
     if _uses_temporal_degradation_profile(state):
+        if uses_online_blind_view(state):
+            return [
+                "Revisar la curva temporal de score, umbral, primera alerta algoritmica persistente y final registrado.",
+                "Tratar la aceptacion como control interno del protocolo, no como validacion fisica o industrial.",
+            ]
         recommendations = [
             "Revisar la curva temporal de score, umbral, primera alerta y fallo estimado.",
             "No comparar esta run con CWRU solo por F1; usar metricas temporales y limitaciones.",
@@ -854,26 +1208,88 @@ def _limitation_recommendations(state: TFMStateModel) -> list[str]:
         recommendations.append(
             "Explicitar la politica temporal y no presentar etiquetas proxy como oficiales."
         )
+    if state.project_context.data_provenance in {"synthetic", "unknown"}:
+        recommendations.append(
+            "Explicitar la procedencia de las senales y no presentarlas como datos "
+            "oficiales del dataset de referencia."
+        )
     return recommendations
 
 
 def _profile_specific_report_rules(state: TFMStateModel) -> list[str]:
-    if not _uses_temporal_degradation_profile(state):
-        return []
-    return [
-        (
-            "- Para run_to_failure_degradation, presenta lead time, falsas "
-            "alarmas nominales y tendencia del score como lectura principal."
-        ),
-        (
-            "- No presentes F1 como metrica principal si las etiquetas son "
-            "proxy, sinteticas o no oficiales."
-        ),
-        (
-            "- Si label_source no es official, declara explicitamente que no "
-            "hay etiquetas oficiales por ventana."
-        ),
-    ]
+    rules: list[str] = []
+    if _uses_temporal_degradation_profile(state):
+        if uses_online_blind_view(state):
+            rules.extend(
+                [
+                    (
+                        "- Para NASA IMS oficial causal v2, approved solo significa "
+                        "aceptacion por controles operativos internos; usa esa expresion."
+                    ),
+                    (
+                        "- Presenta primera alerta algoritmica persistente, tiempo "
+                        "retrospectivo hasta el final registrado, tasa de alertas "
+                        "pre-monitorizacion y tendencia del score."
+                    ),
+                    (
+                        "- En rationale y en todas las secciones usa exclusivamente "
+                        "'trayectorias con alerta algoritmica persistente' y "
+                        "'tiempo retrospectivo hasta el final registrado' para las "
+                        "dos magnitudes temporales; no cites nombres alternativos."
+                    ),
+                    (
+                        "- No afirmes onset fisico, deteccion o diagnostico validados, "
+                        "evento fisico predicho, RUL ni generalizacion industrial."
+                    ),
+                    (
+                        "- Declara que label_source=none implica ausencia de ground "
+                        "truth fisico y que las metricas binarias no son aplicables."
+                    ),
+                ]
+            )
+        else:
+            rules.extend(
+                [
+                    (
+                        "- Para run_to_failure_degradation, presenta lead time, falsas "
+                        "alarmas nominales y tendencia del score como lectura principal."
+                    ),
+                    (
+                        "- No presentes F1 como metrica principal si las etiquetas son "
+                        "proxy, sinteticas o no oficiales."
+                    ),
+                    (
+                        "- Si label_source no es official, declara explicitamente que no "
+                        "hay etiquetas oficiales por ventana."
+                    ),
+                ]
+            )
+    if state.project_context.data_provenance == "synthetic":
+        rules.append(
+            "- Declara que las senales son sinteticas tipo NASA IMS y que no son "
+            "mediciones oficiales del NASA IMS Bearing Dataset."
+        )
+    elif state.project_context.data_provenance == "unknown":
+        rules.append(
+            "- Declara que la procedencia de las senales no esta verificada y no "
+            "las presentes como datos oficiales del dataset de referencia."
+        )
+    return rules
+
+
+def _data_provenance_statement(state: TFMStateModel) -> str:
+    provenance = state.project_context.data_provenance
+    if provenance == "synthetic":
+        return (
+            "Las senales son sinteticas tipo NASA IMS y no son mediciones "
+            "oficiales del NASA IMS Bearing Dataset."
+        )
+    if provenance == "unknown":
+        return (
+            "La procedencia de las senales no esta verificada; no pueden "
+            "presentarse como datos oficiales del dataset de referencia."
+        )
+    return "La procedencia de las senales esta declarada como official."
 
 
 def _uses_temporal_degradation_profile(state: TFMStateModel) -> bool:
@@ -995,6 +1411,10 @@ def _sections_with_verification_notes(
 def _approval_status(state: TFMStateModel) -> str:
     if state.evaluation is None:
         return "pendiente de evaluacion"
+    if uses_online_blind_view(state):
+        if state.evaluation.approved:
+            return "aceptada por controles operativos internos"
+        return "completada sin superar los controles operativos internos"
     if state.evaluation.approved:
         return "aprobada por el evaluador"
     return "completada pero no aprobada por el evaluador"
@@ -1004,6 +1424,22 @@ def _metric_phrase(state: TFMStateModel) -> str:
     if state.metrics is None:
         return "No hay metricas cuantitativas agregadas en el estado."
     if _uses_temporal_degradation_profile(state):
+        if uses_online_blind_view(state):
+            return (
+                "El resumen temporal descriptivo es "
+                "trayectorias_con_alerta_algoritmica_persistente="
+                f"{_format_metric(_metric_extra_float_any(state, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}, "
+                "tiempo_retrospectivo_hasta_fin_registrado="
+                f"{_format_metric(_metric_extra_float_any(state, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}, "
+                "tasa_alertas_pre_monitorizacion="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_false_alarm_rate_nominal'))}, "
+                "HI_drop="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_index_drop'))}, "
+                "HI_monotonicidad="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_health_monotonicity'))} "
+                "y tendencia_score="
+                f"{_format_metric(_metric_extra_float(state, 'degradation_mean_score_trend_spearman'))}."
+            )
         return (
             "El resumen temporal principal es onset_confirmado="
             f"{_format_metric(_metric_extra_float_any(state, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}, "
@@ -1040,10 +1476,99 @@ def _format_metric(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
 
 
+def _report_hypothesis(
+    state: TFMStateModel,
+    *,
+    revision: bool = False,
+    verification: ReportVerificationDecision | None = None,
+) -> AgentHypothesis:
+    online_blind = uses_online_blind_view(state)
+    if revision:
+        issue_count = 0 if verification is None else len(_verification_issues(verification))
+        return AgentHypothesis(
+            kind="revision_effectiveness",
+            statement=(
+                "Las correcciones propuestas resolveran las incidencias aceptadas "
+                "sin introducir afirmaciones nuevas no respaldadas."
+            ),
+            scope=(
+                f"Run {state.run_id}; revision del informe tecnico; "
+                f"{issue_count} incidencias disponibles."
+            ),
+            evidence_cutoff=(
+                "Informe anterior, verificacion estructurada y evidencias ya persistidas."
+            ),
+            expected_observation=(
+                "La siguiente verificacion no conserva las incidencias respondidas, "
+                "no detecta claims nuevos y mantiene o mejora la cobertura de evidencia."
+            ),
+            falsification_criterion=(
+                "Persiste una incidencia aceptada, la correccion es solo cosmetica o "
+                "aparece un claim, limitacion ausente o referencia nueva no soportada."
+            ),
+            evidence_refs=[
+                "report:previous_revision",
+                "verification:structured_issues",
+            ],
+            risk_notes=[
+                "Corregir una frase puede eliminar contexto o una limitacion que si era valida."
+            ],
+            assumptions=[
+                "La eficacia de la revision solo puede juzgarla una verificacion posterior."
+            ],
+        )
+    return AgentHypothesis(
+        kind="report_grounding",
+        statement=(
+            "La estructura propuesta comunicara resultados, evidencias y limitaciones "
+            "sin introducir afirmaciones no respaldadas."
+        ),
+        scope=(
+            f"Informe tecnico de la run {state.run_id}; dataset "
+            f"{state.project_context.dataset}; no memoria academica del TFM."
+        ),
+        evidence_cutoff=(
+            "Estado final, metricas, evaluacion y artefactos disponibles antes de redactar."
+        ),
+        expected_observation=(
+            "Cada afirmacion material queda enlazada a evidencia, las limitaciones "
+            "son visibles y el verificador no requiere correcciones factuales."
+        ),
+        falsification_criterion=(
+            "El verificador detecta claims sin soporte, resultados omitidos, "
+            "contradicciones o limitaciones necesarias ausentes."
+        ),
+        evidence_refs=[
+            "state:project_context",
+            "metrics:final",
+            "evaluation:decision",
+            "artifacts:run",
+        ],
+        risk_notes=[
+            (
+                "La redaccion no debe convertir alertas algoritmicas en fallo fisico."
+                if online_blind
+                else "La redaccion no debe presentar un benchmark local como validacion industrial."
+            )
+        ],
+        assumptions=[
+            "La aprobacion posterior del verificador es evidencia separada de la propuesta del redactor."
+        ],
+    )
+
+
 def _validate_report_decision_bounds(
     state: TFMStateModel,
     decision: ReportDecision,
 ) -> None:
+    require_agent_hypothesis(
+        decision,
+        allowed_kinds=(
+            {"revision_effectiveness"}
+            if isinstance(decision, ReportRevisionDecision)
+            else {"report_grounding"}
+        ),
+    )
     if decision.output_format != DEFAULT_REPORT_FORMAT:
         raise ValueError("output_format must be markdown for the MVP")
     expected_path = _default_report_path(state)
@@ -1063,6 +1588,10 @@ def _validate_report_decision_bounds(
                 f"unsupported source paths in section {section.title}: "
                 f"{', '.join(unsupported)}"
             )
+    assert_official_v2_claims_are_scoped(
+        state,
+        _report_decision_narrative(decision),
+    )
 
 
 def _validate_report_revision_bounds(
@@ -1097,6 +1626,40 @@ def _validate_report_revision_bounds(
     unknown = sorted(answered - issue_ids)
     if unknown:
         raise ValueError("revision cites unknown issue ids: " + ", ".join(unknown))
+    assert_official_v2_claims_are_scoped(
+        state,
+        [
+            *decision.changes_summary,
+            *decision.rejection_rationales.values(),
+        ],
+    )
+
+
+def _report_decision_narrative(decision: ReportDecision) -> list[str]:
+    hypothesis = decision.hypothesis
+    texts = [decision.rationale]
+    if hypothesis is not None:
+        texts.extend(
+            [
+                hypothesis.statement,
+                hypothesis.scope,
+                hypothesis.evidence_cutoff,
+                hypothesis.expected_observation,
+                hypothesis.falsification_criterion,
+                *hypothesis.risk_notes,
+                *hypothesis.assumptions,
+            ]
+        )
+    for section in decision.sections:
+        texts.extend(
+            [
+                section.title,
+                section.body or "",
+                *section.key_findings,
+                *section.recommendations,
+            ]
+        )
+    return texts
 
 
 def _allowed_source_paths(state: TFMStateModel) -> set[str]:

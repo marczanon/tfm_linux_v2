@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 import joblib
@@ -93,6 +95,7 @@ METADATA_COLUMNS = {
     "time_since_start_seconds",
     "time_to_failure_seconds",
     "relative_life",
+    "temporal_partition",
     "split",
     "label",
     "target",
@@ -115,6 +118,7 @@ PREDICTION_FIELDS = [
     "time_since_start_seconds",
     "time_to_failure_seconds",
     "relative_life",
+    "temporal_partition",
     "split",
     "label",
     "target",
@@ -188,6 +192,15 @@ def generate_model_outputs(
                     "model_name": summary["model_name"],
                     "n_train_windows": summary["n_train_windows"],
                     "n_features": len(summary["feature_columns"]),
+                    "threshold_source_split": summary[
+                        "threshold_source_split"
+                    ],
+                    "threshold_source_partition": summary[
+                        "threshold_source_partition"
+                    ],
+                    "n_calibration_windows": summary[
+                        "n_calibration_windows"
+                    ],
                 },
             ),
             ArtifactRef(
@@ -195,14 +208,36 @@ def generate_model_outputs(
                 artifact_type="predictions",
                 path=summary["predictions_path"],
                 producer="modeling_executor",
-                metadata={"n_predictions": summary["n_predictions"]},
+                metadata={
+                    "n_predictions": summary["n_predictions"],
+                    "threshold_source_split": summary[
+                        "threshold_source_split"
+                    ],
+                    "n_calibration_windows": summary[
+                        "n_calibration_windows"
+                    ],
+                },
             ),
             ArtifactRef(
                 name="modeling_summary",
                 artifact_type="log",
                 path=summary["summary_path"],
                 producer="modeling_executor",
-                metadata={"threshold": summary["threshold"]},
+                metadata={
+                    "threshold": summary["threshold"],
+                    "threshold_source_split": summary[
+                        "threshold_source_split"
+                    ],
+                    "threshold_source_partition": summary[
+                        "threshold_source_partition"
+                    ],
+                    "n_threshold_source_windows": summary[
+                        "n_threshold_source_windows"
+                    ],
+                    "n_calibration_windows": summary[
+                        "n_calibration_windows"
+                    ],
+                },
             ),
         ]
         if summary.get("preprocessor_path"):
@@ -278,6 +313,7 @@ def train_anomaly_model(
 
     data = pd.read_csv(features_path)
     feature_columns = _feature_columns(data)
+    temporal_partitions = _run_to_failure_v2_partitions(data)
     train = data[(data["split"] == "train") & (data["label"] == "normal")]
     if train.empty:
         raise ValueError("training requires normal windows in split=train")
@@ -288,7 +324,22 @@ def train_anomaly_model(
         data,
         feature_columns,
     )
-    threshold = _threshold(scores, data["split"].to_numpy(), threshold_quantile)
+    (
+        threshold,
+        threshold_source_split,
+        threshold_source_partition,
+        n_threshold_source_windows,
+    ) = _threshold(
+        scores,
+        data["split"].to_numpy(),
+        threshold_quantile,
+        temporal_partitions=temporal_partitions,
+    )
+    n_calibration_windows = (
+        n_threshold_source_windows
+        if threshold_source_partition == "calibration"
+        else 0
+    )
     predictions = _prediction_rows(data, scores, threshold)
 
     output = Path(output_dir)
@@ -300,6 +351,10 @@ def train_anomaly_model(
         {
             "feature_columns": feature_columns,
             "threshold": threshold,
+            "threshold_source_split": threshold_source_split,
+            "threshold_source_partition": threshold_source_partition,
+            "n_threshold_source_windows": n_threshold_source_windows,
+            "n_calibration_windows": n_calibration_windows,
             "config": config.model_dump(mode="json"),
         }
     )
@@ -316,6 +371,10 @@ def train_anomaly_model(
         summary_path,
         threshold,
         threshold_quantile,
+        threshold_source_split,
+        threshold_source_partition,
+        n_threshold_source_windows,
+        n_calibration_windows,
     )
     summary.update(extra_summary)
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -409,22 +468,26 @@ def _fit_and_score(
         params, threshold_quantile = _isolation_forest_params(config)
         model = IsolationForest(random_state=config.random_state, **params)
         model.fit(train[feature_columns].to_numpy(dtype=float))
-        scores = -model.score_samples(data[feature_columns].to_numpy(dtype=float))
-        return {"model": model, "model_family": "sklearn_isolation_forest"}, scores, threshold_quantile
+        bundle = {
+            "model": model,
+            "model_family": "sklearn_isolation_forest",
+            "feature_columns": feature_columns,
+        }
+        return bundle, score_frozen_feature_rows(bundle, data), threshold_quantile
 
     if config.model_name == "one_class_svm":
         params, threshold_quantile = _one_class_svm_params(config)
         scaler = StandardScaler()
         train_matrix = scaler.fit_transform(train[feature_columns].to_numpy(dtype=float))
-        all_matrix = scaler.transform(data[feature_columns].to_numpy(dtype=float))
         model = OneClassSVM(**params)
         model.fit(train_matrix)
-        scores = -model.decision_function(all_matrix)
-        return {
+        bundle = {
             "model": model,
             "scaler": scaler,
             "model_family": "sklearn_one_class_svm",
-        }, scores, threshold_quantile
+            "feature_columns": feature_columns,
+        }
+        return bundle, score_frozen_feature_rows(bundle, data), threshold_quantile
 
     if config.model_name == "autoencoder_dense":
         return _fit_autoencoder_dense(config, train, data, feature_columns)
@@ -432,16 +495,130 @@ def _fit_and_score(
     params, threshold_quantile = _pca_params(config)
     scaler = StandardScaler()
     train_matrix = scaler.fit_transform(train[feature_columns].to_numpy(dtype=float))
-    all_matrix = scaler.transform(data[feature_columns].to_numpy(dtype=float))
     model = PCA(random_state=config.random_state, **params)
     model.fit(train_matrix)
-    reconstructed = model.inverse_transform(model.transform(all_matrix))
-    scores = np.mean((all_matrix - reconstructed) ** 2, axis=1)
-    return {
+    bundle = {
         "model": model,
         "scaler": scaler,
         "model_family": "pca_reconstruction_error",
-    }, scores, threshold_quantile
+        "feature_columns": feature_columns,
+    }
+    return bundle, score_frozen_feature_rows(bundle, data), threshold_quantile
+
+
+def load_frozen_model_bundle(
+    path: str | Path,
+    *,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Carga un bundle sklearn persistido por este ejecutor.
+
+    El hash se verifica antes de deserializar el artefacto joblib. La funcion
+    valida despues el contrato minimo necesario para inferencia; nunca ajusta
+    ni modifica el modelo cargado.
+    """
+
+    artifact_path = Path(path)
+    if len(expected_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_sha256
+    ):
+        raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+    digest = hashlib.sha256()
+    with artifact_path.open("rb") as artifact:
+        for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            "frozen model SHA-256 mismatch: "
+            f"expected {expected_sha256}, received {actual_sha256}"
+        )
+    bundle = joblib.load(artifact_path)
+    if not isinstance(bundle, dict):
+        raise ValueError("frozen model artifact must contain a dictionary bundle")
+    required = {"model", "model_family", "feature_columns", "threshold"}
+    missing = required - set(bundle)
+    if missing:
+        raise ValueError(
+            "frozen model bundle is missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+    return bundle
+
+
+def score_frozen_feature_rows(
+    model_bundle: Mapping[str, Any],
+    rows: pd.DataFrame,
+) -> np.ndarray:
+    """Aplica un bundle sklearn congelado a filas de features ordenadas.
+
+    Esta es la frontera compartida entre el batch y el replay: ambos usan la
+    misma formula de score y el mismo orden de columnas. La funcion es de
+    inferencia pura y no llama a ``fit``.
+    """
+
+    raw_columns = model_bundle.get("feature_columns")
+    if not isinstance(raw_columns, list) or not raw_columns or not all(
+        isinstance(column, str) and column for column in raw_columns
+    ):
+        raise ValueError("frozen model bundle has invalid feature_columns")
+    feature_columns = list(raw_columns)
+    missing_columns = set(feature_columns) - set(rows.columns)
+    if missing_columns:
+        raise ValueError(
+            "feature rows are missing frozen model columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+    matrix = rows.loc[:, feature_columns].to_numpy(dtype=float)
+    if not np.isfinite(matrix).all():
+        raise ValueError("frozen model inference requires finite feature values")
+
+    model = model_bundle.get("model")
+    family = str(model_bundle.get("model_family", ""))
+    if family == "sklearn_isolation_forest":
+        if model is None or not callable(getattr(model, "score_samples", None)):
+            raise ValueError("frozen isolation forest bundle has invalid model")
+        scores = np.asarray(-model.score_samples(matrix), dtype=float).reshape(-1)
+        return _validated_frozen_scores(scores, expected_rows=len(rows))
+
+    scaler = model_bundle.get("scaler")
+    if scaler is None or not callable(getattr(scaler, "transform", None)):
+        raise ValueError(f"frozen model family {family or 'unknown'} requires scaler")
+    scaled = scaler.transform(matrix)
+    if family == "sklearn_one_class_svm":
+        if model is None or not callable(getattr(model, "decision_function", None)):
+            raise ValueError("frozen one-class SVM bundle has invalid model")
+        scores = np.asarray(-model.decision_function(scaled), dtype=float).reshape(-1)
+        return _validated_frozen_scores(scores, expected_rows=len(rows))
+    if family == "pca_reconstruction_error":
+        if model is None or not all(
+            callable(getattr(model, method, None))
+            for method in ("transform", "inverse_transform")
+        ):
+            raise ValueError("frozen PCA bundle has invalid model")
+        reconstructed = model.inverse_transform(model.transform(scaled))
+        scores = np.asarray(
+            np.mean((scaled - reconstructed) ** 2, axis=1),
+            dtype=float,
+        )
+        return _validated_frozen_scores(scores, expected_rows=len(rows))
+    raise ValueError(f"unsupported frozen model family: {family or 'unknown'}")
+
+
+def _validated_frozen_scores(
+    scores: np.ndarray,
+    *,
+    expected_rows: int,
+) -> np.ndarray:
+    flattened = np.asarray(scores, dtype=float).reshape(-1)
+    if len(flattened) != expected_rows:
+        raise ValueError(
+            "frozen model returned an unexpected score shape: "
+            f"expected {expected_rows}, received {len(flattened)}"
+        )
+    if not np.isfinite(flattened).all():
+        raise ValueError("frozen model returned non-finite anomaly scores")
+    return flattened
 
 
 def _autoencoder_dense_params(
@@ -859,10 +1036,89 @@ def _validate_one_class_svm_params(params: dict[str, Any]) -> None:
             raise ValueError("one_class_svm max_iter must be -1 or between 100 and 100000")
 
 
-def _threshold(scores: np.ndarray, splits: np.ndarray, quantile: float) -> float:
+_RUN_TO_FAILURE_V2_PARTITION_SPLITS = {
+    "baseline_train": "train",
+    "calibration": "validation",
+    "monitoring": "test",
+}
+
+
+def _run_to_failure_v2_partitions(data: pd.DataFrame) -> np.ndarray | None:
+    """Detecta y valida la particion causal v2 propagada a las ventanas."""
+
+    if "temporal_partition" not in data.columns:
+        return None
+    partitions = (
+        data["temporal_partition"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .to_numpy()
+    )
+    present = {value for value in partitions if value}
+    expected = set(_RUN_TO_FAILURE_V2_PARTITION_SPLITS)
+    if not present & expected:
+        return None
+    unsupported = present - expected
+    if unsupported:
+        raise ValueError(
+            "unsupported temporal_partition values for run-to-failure v2: "
+            + ", ".join(sorted(unsupported))
+        )
+    if any(not value for value in partitions):
+        raise ValueError(
+            "run-to-failure v2 requires temporal_partition on every window"
+        )
+    splits = data["split"].astype(str).to_numpy()
+    mismatches = [
+        f"{partition}->{split}"
+        for partition, split in zip(partitions, splits, strict=True)
+        if split != _RUN_TO_FAILURE_V2_PARTITION_SPLITS[partition]
+    ]
+    if mismatches:
+        raise ValueError(
+            "run-to-failure v2 temporal_partition/split mismatch: "
+            + ", ".join(sorted(set(mismatches)))
+        )
+    return partitions
+
+
+def _threshold(
+    scores: np.ndarray,
+    splits: np.ndarray,
+    quantile: float,
+    *,
+    temporal_partitions: np.ndarray | None = None,
+) -> tuple[float, str, str | None, int]:
+    if temporal_partitions is not None:
+        calibration_scores = scores[temporal_partitions == "calibration"]
+        if not calibration_scores.size:
+            raise ValueError(
+                "run-to-failure v2 requires calibration windows in "
+                "split=validation; threshold fallback to train/test is forbidden"
+            )
+        return (
+            float(np.quantile(calibration_scores, quantile)),
+            "validation",
+            "calibration",
+            int(calibration_scores.size),
+        )
+
     validation_scores = scores[splits == "validation"]
-    source = validation_scores if validation_scores.size else scores[splits == "train"]
-    return float(np.quantile(source, quantile))
+    if validation_scores.size:
+        return (
+            float(np.quantile(validation_scores, quantile)),
+            "validation",
+            None,
+            int(validation_scores.size),
+        )
+    train_scores = scores[splits == "train"]
+    return (
+        float(np.quantile(train_scores, quantile)),
+        "train",
+        None,
+        int(train_scores.size),
+    )
 
 
 def _prediction_rows(
@@ -893,9 +1149,12 @@ def _prediction_rows(
                     row.get("time_to_failure_seconds", "")
                 ),
                 "relative_life": _optional_value(row.get("relative_life", "")),
+                "temporal_partition": _optional_text(
+                    row.get("temporal_partition", "")
+                ),
                 "split": row["split"],
                 "label": row["label"],
-                "target": row["target"],
+                "target": _optional_value(row["target"]),
                 "fault_type": _optional_text(row.get("fault_type", "")),
                 "anomaly_score": float(score),
                 "threshold": threshold,
@@ -931,6 +1190,10 @@ def _summary(
     summary_path: Path,
     threshold: float,
     threshold_quantile: float,
+    threshold_source_split: str,
+    threshold_source_partition: str | None,
+    n_threshold_source_windows: int,
+    n_calibration_windows: int,
 ) -> dict[str, Any]:
     prediction_counts = Counter(row["predicted_anomaly"] for row in predictions)
     return {
@@ -943,6 +1206,10 @@ def _summary(
         "feature_columns": feature_columns,
         "threshold": threshold,
         "threshold_quantile": threshold_quantile,
+        "threshold_source_split": threshold_source_split,
+        "threshold_source_partition": threshold_source_partition,
+        "n_threshold_source_windows": n_threshold_source_windows,
+        "n_calibration_windows": n_calibration_windows,
         "n_train_windows": int(len(train)),
         "n_predictions": int(len(predictions)),
         "split_counts": dict(Counter(data["split"])),

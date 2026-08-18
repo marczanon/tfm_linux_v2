@@ -108,9 +108,13 @@ export function AgentMemoryPanel({
       </summary>
 
       <div className="memory-panel-body">
+        <div className="memory-scope-heading">
+          <strong>Estado actual del indice</strong>
+          <span>Puede haber cambiado despues de la ejecucion seleccionada.</span>
+        </div>
         <div className="memory-cockpit-grid">
           <MemoryStat label="Total" value={collection?.n_records ?? 0} />
-          <MemoryStat label="Reutilizables" value={collection?.n_reusable ?? 0} />
+          <MemoryStat label="Habilitados indice" value={collection?.n_reusable ?? 0} />
           <MemoryStat label="Datasets" value={collection?.datasets.length ?? 0} />
           <MemoryStat label="Excluidos" value={collection?.n_excluded ?? 0} tone="warning" />
         </div>
@@ -213,50 +217,51 @@ function MemoryRuntimeSummaryCard({
   summary: MemoryRuntimeSummary;
   onSelectRecord: (memoryRecordId: string) => void;
 }) {
-  const usageEntries = memoryUsageSummaryEntries(summary.usageCounts);
+  const latestUsageEntries = memoryUsageSummaryEntries(summary.latestUsageCounts);
+  const runUsageEntries = memoryUsageSummaryEntries(summary.usageCounts);
   return (
     <section className="memory-retrieval-summary">
       <div className="memory-retrieval-head">
         <div>
-          <h4>Retrieval actual</h4>
+          <h4>Ultimo contexto de la run</h4>
           <p>{summary.latestContextId ?? "sin contexto activo"}</p>
         </div>
-        <span className={`memory-quality-badge ${summary.signal.tone}`}>
-          {summary.signal.label}
+        <span className={`memory-quality-badge ${summary.latestSignal.tone}`}>
+          {summary.latestSignal.label}
         </span>
       </div>
 
       <div className="memory-retrieval-grid">
-        <MemoryStat label="Recuperados" value={summary.retrievedIds.size} />
-        <MemoryStat label="Usados" value={summary.citedIds.size} />
-        <MemoryStat label="Ignorados" value={summary.ignoredIds.size} />
-        <MemoryStat label="Excluidos" value={summary.excludedIds.size} tone="warning" />
+        <MemoryStat label="Recuperados" value={summary.latestRetrievedIds.size} />
+        <MemoryStat label="Usados" value={summary.latestCitedIds.size} />
+        <MemoryStat label="Ignorados" value={summary.latestIgnoredIds.size} />
+        <MemoryStat label="Filtrados gate" value={summary.latestGateExcludedIds.size} tone="warning" />
       </div>
 
-      {summary.latestUsageSummary ? (
+      {summary.latestContextUsageSummary ? (
         <details className="compact-disclosure memory-summary-disclosure">
           <summary>Resumen de uso</summary>
           <p className="memory-usage-summary">
-            {shortText(summary.latestUsageSummary, 260)}
+            {shortText(summary.latestContextUsageSummary, 260)}
           </p>
         </details>
       ) : null}
 
       <div className="memory-flow-meta">
         <span>
-          sim media: <strong>{formatSimilarity(summary.averageSimilarity)}</strong>
+          sim media: <strong>{formatSimilarity(summary.latestAverageSimilarity)}</strong>
         </span>
         <span>
-          sim max: <strong>{formatSimilarity(summary.maxSimilarity)}</strong>
+          sim max: <strong>{formatSimilarity(summary.latestMaxSimilarity)}</strong>
         </span>
         <span>
-          cautelas: <strong>{summary.cautionCount}</strong>
+          contextos: <strong>{summary.contextCount}</strong>
         </span>
       </div>
 
-      {usageEntries.length > 0 ? (
+      {latestUsageEntries.length > 0 ? (
         <div className="memory-usage-strip">
-          {usageEntries.map((entry) => (
+          {latestUsageEntries.map((entry) => (
             <span className={`memory-use-chip ${entry.tone}`} key={entry.usage}>
               {entry.label} · {entry.count}
             </span>
@@ -264,9 +269,9 @@ function MemoryRuntimeSummaryCard({
         </div>
       ) : null}
 
-      {summary.ignoredIds.size > 0 || summary.excludedIds.size > 0 ? (
+      {summary.latestIgnoredIds.size > 0 || summary.latestGateExcludedIds.size > 0 ? (
         <div className="memory-chip-row">
-          {Array.from(summary.ignoredIds).slice(0, 3).map((memoryId) => (
+          {Array.from(summary.latestIgnoredIds).slice(0, 3).map((memoryId) => (
             <button
               className="memory-chip subtle memory-chip-button"
               key={`summary-ignored-${memoryId}`}
@@ -276,18 +281,46 @@ function MemoryRuntimeSummaryCard({
               ignorado · {memoryId}
             </button>
           ))}
-          {Array.from(summary.excludedIds).slice(0, 3).map((memoryId) => (
+          {Array.from(summary.latestGateExcludedIds).slice(0, 3).map((memoryId) => (
             <button
               className="memory-chip excluded memory-chip-button"
               key={`summary-excluded-${memoryId}`}
               type="button"
               onClick={() => onSelectRecord(memoryId)}
             >
-              excluido · {memoryId}
+              filtrado por gate · {memoryId}
             </button>
           ))}
         </div>
       ) : null}
+
+      <section className="memory-run-aggregate">
+        <div className="memory-scope-heading compact">
+          <strong>Acumulado de la run</strong>
+          <span>No se confunde con el ultimo contexto ni con el indice actual.</span>
+        </div>
+        <div className="memory-retrieval-grid">
+          <MemoryStat label="Recuperados unicos" value={summary.retrievedIds.size} />
+          <MemoryStat label="Usados unicos" value={summary.citedIds.size} />
+          <MemoryStat label="Ignorados unicos" value={summary.ignoredIds.size} />
+          <MemoryStat label="Filtrados gate" value={summary.runtimeGateExcludedIds.size} tone="warning" />
+        </div>
+        <div className="memory-flow-meta">
+          <span>sim media: <strong>{formatSimilarity(summary.averageSimilarity)}</strong></span>
+          <span>sim max: <strong>{formatSimilarity(summary.maxSimilarity)}</strong></span>
+          <span>cautelas: <strong>{summary.cautionCount}</strong></span>
+          <span>excluidos ahora: <strong>{summary.excludedIds.size}</strong></span>
+        </div>
+        {runUsageEntries.length > 0 ? (
+          <div className="memory-usage-strip">
+            {runUsageEntries.map((entry) => (
+              <span className={`memory-use-chip ${entry.tone}`} key={`run-${entry.usage}`}>
+                {entry.label} · {entry.count}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </section>
     </section>
   );
 }
@@ -355,7 +388,6 @@ function MemoryRuntimeFlow({
             const ignoredIds = stringArrayFromPayload(event.payload, "ignored_memory_record_ids");
             const usageSummary = stringFromPayload(event.payload, "memory_usage_summary");
             const recordUses = memoryRecordUses(event);
-            const fallbackIds = event.memory_record_ids;
             return (
               <article className="memory-flow-event" key={event.event_id}>
                 <div>
@@ -402,9 +434,9 @@ function MemoryRuntimeFlow({
                     onSelectRecord={onSelectRecord}
                   />
                 ) : null}
-                {citedIds.length > 0 || ignoredIds.length > 0 || fallbackIds.length > 0 ? (
+                {citedIds.length > 0 || ignoredIds.length > 0 ? (
                   <div className="memory-chip-row">
-                    {(citedIds.length > 0 ? citedIds : fallbackIds).slice(0, 4).map((memoryId) => (
+                    {citedIds.slice(0, 4).map((memoryId) => (
                       <button
                         className="memory-chip memory-chip-button"
                         key={`${event.event_id}-cited-${memoryId}`}
@@ -549,6 +581,18 @@ function memoryFlowMeta(event: AgentRuntimeEvent): { label: string; value: strin
       label: "dataset",
       value: stringValue(query?.dataset),
     },
+    {
+      label: "brutos",
+      value: stringValue(event.payload.raw_count),
+    },
+    {
+      label: "efectivos",
+      value: stringValue(event.payload.effective_count),
+    },
+    {
+      label: "filtrados",
+      value: stringValue(event.payload.filtered_count),
+    },
   ];
   return items.filter((item): item is { label: string; value: string } => item.value !== null);
 }
@@ -585,13 +629,23 @@ interface MemoryRuntimeSummary {
   citedIds: Set<string>;
   ignoredIds: Set<string>;
   excludedIds: Set<string>;
+  runtimeGateExcludedIds: Set<string>;
+  latestRetrievedIds: Set<string>;
+  latestCitedIds: Set<string>;
+  latestIgnoredIds: Set<string>;
+  latestGateExcludedIds: Set<string>;
   usageCounts: Record<string, number>;
-  latestUsageSummary: string | null;
+  latestUsageCounts: Record<string, number>;
+  latestContextUsageSummary: string | null;
   latestContextId: string | null;
+  contextCount: number;
   averageSimilarity: number | null;
   maxSimilarity: number | null;
+  latestAverageSimilarity: number | null;
+  latestMaxSimilarity: number | null;
   cautionCount: number;
   signal: { label: string; tone: "ok" | "warning" | "danger" | "muted" };
+  latestSignal: { label: string; tone: "ok" | "warning" | "danger" | "muted" };
 }
 
 function buildMemoryRuntimeSummary(
@@ -601,53 +655,88 @@ function buildMemoryRuntimeSummary(
   const retrievedIds = new Set<string>();
   const citedIds = new Set<string>();
   const ignoredIds = new Set<string>();
+  const runtimeGateExcludedIds = new Set<string>();
+  const latestRetrievedIds = new Set<string>();
+  const latestCitedIds = new Set<string>();
+  const latestIgnoredIds = new Set<string>();
+  const latestGateExcludedIds = new Set<string>();
   const excludedIds = new Set(
     records
       .filter((record) => record.exclude_from_context || record.memory_role === "excluded")
       .map((record) => record.memory_record_id),
   );
   const usageCounts: Record<string, number> = {};
+  const latestUsageCounts: Record<string, number> = {};
   const similarities: number[] = [];
-  let latestUsageSummary: string | null = null;
-  let latestContextId: string | null = null;
+  const latestSimilarities: number[] = [];
+  const contextIds = new Set(
+    events
+      .map((event) => event.memory_context_id)
+      .filter((contextId): contextId is string => contextId !== null),
+  );
+  const latestContextId = [...events]
+    .reverse()
+    .find((event) => event.memory_context_id !== null)?.memory_context_id ?? null;
+  let latestContextUsageSummary: string | null = null;
   let cautionCount = 0;
   let dangerCount = 0;
+  let latestCautionCount = 0;
+  let latestDangerCount = 0;
 
   for (const event of events) {
-    if (event.memory_context_id) {
-      latestContextId = event.memory_context_id;
-    }
-    for (const memoryId of eventRetrievedMemoryIds(event)) {
+    const isLatestContext = latestContextId !== null
+      && event.memory_context_id === latestContextId;
+    const retrieved = eventRetrievedMemoryIds(event);
+    const cited = eventCitedMemoryIds(event);
+    const ignored = eventIgnoredMemoryIds(event);
+    const gateExcluded = eventGateExcludedMemoryIds(event);
+    for (const memoryId of retrieved) {
       retrievedIds.add(memoryId);
+      if (isLatestContext) latestRetrievedIds.add(memoryId);
     }
-    for (const memoryId of eventCitedMemoryIds(event)) {
+    for (const memoryId of cited) {
       citedIds.add(memoryId);
+      if (isLatestContext) latestCitedIds.add(memoryId);
     }
-    for (const memoryId of eventIgnoredMemoryIds(event)) {
+    for (const memoryId of ignored) {
       ignoredIds.add(memoryId);
+      if (isLatestContext) latestIgnoredIds.add(memoryId);
+    }
+    for (const memoryId of gateExcluded) {
+      runtimeGateExcludedIds.add(memoryId);
+      if (isLatestContext) latestGateExcludedIds.add(memoryId);
     }
     const usageSummary = stringFromPayload(event.payload, "memory_usage_summary");
-    if (usageSummary) {
-      latestUsageSummary = usageSummary;
+    if (usageSummary && isLatestContext) {
+      latestContextUsageSummary = usageSummary;
     }
     for (const use of memoryRecordUses(event)) {
       usageCounts[use.usage] = (usageCounts[use.usage] ?? 0) + 1;
+      if (isLatestContext) {
+        latestUsageCounts[use.usage] = (latestUsageCounts[use.usage] ?? 0) + 1;
+      }
     }
     for (const item of memoryFlowItems(event)) {
       if (item.similarity !== null) {
         similarities.push(item.similarity);
+        if (isLatestContext) latestSimilarities.push(item.similarity);
       }
       const signal = retrievalSignal(item);
       if (signal.tone === "danger") {
         dangerCount += 1;
+        if (isLatestContext) latestDangerCount += 1;
       } else if (signal.tone === "warning") {
         cautionCount += 1;
+        if (isLatestContext) latestCautionCount += 1;
       }
     }
   }
 
   for (const memoryId of citedIds) {
     ignoredIds.delete(memoryId);
+  }
+  for (const memoryId of latestCitedIds) {
+    latestIgnoredIds.delete(memoryId);
   }
 
   const averageSimilarity =
@@ -656,23 +745,44 @@ function buildMemoryRuntimeSummary(
       : similarities.reduce((total, value) => total + value, 0) / similarities.length;
   const maxSimilarity =
     similarities.length === 0 ? null : Math.max(...similarities);
+  const latestAverageSimilarity =
+    latestSimilarities.length === 0
+      ? null
+      : latestSimilarities.reduce((total, value) => total + value, 0) / latestSimilarities.length;
+  const latestMaxSimilarity =
+    latestSimilarities.length === 0 ? null : Math.max(...latestSimilarities);
 
   return {
     retrievedIds,
     citedIds,
     ignoredIds,
     excludedIds,
+    runtimeGateExcludedIds,
+    latestRetrievedIds,
+    latestCitedIds,
+    latestIgnoredIds,
+    latestGateExcludedIds,
     usageCounts,
-    latestUsageSummary,
+    latestUsageCounts,
+    latestContextUsageSummary,
     latestContextId,
+    contextCount: contextIds.size,
     averageSimilarity,
     maxSimilarity,
+    latestAverageSimilarity,
+    latestMaxSimilarity,
     cautionCount: cautionCount + dangerCount,
     signal: memoryRuntimeSignal({
       retrievedCount: retrievedIds.size,
       citedCount: citedIds.size,
       cautionCount,
       dangerCount,
+    }),
+    latestSignal: memoryRuntimeSignal({
+      retrievedCount: latestRetrievedIds.size,
+      citedCount: latestCitedIds.size,
+      cautionCount: latestCautionCount,
+      dangerCount: latestDangerCount,
     }),
   };
 }
@@ -703,6 +813,16 @@ function eventCitedMemoryIds(event: AgentRuntimeEvent): string[] {
 
 function eventIgnoredMemoryIds(event: AgentRuntimeEvent): string[] {
   return stringArrayFromPayload(event.payload, "ignored_memory_record_ids");
+}
+
+function eventGateExcludedMemoryIds(event: AgentRuntimeEvent): string[] {
+  const qualityGate = recordFromPayload(event.payload, "quality_gate");
+  const excluded = qualityGate?.excluded;
+  if (!Array.isArray(excluded)) return [];
+  return excluded
+    .filter(isRecord)
+    .map((item) => stringValue(item.memory_record_id))
+    .filter((memoryId): memoryId is string => memoryId !== null);
 }
 
 function memoryRecordUses(event: AgentRuntimeEvent): MemoryRecordUseView[] {

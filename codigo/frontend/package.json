@@ -6,7 +6,12 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "pretest:e2e": "npm run test:e2e:typecheck && VITE_API_BASE_URL=/api npm run build",
+    "test:e2e": "playwright test",
+    "test:e2e:typecheck": "tsc --noEmit -p tsconfig.e2e.json",
+    "test:e2e:headed": "npm run test:e2e -- --headed",
+    "test:e2e:report": "playwright show-report"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

@@ -178,6 +178,14 @@ class AgentOperationalRecommendation(StrictBaseModel):
     title: str = Field(default="Sin recomendacion agentica disponible", min_length=1)
     summary: str = Field(default="No hay decision agentica persistida.", min_length=1)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    decision_origin: Literal[
+        "llm",
+        "deterministic",
+        "guardrail_fallback",
+        "protocol_restricted",
+        "unknown",
+    ] = "unknown"
+    origin_evidence: str | None = Field(default=None, min_length=1)
     next_action: str | None = None
     operational_assessment: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)

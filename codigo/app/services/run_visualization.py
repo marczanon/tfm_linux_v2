@@ -46,6 +46,24 @@ METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
 }
 
 DEGRADATION_METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
+    "persistent_alert_run_rate": (
+        "Trayectorias con alerta persistente",
+        True,
+        "ratio",
+        "Proporcion descriptiva de trayectorias con una alerta algoritmica persistente; no equivale a deteccion validada.",
+    ),
+    "mean_first_persistent_alert_time_to_trajectory_end": (
+        "Intervalo hasta el final registrado",
+        True,
+        "seconds",
+        "Intervalo retrospectivo entre la primera alerta persistente y el final de la trayectoria registrada; no es RUL.",
+    ),
+    "mean_pre_monitoring_alert_rate": (
+        "Alertas antes de monitorizacion",
+        False,
+        "ratio",
+        "Tasa descriptiva en baseline y calibracion; no es una FPR sin ground truth independiente.",
+    ),
     "detected_before_failure_rate": (
         "Deteccion antes de fallo",
         True,
@@ -168,6 +186,16 @@ DEGRADATION_METRIC_LABELS: dict[str, tuple[str, bool, str, str | None]] = {
     ),
 }
 
+CAUSAL_V2_UNSAFE_METRIC_NAMES = {
+    "detected_before_failure_rate",
+    "confirmed_degradation_before_failure_rate",
+    "mean_lead_time_to_failure",
+    "mean_persistent_lead_time_to_failure",
+    "mean_false_alarm_rate_nominal",
+    "missed_runs",
+    "missed_confirmed_degradation_runs",
+}
+
 FEATURE_METADATA_COLUMNS = {
     "window_id",
     "file_id",
@@ -209,6 +237,9 @@ PREDICTION_COLUMNS = [
     "anomaly_score",
     "threshold",
     "predicted_anomaly",
+    "interval_seconds",
+    "gap_before_seconds",
+    "temporal_segment_id",
 ]
 
 TEMPORAL_NUMERIC_COLUMNS = [
@@ -246,7 +277,15 @@ def build_run_visualization(
     summary_metrics = _safe_dict(_read_json(Path(snapshot.metrics_path)))
     full_metrics = _full_metrics(summary_metrics, source_paths)
     run_context = _run_context(snapshot.state_path, summary_metrics, full_metrics)
-    metrics = _binary_metrics(summary_metrics)
+    metrics = (
+        _binary_metrics(summary_metrics)
+        if _binary_metrics_available_for_visualization(
+            summary_metrics,
+            full_metrics,
+            run_context["metric_families"],
+        )
+        else []
+    )
     primary_metrics, auxiliary_metrics = _visualization_metric_groups(
         run_context["supervision_profile"],
         run_context["metric_families"],
@@ -278,7 +317,22 @@ def build_run_visualization(
 
     features_path = source_paths.get("features")
     predictions_path = source_paths.get("predictions")
-    temporal_series = _safe_temporal_series(predictions_path, bounded_max_points)
+    snapshot_trajectory_path = source_paths.get("snapshot_trajectory")
+    temporal_path = snapshot_trajectory_path or predictions_path
+    temporal_series = _safe_temporal_series(temporal_path, bounded_max_points)
+    if (
+        snapshot_trajectory_path is not None
+        and not temporal_series.available
+        and predictions_path is not None
+    ):
+        fallback = _safe_temporal_series(predictions_path, bounded_max_points)
+        if fallback.available:
+            fallback.warnings.insert(
+                0,
+                "La trayectoria por captura no era legible; se usa el "
+                "artefacto de ventanas como fallback.",
+            )
+            temporal_series = fallback
     if features_path is None:
         warnings.append(
             "La proyeccion 2D requiere al menos el artefacto de features."
@@ -350,6 +404,19 @@ def _binary_metrics(data: dict[str, Any]) -> list[VisualizationMetric]:
     return metrics
 
 
+def _binary_metrics_available_for_visualization(
+    summary_metrics: dict[str, Any],
+    full_metrics: dict[str, Any],
+    metric_families: list[str],
+) -> bool:
+    context = _safe_dict(full_metrics.get("binary_metric_context"))
+    if context.get("available") is False:
+        return False
+    if "binary_classification" in metric_families:
+        return True
+    return any(summary_metrics.get(name) is not None for name in METRIC_LABELS)
+
+
 def _visualization_metric_groups(
     supervision_profile: str | None,
     metric_families: list[str],
@@ -371,6 +438,7 @@ def _degradation_metrics(full_metrics: dict[str, Any]) -> list[VisualizationMetr
     data = payload if isinstance(payload, dict) else {}
     if data.get("available") is False:
         return []
+    causal_v2_unlabeled = data.get("interpretation_mode") == "causal_v2_unlabeled"
 
     metrics: list[VisualizationMetric] = []
     for name, (
@@ -379,6 +447,8 @@ def _degradation_metrics(full_metrics: dict[str, Any]) -> list[VisualizationMetr
         value_kind,
         note,
     ) in DEGRADATION_METRIC_LABELS.items():
+        if causal_v2_unlabeled and name in CAUSAL_V2_UNSAFE_METRIC_NAMES:
+            continue
         value = data.get(name)
         if value is None:
             continue
@@ -528,6 +598,7 @@ def _agent_recommendation(
         guardrails=evaluator.get("temporal_guardrail_checks"),
         limitations=limitations,
     )
+    decision_origin, origin_evidence = _decision_origin(evaluator)
     return AgentOperationalRecommendation(
         available=True,
         source_agent="evaluator",
@@ -536,6 +607,8 @@ def _agent_recommendation(
         title=_recommendation_title(status, is_temporal=is_temporal),
         summary=summary,
         confidence=_optional_float(evaluator.get("confidence")),
+        decision_origin=decision_origin,
+        origin_evidence=origin_evidence,
         next_action=next_action,
         operational_assessment=operational_assessment,
         evidence_refs=_string_list(evaluator.get("evidence_refs"))[:8],
@@ -545,6 +618,53 @@ def _agent_recommendation(
         guardrail_checks=_string_list(evaluator.get("temporal_guardrail_checks"))[:8],
         modeler_summary=_modeler_strategy_summary(modeler),
     )
+
+
+def _decision_origin(decision: dict[str, Any]) -> tuple[str, str | None]:
+    allowed = {
+        "llm",
+        "deterministic",
+        "guardrail_fallback",
+        "protocol_restricted",
+        "unknown",
+    }
+    generation_trace = _safe_dict(decision.get("generation_trace"))
+    traced_origin = _optional_str(generation_trace.get("origin"))
+    if traced_origin in allowed:
+        attempt = generation_trace.get("attempt_index")
+        validation = _optional_str(generation_trace.get("validation_status"))
+        evidence = (
+            "Origen exacto de generation_trace"
+            f"; intento={attempt if attempt is not None else 'n/a'}"
+            f"; validacion={validation or 'n/a'}."
+        )
+        return traced_origin, evidence
+
+    explicit = _optional_str(decision.get("decision_origin"))
+    if explicit in allowed:
+        return explicit, "Campo decision_origin persistido por el agente."
+    if decision.get("protocol_trace") is not None:
+        return (
+            "protocol_restricted",
+            "La decision conserva una protocol_trace con restricciones aplicadas.",
+        )
+    rationale = (_optional_str(decision.get("rationale")) or "").lower()
+    if "guardrail correction" in rationale or "correccion del guardarrail" in rationale:
+        return (
+            "guardrail_fallback",
+            "Origen inferido de la correccion de guardarrail declarada en rationale.",
+        )
+    if "fallback after llm failure" in rationale or "fallback tras" in rationale:
+        return (
+            "guardrail_fallback",
+            "Origen inferido del fallback declarado en rationale.",
+        )
+    if "deterministic" in rationale or "determinista" in rationale:
+        return (
+            "deterministic",
+            "Origen inferido de la politica determinista declarada en rationale.",
+        )
+    return "unknown", "El artefacto historico no persistio el origen de la decision."
 
 
 def _agent_decisions_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -731,7 +851,22 @@ def _temporal_series(
 
 
 def _temporal_x_axis(data: pd.DataFrame) -> TemporalXAxis | None:
-    for column in TEMPORAL_AXIS_PRIORITY:
+    priorities = TEMPORAL_AXIS_PRIORITY
+    if "temporal_partition" in data.columns:
+        partitions = {
+            str(value).strip().lower()
+            for value in data["temporal_partition"].dropna().unique()
+            if str(value).strip()
+        }
+        if partitions and partitions.issubset(
+            {"baseline_train", "calibration", "monitoring"}
+        ):
+            priorities = [
+                "time_since_start_seconds",
+                "window_index",
+                "relative_life",
+            ]
+    for column in priorities:
         if column in data.columns and data[column].notna().sum() >= 2:
             return column
     return None
@@ -944,7 +1079,19 @@ def _health_state_counts(
         _health_values(row, score_min, score_max)["health_state"]  # type: ignore[list-item]
         for _, row in data.iterrows()
     ]
-    summary = temporal_alert_summary(states, policy=DEFAULT_TEMPORAL_HEALTH_POLICY)
+    segment_ids = (
+        pd.to_numeric(data["temporal_segment_id"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .tolist()
+        if "temporal_segment_id" in data.columns
+        else None
+    )
+    summary = temporal_alert_summary(
+        states,
+        policy=DEFAULT_TEMPORAL_HEALTH_POLICY,
+        segment_ids=segment_ids,
+    )
     first_persistent_index = summary["first_persistent_index"]
     return {
         "alert_points": summary["alert_points"],
@@ -1030,10 +1177,15 @@ def _stable_run_id(value: Any) -> str:
 def _artifact_paths(artifacts: list[dict[str, Any]]) -> dict[str, str]:
     paths: dict[str, str] = {}
     for artifact in artifacts:
+        name = artifact.get("name")
         artifact_type = artifact.get("artifact_type")
         path = artifact.get("path")
         if isinstance(artifact_type, str) and isinstance(path, str):
             paths.setdefault(artifact_type, path)
+            if name == "evaluation_metrics":
+                paths["metrics"] = path
+            if name == "evaluation_snapshot_trajectory":
+                paths["snapshot_trajectory"] = path
     return paths
 
 

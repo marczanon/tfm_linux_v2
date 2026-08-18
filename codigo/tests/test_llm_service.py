@@ -1,5 +1,6 @@
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from codigo.app.services.llm import (
     DEFAULT_OLLAMA_CHAT_MODEL,
@@ -76,6 +77,51 @@ class LLMServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(len(client.requests), 1)
+
+    def test_ollama_chat_sends_json_schema_as_structured_output_format(self):
+        schema = {
+            "title": "Decision",
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        }
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"message":{"content":"{\\"ok\\":true}"}}'
+        client = OllamaJSONClient(model="fake-model")
+
+        with patch(
+            "codigo.app.services.llm.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            client._chat(
+                [LLMMessage(role="user", content="Devuelve JSON.")],
+                json_schema=schema,
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["format"], schema)
+        self.assertEqual(payload["options"]["temperature"], 0)
+
+    def test_ollama_chat_keeps_generic_json_format_without_schema(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"message":{"content":"{}"}}'
+        client = OllamaJSONClient(model="fake-model")
+
+        with patch(
+            "codigo.app.services.llm.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            client._chat(
+                [LLMMessage(role="user", content="Devuelve JSON.")],
+                json_schema=None,
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["format"], "json")
 
     def test_default_ollama_client_disables_thinking_for_strict_json(self):
         with patch.dict(

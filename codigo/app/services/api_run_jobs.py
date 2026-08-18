@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+import json
+from pathlib import Path
 from threading import Lock, Thread
 
 from codigo.app.schemas.agent_runtime import AgentRuntimeEvent
@@ -15,9 +17,10 @@ from codigo.app.services.run_persistence import RunSnapshot
 class ApiRunJobStore:
     """Estado en memoria de jobs API dentro del proceso FastAPI actual."""
 
-    def __init__(self) -> None:
+    def __init__(self, events_root: Path | str | None = None) -> None:
         self._jobs: dict[str, ApiRunJobStatus] = {}
         self._lock = Lock()
+        self._events_root = None if events_root is None else Path(events_root)
 
     def create(self, run_id: str) -> ApiRunJobStatus:
         """Registra una ejecucion pendiente y devuelve su estado inicial."""
@@ -160,4 +163,32 @@ class ApiRunJobStore:
                 update={"events": [*current.events, event]}
             )
             self._jobs[job_id] = updated
-            return updated
+        self._persist_events(job_id, updated.events)
+        return updated
+
+    def _persist_events(
+        self,
+        job_id: str,
+        events: list[AgentRuntimeEvent],
+    ) -> None:
+        """Guarda la traza incremental para que sobreviva al proceso API."""
+
+        if self._events_root is None:
+            return
+        job_path = Path(job_id)
+        if not job_id.strip() or job_path.name != job_id or job_path.is_absolute():
+            raise ValueError("job_id must be a plain directory name")
+        run_dir = self._events_root / job_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / "runtime_events.json"
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
+            json.dumps(
+                [item.model_dump(mode="json") for item in events],
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)

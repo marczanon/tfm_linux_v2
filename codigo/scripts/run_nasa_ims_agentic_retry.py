@@ -393,6 +393,8 @@ def _execute_retry_attempt(
         after_metrics=state_before_eval.metrics,
         evaluation=effective_evaluation,
         memory_context=memory_context,
+        data_provenance=previous_state.project_context.data_provenance,
+        project_context=previous_state.project_context,
     )
     memory_candidate = build_modeling_retry_memory_candidate(
         decision_episode,

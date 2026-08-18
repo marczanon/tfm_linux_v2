@@ -22,7 +22,15 @@ class AgentRuntimeRecorder:
         self.run_id = run_id
         self._sink = sink
         self._sequence = 0
+        self._events: list[AgentRuntimeEvent] = []
         self._lock = Lock()
+
+    @property
+    def events(self) -> list[AgentRuntimeEvent]:
+        """Devuelve una copia de los eventos emitidos por este recorder."""
+
+        with self._lock:
+            return list(self._events)
 
     def emit(
         self,
@@ -48,25 +56,26 @@ class AgentRuntimeRecorder:
         with self._lock:
             self._sequence += 1
             sequence = self._sequence
-        event = AgentRuntimeEvent(
-            event_id=f"{self.run_id}:runtime:{sequence:04d}",
-            run_id=self.run_id,
-            sequence=sequence,
-            kind=kind,
-            source=source,
-            title=title,
-            summary=summary,
-            stage=stage,
-            node=node,
-            agent_name=agent_name,
-            decision_id=decision_id,
-            rationale=rationale,
-            confidence=confidence,
-            next_stage=next_stage,
-            next_node=next_node,
-            memory_context_id=memory_context_id,
-            memory_record_ids=memory_record_ids or [],
-            payload=payload or {},
-        )
+            event = AgentRuntimeEvent(
+                event_id=f"{self.run_id}:runtime:{sequence:04d}",
+                run_id=self.run_id,
+                sequence=sequence,
+                kind=kind,
+                source=source,
+                title=title,
+                summary=summary,
+                stage=stage,
+                node=node,
+                agent_name=agent_name,
+                decision_id=decision_id,
+                rationale=rationale,
+                confidence=confidence,
+                next_stage=next_stage,
+                next_node=next_node,
+                memory_context_id=memory_context_id,
+                memory_record_ids=memory_record_ids or [],
+                payload=payload or {},
+            )
+            self._events.append(event)
         self._sink(event)
         return event

@@ -100,6 +100,10 @@ export function PipelineConfig({
         icon={<FileSearch size={19} />}
       />
 
+      <fieldset
+        className="launcher-controls"
+        disabled={activeJob || executing || planning}
+      >
       <div className="launcher-flow">
         <section className="launcher-step">
           <LauncherStepHeader index="1" icon={<Database size={17} />} title="Dataset" />
@@ -321,6 +325,7 @@ export function PipelineConfig({
           </div>
         </section>
       </details>
+      </fieldset>
     </form>
   );
 }

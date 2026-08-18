@@ -109,6 +109,9 @@ class RunRegistryTests(unittest.TestCase):
                         ),
                         "degradation_available": True,
                         "degradation_n_runs": 1,
+                        "degradation_persistent_alert_run_rate": 1.0,
+                        "degradation_mean_first_persistent_alert_time_to_trajectory_end": 260.0,
+                        "degradation_mean_pre_monitoring_alert_rate": 0.05,
                         "degradation_detected_before_failure_rate": 1.0,
                         "degradation_confirmed_degradation_before_failure_rate": 1.0,
                         "degradation_mean_lead_time_to_failure": 300.0,
@@ -140,6 +143,9 @@ class RunRegistryTests(unittest.TestCase):
                         ),
                         "degradation_available": True,
                         "degradation_n_runs": 1,
+                        "degradation_persistent_alert_run_rate": 0.0,
+                        "degradation_mean_first_persistent_alert_time_to_trajectory_end": None,
+                        "degradation_mean_pre_monitoring_alert_rate": 0.01,
                         "degradation_detected_before_failure_rate": 1.0,
                         "degradation_confirmed_degradation_before_failure_rate": 0.0,
                         "degradation_mean_lead_time_to_failure": 220.0,
@@ -165,6 +171,24 @@ class RunRegistryTests(unittest.TestCase):
         self.assertEqual(rows["pca-run"].model_name, "pca_reconstruction_error")
         self.assertEqual(rows["svm-run"].label_source, "temporal_proxy")
         self.assertIn("run_to_failure_degradation", rows["pca-run"].metric_families)
+        self.assertEqual(
+            rows["pca-run"].degradation_persistent_alert_run_rate,
+            1.0,
+        )
+        self.assertEqual(
+            temporal["degradation_persistent_alert_run_rate"].best_run_id,
+            "pca-run",
+        )
+        self.assertEqual(
+            temporal[
+                "degradation_mean_first_persistent_alert_time_to_trajectory_end"
+            ].best_run_id,
+            "pca-run",
+        )
+        self.assertEqual(
+            temporal["degradation_mean_pre_monitoring_alert_rate"].best_run_id,
+            "svm-run",
+        )
         self.assertEqual(
             temporal[
                 "degradation_confirmed_degradation_before_failure_rate"

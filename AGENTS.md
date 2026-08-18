@@ -9,6 +9,12 @@ Este repositorio corresponde a un TFM sobre una aplicacion multiagente para proc
 Documento de referencia principal:
 
 - `Documento TFM_ Arquitectura y Hoja de Ruta.pdf`
+- `codigo/docs/133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`
+- `codigo/docs/139_fase11_catalogo_evidencia_causal_por_registro.md`
+- `codigo/docs/140_fase11_policy_proposal_consultiva.md`
+- `codigo/docs/135_fase11_motor_triggers_p3_determinista.md`
+- `codigo/docs/131_fase10_sala_control_agentica_historia_visual.md`
+- `codigo/docs/95_cierre_fase9_run_to_failure_maximo_nivel.md`
 - `codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md`
 - `codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`
 - `codigo/docs/32_hoja_ruta_fase_4.md`
@@ -17,11 +23,14 @@ Documento de referencia principal:
 - `codigo/docs/20_hoja_ruta_fase_2.md`
 - `codigo/docs/19_estado_actual_mvp.md`
 
-`HOJA_RUTA_TFM.md` queda como referencia historica de la Fase 1. Tras el cierre
-operativo de la Fase 6 en el Hito 5, la guia inmediata para nuevas sesiones es
-`codigo/docs/54_cierre_operativo_fase6.md`, usando
-`codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md`, Fase 5, Fase 4, Fase 3 y
-Fase 2 como contexto historico.
+`HOJA_RUTA_TFM.md` queda como referencia historica de la Fase 1. Tras los
+cierres operativos de Fases 6, 9 y 10, la guia inmediata para nuevas sesiones
+es `codigo/docs/133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`, con el
+cierre implementado mas reciente en
+`codigo/docs/140_fase11_policy_proposal_consultiva.md`. La hoja
+`128_fase11_hoja_ruta_industrializacion_agentica_event_driven.md` se conserva
+como propuesta historica amplia; colas, workers, nuevos datasets y despliegue
+industrial quedan diferidos. Fases 2--6 permanecen como contexto historico.
 
 La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los agentes toman decisiones y generan configuraciones estructuradas. Los ejecutores Python deterministas realizan las transformaciones reales sobre los datos.
 
@@ -33,17 +42,23 @@ La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los 
 - Los recursos academicos, PDFs, referencias y diagramas viven en `recursos/`.
 - La memoria debe actualizarse en paralelo al desarrollo.
 - Antes de implementar una nueva mejora, revisar
+  `codigo/docs/133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`,
+  `codigo/docs/140_fase11_policy_proposal_consultiva.md`,
+  `codigo/docs/139_fase11_catalogo_evidencia_causal_por_registro.md`,
+  `codigo/docs/135_fase11_motor_triggers_p3_determinista.md`,
+  `codigo/docs/131_fase10_sala_control_agentica_historia_visual.md`,
+  `codigo/docs/95_cierre_fase9_run_to_failure_maximo_nivel.md`,
   `codigo/docs/54_cierre_operativo_fase6.md`,
   `codigo/docs/48_hoja_ruta_fase_6_dockerizacion.md` y
   `codigo/docs/35_protocolo_reutilizacion_anti_duplicacion.md`; usar
   `codigo/docs/36_hoja_ruta_fase_5_aplicacion.md`,
   `codigo/docs/32_hoja_ruta_fase_4.md`, `codigo/docs/26_hoja_ruta_fase_3.md`
   y `codigo/docs/20_hoja_ruta_fase_2.md` como contexto historico.
-- La Fase 6 queda cerrada operativamente con Docker minimo reproducible
-  backend/frontend. El siguiente bloque vuelve al pulido funcional de la
-  aplicacion; los cambios relevantes se trasladaran a Docker mediante rebuild y
-  validacion manual. SLURM, despliegue cloud y autenticacion multiusuario siguen
-  fuera de alcance salvo decision explicita.
+- La Fase 6 queda cerrada operativamente con Docker minimo reproducible. El
+  bloque activo es la monitorizacion hibrida NASA mediante replay causal de la
+  hoja `133`; los cambios se trasladaran a Docker solo tras estabilizar la
+  superficie local. Colas distribuidas, nuevos datasets, SLURM, cloud y
+  autenticacion multiusuario siguen fuera de alcance salvo decision explicita.
 - No permitir que un agente escriba y ejecute codigo arbitrario para transformar datos.
 - Las decisiones de agentes deben pasar por esquemas Pydantic o contratos JSON estrictos.
 - Los ejecutores deben ser funciones o modulos Python reproducibles y testeables.

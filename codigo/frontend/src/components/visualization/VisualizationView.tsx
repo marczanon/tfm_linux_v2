@@ -475,7 +475,13 @@ function VisualizationMetricCards({ metrics }: { metrics: VisualizationMetric[] 
         <div className="visual-metric-card" key={metric.name}>
           <span>{metric.label}</span>
           <strong>{formatVisualizationMetric(metric)}</strong>
-          <em>{metric.higher_is_better ? "mejor alto" : "mejor bajo"}</em>
+          <em>
+            {metric.metric_family === "run_to_failure_degradation"
+              ? "lectura descriptiva"
+              : metric.higher_is_better
+                ? "mejor alto"
+                : "mejor bajo"}
+          </em>
           {metric.note ? <small>{metric.note}</small> : null}
         </div>
       ))}
@@ -493,31 +499,36 @@ function MotorControlPanel({
   const health = run.current_health_index ?? 0;
   const risk = run.current_risk_index ?? 0;
   const persistentAlertX = run.first_persistent_alert_x;
-  const leadTime =
+  const isUnlabeledRunToFailure =
+    data.supervision_profile === "run_to_failure_degradation" &&
+    (data.label_source === null || data.label_source === "none");
+  const retrospectiveInterval =
     run.first_persistent_alert_time_to_failure_seconds !== null
       ? formatSeconds(run.first_persistent_alert_time_to_failure_seconds)
       : run.first_alert_time_to_failure_seconds !== null
         ? formatSeconds(run.first_alert_time_to_failure_seconds)
         : "no disponible";
-  const failureContext =
-    run.failure_reference === "historic_replay" && run.failure_x !== null
+  const failureContext = isUnlabeledRunToFailure
+    ? "El intervalo se calcula retrospectivamente hasta el final registrado de la trayectoria; no representa RUL ni un onset fisico confirmado."
+    : run.failure_reference === "historic_replay" && run.failure_x !== null
       ? "El fallo mostrado procede del replay historico del dataset; no es una prediccion RUL del modelo."
       : "Esta run no trae un marcador de fallo historico suficiente para calcular RUL.";
   const alertContext =
     persistentAlertX !== null
-      ? `Aviso sostenido: al menos ${run.persistent_alert_min_windows} ventanas consecutivas en alerta o critico.`
-      : `Sin aviso sostenido de ${run.persistent_alert_min_windows} ventanas; los colores intensos pueden ser picos aislados.`;
-  const sourceWarning =
-    data.label_source && data.label_source !== "official"
-      ? `Etiquetas ${labelSourceLabel(data.label_source).toLowerCase()}; no son ground truth oficial por ventana.`
-      : "Etiquetas oficiales.";
+      ? `Aviso sostenido: al menos ${run.persistent_alert_min_windows} observaciones temporales consecutivas en alerta o critico.`
+      : `Sin aviso sostenido de ${run.persistent_alert_min_windows} observaciones; los colores intensos pueden ser picos aislados.`;
+  const sourceWarning = data.label_source === "official"
+    ? "Etiquetas oficiales."
+    : data.label_source === null || data.label_source === "none"
+      ? "Sin ground truth oficial por snapshot; la lectura es descriptiva y causal."
+      : `Etiquetas ${labelSourceLabel(data.label_source).toLowerCase()}; no son ground truth oficial por ventana.`;
 
   return (
     <div className="motor-control-grid">
       <div className={`motor-status-block ${run.current_health_state}`}>
         <span>estado actual</span>
         <strong>{healthStateLabel(run.current_health_state)}</strong>
-        <p>{run.current_state_reason}</p>
+        <p>{neutralStateReason(run.current_state_reason)}</p>
       </div>
       <div className="motor-meter-block">
         <StateMeter label="salud" value={health} state={run.current_health_state} />
@@ -533,8 +544,8 @@ function MotorControlPanel({
           <strong>{formatMetric(persistentAlertX)}</strong>
         </div>
         <div>
-          <span>lead time sost.</span>
-          <strong>{leadTime}</strong>
+          <span>{isUnlabeledRunToFailure ? "intervalo al final" : "lead time sost."}</span>
+          <strong>{retrospectiveInterval}</strong>
         </div>
         <div>
           <span>alertas</span>
@@ -608,15 +619,21 @@ function AgentRecommendationPanel({
 
       <dl className="recommendation-meta">
         <div>
-          <dt>confianza</dt>
+          <dt>confianza declarada</dt>
           <dd>{confidenceText(recommendation.confidence)}</dd>
+        </div>
+        <div>
+          <dt>origen</dt>
+          <dd title={recommendation.origin_evidence ?? undefined}>
+            {decisionOriginLabel(recommendation.decision_origin)}
+          </dd>
         </div>
         <div>
           <dt>siguiente</dt>
           <dd>{recommendation.next_action ?? "-"}</dd>
         </div>
         <div>
-          <dt>herramientas</dt>
+          <dt>herr. declaradas</dt>
           <dd>{recommendation.tool_names.length}</dd>
         </div>
         <div>
@@ -641,7 +658,7 @@ function AgentRecommendationPanel({
               items={recommendation.evidence_refs}
               compact
             />
-            <RecommendationList title="Herramientas" items={recommendation.tool_names} compact />
+            <RecommendationList title="Herramientas declaradas" items={recommendation.tool_names} compact />
             <RecommendationList
               title="Guardarrailes"
               items={recommendation.guardrail_checks}
@@ -718,7 +735,7 @@ function VisualRunComparisonPanel({
             </div>
             <small>
               {comparisonHasDegradation(comparison)
-                ? "Prioriza degradacion sostenida, lead time, falsas alarmas nominales y tendencia."
+                ? "Prioriza alertas persistentes, intervalo retrospectivo al final registrado, premonitorizacion y tendencia."
                 : "Compara rendimiento binario con F1, precision, recall y falsas alarmas."}
             </small>
           </div>
@@ -861,8 +878,12 @@ function OperationalFlow({
     },
     {
       label: "agente",
-      value: "Qwen/LLM",
-      detail: "interpreta evidencia",
+      value: data.agent_recommendation?.available
+        ? data.agent_recommendation.source_agent ?? "agente"
+        : "sin decision",
+      detail: data.agent_recommendation?.available
+        ? "interpretacion persistida"
+        : "solo evidencia determinista",
     },
   ];
 
@@ -881,16 +902,16 @@ function OperationalFlow({
 }
 
 function WindowStateStrip({ run }: { run: TemporalRunSeries }) {
-  const points = run.points.slice(0, 180);
+  const points = run.points;
   return (
     <div className="window-state-strip">
       <div>
         <strong>ventanas procesadas</strong>
         <span>
-          {run.n_points_sampled}/{run.n_points_total} visibles | {run.alert_episodes} episodios
+          {points.length}/{run.n_points_total} mostradas | {run.alert_episodes} episodios
         </span>
       </div>
-      <div className="window-strip-track" aria-label="Estados por ventana">
+      <div className="window-strip-track" aria-label="Estados por observacion temporal">
         {points.map((point) => (
           <span
             className={`window-strip-segment ${point.health_state}`}
@@ -957,19 +978,31 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
     ...(run.first_persistent_alert_x !== null ? [run.first_persistent_alert_x] : []),
     ...(run.failure_x !== null ? [run.failure_x] : []),
   ];
+  const logarithmicScore = usesLogScoreRatio(run);
+  const displayScore = (value: number) =>
+    logarithmicScore && run.threshold !== null
+      ? Math.log10(Math.max(value / run.threshold, 1e-12))
+      : value;
   const yValues = [
-    ...run.points.map((point) => point.anomaly_score),
-    ...(run.threshold !== null ? [run.threshold] : []),
+    ...run.points.map((point) => displayScore(point.anomaly_score)),
+    ...(run.threshold !== null
+      ? [displayScore(run.threshold)]
+      : []),
   ];
   const xScale = scaleFor(xValues, padding, width - padding);
   const yScale = scaleFor(yValues, height - padding, padding);
+  const xTicks = chartTicks(xValues, 5);
+  const yTicks = chartTicks(yValues, 5);
   const path = run.points
     .map((point, index) => {
       const command = index === 0 ? "M" : "L";
-      return `${command} ${xScale(point.x).toFixed(2)} ${yScale(point.anomaly_score).toFixed(2)}`;
+      return `${command} ${xScale(point.x).toFixed(2)} ${yScale(displayScore(point.anomaly_score)).toFixed(2)}`;
     })
     .join(" ");
-  const thresholdY = run.threshold === null ? null : yScale(run.threshold);
+  const thresholdY =
+    run.threshold === null
+      ? null
+      : yScale(displayScore(run.threshold));
   const stateBands = run.points.map((point, index) => {
     const currentX = xScale(point.x);
     const left =
@@ -1022,7 +1055,7 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
           <dd>{formatMetric(run.first_persistent_alert_x)}</dd>
         </div>
         <div>
-          <dt>lead sost.</dt>
+          <dt>intervalo al final</dt>
           <dd>{formatSeconds(run.first_persistent_alert_time_to_failure_seconds)}</dd>
         </div>
         <div>
@@ -1032,7 +1065,7 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
       </dl>
       <details className="compact-disclosure temporal-note-details">
         <summary>Motivo estado</summary>
-        <p className="temporal-state-note">{run.current_state_reason}</p>
+        <p className="temporal-state-note">{neutralStateReason(run.current_state_reason)}</p>
       </details>
       <svg
         className="temporal-score-chart"
@@ -1051,8 +1084,30 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
             y={padding}
           />
         ))}
+        {xTicks.map((tick) => (
+          <g key={`score-x-${tick}`}>
+            <line className="chart-grid" x1={xScale(tick)} x2={xScale(tick)} y1={padding} y2={height - padding} />
+            <text className="chart-tick-label" textAnchor="middle" x={xScale(tick)} y={height - padding + 17}>
+              {formatAxisTick(tick)}
+            </text>
+          </g>
+        ))}
+        {yTicks.map((tick) => (
+          <g key={`score-y-${tick}`}>
+            <line className="chart-grid" x1={padding} x2={width - padding} y1={yScale(tick)} y2={yScale(tick)} />
+            <text className="chart-tick-label" textAnchor="end" x={padding - 7} y={yScale(tick) + 3}>
+              {formatAxisTick(tick)}
+            </text>
+          </g>
+        ))}
         <line className="temporal-axis" x1={padding} x2={width - padding} y1={height - padding} y2={height - padding} />
         <line className="temporal-axis" x1={padding} x2={padding} y1={padding} y2={height - padding} />
+        <text className="chart-axis-title" textAnchor="middle" x={width / 2} y={height - 5}>
+          {temporalAxisLabel(run.x_axis)}
+        </text>
+        <text className="chart-axis-title" textAnchor="middle" transform={`rotate(-90 12 ${height / 2})`} x="12" y={height / 2}>
+          {logarithmicScore ? "log10(score / umbral)" : "score de anomalia"}
+        </text>
         {thresholdY !== null ? (
           <line
             className="temporal-threshold"
@@ -1076,11 +1131,11 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
           <circle
             className="temporal-first-alert"
             cx={xScale(run.first_alert_x)}
-            cy={yScale(scoreAtX(run, run.first_alert_x))}
+            cy={yScale(displayScore(scoreAtX(run, run.first_alert_x)))}
             r="6"
           >
             <title>
-              {`Primer pico | x ${formatMetric(run.first_alert_x)} | lead ${formatSeconds(run.first_alert_time_to_failure_seconds)}`}
+              {`Primer pico algoritmico | x ${formatMetric(run.first_alert_x)} | intervalo retrospectivo al final ${formatSeconds(run.first_alert_time_to_failure_seconds)}`}
             </title>
           </circle>
         ) : null}
@@ -1088,11 +1143,11 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
           <circle
             className="temporal-persistent-alert"
             cx={xScale(run.first_persistent_alert_x)}
-            cy={yScale(scoreAtX(run, run.first_persistent_alert_x))}
+            cy={yScale(displayScore(scoreAtX(run, run.first_persistent_alert_x)))}
             r="6"
           >
             <title>
-              {`Aviso sostenido | x ${formatMetric(run.first_persistent_alert_x)} | lead ${formatSeconds(run.first_persistent_alert_time_to_failure_seconds)}`}
+              {`Alerta algoritmica persistente | x ${formatMetric(run.first_persistent_alert_x)} | intervalo retrospectivo al final ${formatSeconds(run.first_persistent_alert_time_to_failure_seconds)}`}
             </title>
           </circle>
         ) : null}
@@ -1100,7 +1155,7 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
           <circle
             className={`temporal-point ${point.health_state}`}
             cx={xScale(point.x)}
-            cy={yScale(point.anomaly_score)}
+            cy={yScale(displayScore(point.anomaly_score))}
             key={point.window_id}
             r={point.health_state === "critical" ? 4.2 : point.health_state === "warning" ? 3.7 : 2.5}
           >
@@ -1111,11 +1166,11 @@ function TemporalSeriesChart({ run }: { run: TemporalRunSeries }) {
         ))}
       </svg>
       <div className="temporal-legend">
-        <span><i className="legend-score" /> score</span>
+        <span><i className="legend-score" /> {logarithmicScore ? "score / umbral (log)" : "score"}</span>
         <span><i className="legend-threshold" /> umbral</span>
         <span><i className="legend-first-alert" /> primer pico</span>
-        <span><i className="legend-persistent-alert" /> aviso sostenido</span>
-        <span><i className="legend-failure" /> fallo</span>
+        <span><i className="legend-persistent-alert" /> alerta persistente</span>
+        <span><i className="legend-failure" /> final registrado</span>
         <span><i className="legend-health-warning" /> warning</span>
         <span><i className="legend-health-critical" /> critico</span>
       </div>
@@ -1144,6 +1199,7 @@ function TemporalHealthIndexChart({ run }: { run: TemporalRunSeries }) {
     ...(run.failure_x !== null ? [run.failure_x] : []),
   ];
   const xScale = scaleFor(xValues, paddingX, width - paddingX);
+  const xTicks = chartTicks(xValues, 5);
   const yScale = (value: number) =>
     paddingY + (100 - Math.max(0, Math.min(100, value))) / 100 * (height - paddingY * 2);
   const path = points
@@ -1165,18 +1221,27 @@ function TemporalHealthIndexChart({ run }: { run: TemporalRunSeries }) {
         aria-label="Health Index por ventana"
       >
         <rect className="temporal-bg" x="0" y="0" width={width} height={height} rx="8" />
-        {[25, 50, 75].map((value) => (
-          <line
-            className="temporal-health-grid"
-            key={value}
-            x1={paddingX}
-            x2={width - paddingX}
-            y1={yScale(value)}
-            y2={yScale(value)}
-          />
+        {[0, 25, 50, 75, 100].map((value) => (
+          <g key={value}>
+            <line
+              className="temporal-health-grid"
+              x1={paddingX}
+              x2={width - paddingX}
+              y1={yScale(value)}
+              y2={yScale(value)}
+            />
+            <text className="chart-tick-label" textAnchor="end" x={paddingX - 7} y={yScale(value) + 3}>{value}</text>
+          </g>
+        ))}
+        {xTicks.map((tick) => (
+          <g key={`health-x-${tick}`}>
+            <line className="chart-grid" x1={xScale(tick)} x2={xScale(tick)} y1={paddingY} y2={height - paddingY} />
+            <text className="chart-tick-label" textAnchor="middle" x={xScale(tick)} y={height - 5}>{formatAxisTick(tick)}</text>
+          </g>
         ))}
         <line className="temporal-axis" x1={paddingX} x2={width - paddingX} y1={height - paddingY} y2={height - paddingY} />
         <line className="temporal-axis" x1={paddingX} x2={paddingX} y1={paddingY} y2={height - paddingY} />
+        <text className="chart-axis-title" textAnchor="middle" x={width / 2} y={height - 1}>{temporalAxisLabel(run.x_axis)}</text>
         <path className="temporal-health-line" d={path} />
         {points.map((point) => (
           <circle
@@ -1238,8 +1303,8 @@ function TemporalEpisodeRail({ run }: { run: TemporalRunSeries }) {
         <span><i className="warning" /> episodio alerta</span>
         <span><i className="critical" /> episodio critico</span>
         <span><i className="marker first" /> primer pico</span>
-        <span><i className="marker persistent" /> sostenido</span>
-        <span><i className="marker failure" /> fallo</span>
+        <span><i className="marker persistent" /> alerta persistente</span>
+        <span><i className="marker failure" /> final registrado</span>
       </div>
     </section>
   );
@@ -1257,6 +1322,33 @@ function scoreAtX(run: TemporalRunSeries, x: number): number {
     }
   }
   return closest.anomaly_score;
+}
+
+function usesLogScoreRatio(run: TemporalRunSeries): boolean {
+  return (
+    run.threshold !== null &&
+    run.threshold > 0 &&
+    run.points.every((point) => point.anomaly_score >= 0)
+  );
+}
+
+function neutralStateReason(value: string): string {
+  return value
+    .replace(/tramo final de vida/gi, "extremo de la trayectoria observada")
+    .replace(/fallo fisico/gi, "evento fisico");
+}
+
+function decisionOriginLabel(
+  origin: AgentOperationalRecommendation["decision_origin"],
+): string {
+  const labels: Record<AgentOperationalRecommendation["decision_origin"], string> = {
+    llm: "LLM",
+    deterministic: "politica determinista",
+    guardrail_fallback: "guardarrail / fallback",
+    protocol_restricted: "protocolo restringido",
+    unknown: "no persistido",
+  };
+  return labels[origin];
 }
 
 interface AlertEpisode {
@@ -1305,10 +1397,10 @@ function temporalMarkers(run: TemporalRunSeries): Array<{
       : { kind: "first" as const, label: "primer pico", x: run.first_alert_x },
     run.first_persistent_alert_x === null
       ? null
-      : { kind: "persistent" as const, label: "aviso sostenido", x: run.first_persistent_alert_x },
+      : { kind: "persistent" as const, label: "alerta persistente", x: run.first_persistent_alert_x },
     run.failure_x === null
       ? null
-      : { kind: "failure" as const, label: "fallo", x: run.failure_x },
+      : { kind: "failure" as const, label: "final registrado", x: run.failure_x },
   ].filter((item): item is { kind: "first" | "persistent" | "failure"; label: string; x: number } => item !== null);
 }
 
@@ -1377,6 +1469,11 @@ function comparisonRowMetricValue(
     recall: row.recall,
     f1_score: row.f1_score,
     false_positive_rate: row.false_positive_rate,
+    degradation_persistent_alert_run_rate: row.degradation_persistent_alert_run_rate,
+    degradation_mean_first_persistent_alert_time_to_trajectory_end:
+      row.degradation_mean_first_persistent_alert_time_to_trajectory_end,
+    degradation_mean_pre_monitoring_alert_rate:
+      row.degradation_mean_pre_monitoring_alert_rate,
     degradation_detected_before_failure_rate: row.degradation_detected_before_failure_rate,
     degradation_mean_lead_time_to_failure: row.degradation_mean_lead_time_to_failure,
     degradation_mean_false_alarm_rate_nominal: row.degradation_mean_false_alarm_rate_nominal,
@@ -1460,14 +1557,30 @@ function ProjectionScatter({
   ];
   const xScale = scaleFor(xs, padding, width - padding);
   const yScale = scaleFor(ys, height - padding, padding);
+  const xTicks = chartTicks(xs, 5);
+  const yTicks = chartTicks(ys, 5);
   const hasPredictions = points.some((point) => point.predicted_anomaly !== null);
 
   return (
     <div className="scatter-wrap">
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Proyeccion 2D de ventanas">
         <rect className="scatter-bg" x="0" y="0" width={width} height={height} rx="8" />
+        {xTicks.map((tick) => (
+          <g key={`scatter-x-${tick}`}>
+            <line className="chart-grid" x1={xScale(tick)} x2={xScale(tick)} y1={padding} y2={height - padding} />
+            <text className="chart-tick-label" textAnchor="middle" x={xScale(tick)} y={height - padding + 17}>{formatAxisTick(tick)}</text>
+          </g>
+        ))}
+        {yTicks.map((tick) => (
+          <g key={`scatter-y-${tick}`}>
+            <line className="chart-grid" x1={padding} x2={width - padding} y1={yScale(tick)} y2={yScale(tick)} />
+            <text className="chart-tick-label" textAnchor="end" x={padding - 7} y={yScale(tick) + 3}>{formatAxisTick(tick)}</text>
+          </g>
+        ))}
         <line className="scatter-axis" x1={padding} x2={width - padding} y1={height - padding} y2={height - padding} />
         <line className="scatter-axis" x1={padding} x2={padding} y1={padding} y2={height - padding} />
+        <text className="chart-axis-title" textAnchor="middle" x={width / 2} y={height - 5}>componente principal 1</text>
+        <text className="chart-axis-title" textAnchor="middle" transform={`rotate(-90 11 ${height / 2})`} x="11" y={height / 2}>componente principal 2</text>
         {boundary ? (
           <ellipse
             className="scatter-boundary"
@@ -1565,4 +1678,20 @@ function scaleFor(values: number[], outputMin: number, outputMax: number) {
   const max = Math.max(...values);
   const span = max - min || 1;
   return (value: number) => outputMin + ((value - min) / span) * (outputMax - outputMin);
+}
+
+function chartTicks(values: number[], count: number): number[] {
+  if (values.length === 0) return [];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (min === max) return [min];
+  return Array.from({ length: count }, (_, index) => min + (max - min) * index / (count - 1));
+}
+
+function formatAxisTick(value: number): string {
+  const absolute = Math.abs(value);
+  if ((absolute >= 10000 || (absolute > 0 && absolute < 0.001))) {
+    return value.toExponential(1);
+  }
+  return new Intl.NumberFormat("es-ES", { maximumFractionDigits: 2 }).format(value);
 }

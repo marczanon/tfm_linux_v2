@@ -17,10 +17,13 @@ from codigo.app.schemas.reasoning import (
 from codigo.app.services.vector_memory import (
     DEFAULT_OLLAMA_EMBEDDING_MODEL,
     DEFAULT_QDRANT_HOST,
+    QDRANT_MEMORY_PAYLOAD_INDEXES,
     LocalHashEmbeddingModel,
     LocalJsonVectorMemoryStore,
     OllamaEmbeddingProvider,
+    QdrantMemoryError,
     QdrantVectorMemoryStore,
+    VectorMemoryConfigError,
     VectorMemoryStore,
     get_default_vector_memory_store,
     collection_for_agent,
@@ -135,7 +138,7 @@ class VectorMemoryStoreTests(unittest.TestCase):
         with patch(
             "codigo.app.services.vector_memory.urllib.request.urlopen",
             side_effect=[
-                _FakeHTTPResponse({"result": {"status": "green"}}),
+                _FakeHTTPResponse(_qdrant_collection_info_payload()),
                 _FakeHTTPResponse({"result": {"operation_id": 1}}),
             ],
         ) as urlopen:
@@ -156,7 +159,113 @@ class VectorMemoryStoreTests(unittest.TestCase):
             point["payload"]["record"]["memory_record_id"],
             "memory-overcorrection-001",
         )
+        self.assertEqual(point["payload"]["data_provenance"], "unknown")
         self.assertEqual(len(point["vector"]), 16)
+
+    def test_qdrant_rejects_incompatible_collection_dimension_before_upsert(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        with patch.object(
+            store,
+            "_request_json",
+            return_value=_qdrant_collection_info_payload(vector_size=32),
+        ) as request_json:
+            with self.assertRaisesRegex(
+                VectorMemoryConfigError,
+                "uses dimension 32",
+            ):
+                store.upsert(_overcorrection_record())
+
+        self.assertEqual(request_json.call_count, 1)
+
+    def test_qdrant_rejects_incompatible_collection_dimension_before_query(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        with patch.object(
+            store,
+            "_request_json",
+            return_value=_qdrant_collection_info_payload(vector_size=32),
+        ) as request_json:
+            with self.assertRaisesRegex(
+                VectorMemoryConfigError,
+                "uses dimension 32",
+            ):
+                store.query(
+                    AgentMemoryQuery(
+                        query_id="query-incompatible-qdrant",
+                        target_agent="modeler",
+                        query_text="threshold",
+                    )
+                )
+
+        self.assertEqual(request_json.call_count, 1)
+
+    def test_qdrant_store_creates_payload_indexes_once_for_a_new_collection(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        collection_exists = False
+        indexed_fields: dict[str, str] = {}
+
+        def fake_request(
+            method: str,
+            path: str,
+            payload: dict[str, object] | None = None,
+        ) -> dict[str, object]:
+            nonlocal collection_exists
+            if method == "GET" and path == "/collections/modeler_memory":
+                if not collection_exists:
+                    raise QdrantMemoryError("not found", status_code=404)
+                return _qdrant_collection_info_payload(indexed_fields)
+            if method == "PUT" and path == "/collections/modeler_memory":
+                collection_exists = True
+                return {"result": True}
+            if method == "PUT" and path.endswith("/index?wait=true"):
+                assert payload is not None
+                field_name = str(payload["field_name"])
+                indexed_fields[field_name] = str(payload["field_schema"])
+                return {"result": {"operation_id": len(indexed_fields)}}
+            if method == "PUT" and path.endswith("/points?wait=true"):
+                return {"result": {"operation_id": 100}}
+            self.fail(f"unexpected Qdrant request: {method} {path}")
+
+        with patch.object(
+            store,
+            "_request_json",
+            side_effect=fake_request,
+        ) as request_json:
+            store.upsert(_overcorrection_record())
+            store.upsert(_overcorrection_record())
+
+        calls = request_json.call_args_list
+        collection_create_calls = [
+            call
+            for call in calls
+            if call.args[:2] == ("PUT", "/collections/modeler_memory")
+        ]
+        index_calls = [
+            call
+            for call in calls
+            if call.args[0] == "PUT" and call.args[1].endswith("/index?wait=true")
+        ]
+        point_calls = [
+            call
+            for call in calls
+            if call.args[0] == "PUT" and call.args[1].endswith("/points?wait=true")
+        ]
+
+        self.assertEqual(len(collection_create_calls), 1)
+        self.assertEqual(
+            [call.args[2]["field_name"] for call in index_calls],
+            [field_name for field_name, _ in QDRANT_MEMORY_PAYLOAD_INDEXES],
+        )
+        self.assertEqual(indexed_fields, dict(QDRANT_MEMORY_PAYLOAD_INDEXES))
+        self.assertEqual(len(point_calls), 2)
 
     def test_qdrant_store_query_merges_agent_and_shared_collections(self):
         store = QdrantVectorMemoryStore(
@@ -183,6 +292,7 @@ class VectorMemoryStoreTests(unittest.TestCase):
         with patch(
             "codigo.app.services.vector_memory.urllib.request.urlopen",
             side_effect=[
+                _FakeHTTPResponse(_qdrant_collection_info_payload()),
                 _FakeHTTPResponse(
                     {
                         "result": [
@@ -194,6 +304,7 @@ class VectorMemoryStoreTests(unittest.TestCase):
                         ]
                     }
                 ),
+                _FakeHTTPResponse(_qdrant_collection_info_payload()),
                 _FakeHTTPResponse(
                     {
                         "result": [
@@ -225,10 +336,267 @@ class VectorMemoryStoreTests(unittest.TestCase):
             ["memory-overcorrection-001", "memory-shared-methodology-001"],
         )
         requests = [call.args[0] for call in urlopen.call_args_list]
-        self.assertIn("/collections/modeler_memory/points/query", requests[0].full_url)
+        query_requests = [
+            request for request in requests if "/points/query" in request.full_url
+        ]
+        self.assertIn(
+            "/collections/modeler_memory/points/query",
+            query_requests[0].full_url,
+        )
         self.assertIn(
             "/collections/shared_methodology_memory/points/query",
-            requests[1].full_url,
+            query_requests[1].full_url,
+        )
+        query_bodies = [
+            json.loads(request.data.decode("utf-8")) for request in query_requests
+        ]
+        self.assertEqual(query_bodies[0]["filter"], query_bodies[1]["filter"])
+        query_filter = query_bodies[0]["filter"]
+        keyed_conditions = {
+            condition["key"]: condition
+            for condition in query_filter["must"]
+            if "key" in condition
+        }
+        self.assertEqual(
+            keyed_conditions["target_agent"]["match"]["any"],
+            ["modeler", "shared_methodology"],
+        )
+        self.assertEqual(
+            keyed_conditions["memory_role"]["match"]["any"],
+            [
+                "boundary_case",
+                "evidence",
+                "methodology",
+                "negative_example",
+                "positive_example",
+                "warning",
+            ],
+        )
+        self.assertEqual(
+            keyed_conditions["reusable_as_context"]["match"],
+            {"value": True},
+        )
+        self.assertEqual(
+            keyed_conditions["exclude_from_context"]["match"],
+            {"value": False},
+        )
+        self.assertEqual(
+            keyed_conditions["record.embedding_model"]["match"],
+            {"value": "local_hash_embedding"},
+        )
+        self.assertEqual(
+            keyed_conditions["record.embedding_version"]["match"],
+            {"value": "v1"},
+        )
+        dataset_condition = next(
+            condition
+            for condition in query_filter["must"]
+            if condition.get("should")
+            and condition["should"][0].get("key") == "dataset"
+        )
+        self.assertEqual(
+            dataset_condition["should"],
+            [
+                {
+                    "key": "dataset",
+                    "match": {"value": "nasa_ims_bearing"},
+                },
+                {"is_null": {"key": "dataset"}},
+            ],
+        )
+        provenance_condition = next(
+            condition
+            for condition in query_filter["must"]
+            if condition.get("should")
+            and condition["should"][0].get("must")
+        )
+        self.assertIn(
+            {"is_empty": {"key": "data_provenance"}},
+            provenance_condition["should"][0]["must"][1]["should"][0]["should"],
+        )
+        governance_condition = next(
+            condition
+            for condition in query_filter["must"]
+            if condition.get("must_not")
+            and condition["must_not"][0].get("key") == "source_type"
+        )
+        self.assertEqual(
+            governance_condition["must_not"],
+            [
+                {
+                    "key": "source_type",
+                    "match": {"value": "memory_usage_audit"},
+                }
+            ],
+        )
+        self.assertIn(
+            {"is_empty": {"key": "promotion_source_hash"}},
+            governance_condition["should"][1]["must_not"],
+        )
+        self.assertEqual(
+            query_filter["must_not"],
+            [
+                {
+                    "key": "human_verdict",
+                    "match": {"any": ["unsafe"]},
+                }
+            ],
+        )
+
+    def test_qdrant_store_legacy_search_preserves_payload_filter(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        stored = _overcorrection_record().model_copy(
+            update={
+                "embedding_model": "local_hash_embedding",
+                "embedding_version": "v1",
+                "embedding_dimension": 16,
+                "vector_id": "modeler_memory:memory-overcorrection-001",
+            }
+        )
+        query = AgentMemoryQuery(
+            query_id="query-qdrant-legacy",
+            target_agent="modeler",
+            query_text="threshold tradeoff",
+            dataset="nasa_ims_bearing",
+        )
+
+        with patch.object(
+            store,
+            "_request_json",
+            side_effect=[
+                _qdrant_collection_info_payload(),
+                QdrantMemoryError("query endpoint unavailable", status_code=405),
+                {
+                    "result": [
+                        {
+                            "id": "point-a",
+                            "score": 0.87,
+                            "payload": {"record": stored.model_dump(mode="json")},
+                        }
+                    ]
+                },
+                QdrantMemoryError("collection not found", status_code=404),
+            ],
+        ) as request_json:
+            context = store.query(query)
+
+        calls = request_json.call_args_list
+        query_call = next(call for call in calls if call.args[1].endswith("/points/query"))
+        legacy_call = next(call for call in calls if call.args[1].endswith("/points/search"))
+        query_payload = query_call.args[2]
+        legacy_payload = legacy_call.args[2]
+        self.assertIn("query", query_payload)
+        self.assertNotIn("vector", query_payload)
+        self.assertNotIn("query", legacy_payload)
+        self.assertIn("vector", legacy_payload)
+        self.assertEqual(legacy_payload["filter"], query_payload["filter"])
+        self.assertEqual(
+            [item.record.memory_record_id for item in context.items],
+            ["memory-overcorrection-001"],
+        )
+
+    def test_qdrant_store_keeps_local_filter_as_defensive_validation(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        unsafe = _unsafe_warning_record()
+
+        with patch(
+            "codigo.app.services.vector_memory.urllib.request.urlopen",
+            side_effect=[
+                _FakeHTTPResponse(_qdrant_collection_info_payload()),
+                _FakeHTTPResponse(
+                    {
+                        "result": [
+                            {
+                                "id": "point-unsafe",
+                                "score": 0.99,
+                                "payload": {"record": unsafe.model_dump(mode="json")},
+                            }
+                        ]
+                    }
+                ),
+                _FakeHTTPResponse(_qdrant_collection_info_payload()),
+                _FakeHTTPResponse({"result": []}),
+            ],
+        ):
+            context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-qdrant-defensive-filter",
+                    target_agent="modeler",
+                    query_text="unsafe threshold",
+                )
+            )
+
+        self.assertEqual(context.items, [])
+
+    def test_qdrant_defensive_filter_rejects_opposite_provenance(self):
+        store = QdrantVectorMemoryStore(
+            host="http://qdrant.test",
+            embedding_model=LocalHashEmbeddingModel(dimension=16),
+        )
+        official = _overcorrection_record().model_copy(
+            update={
+                "data_provenance": "official",
+                "embedding_model": "local_hash_embedding",
+                "embedding_version": "v1",
+                "embedding_dimension": 16,
+                "vector_id": "modeler_memory:memory-overcorrection-001",
+            }
+        )
+
+        with patch.object(
+            store,
+            "_request_json",
+            side_effect=[
+                _qdrant_collection_info_payload(),
+                {
+                    "result": [
+                        {
+                            "id": "point-official",
+                            "score": 0.99,
+                            "payload": {"record": official.model_dump(mode="json")},
+                        }
+                    ]
+                },
+                _qdrant_collection_info_payload(),
+                {"result": []},
+            ],
+        ) as request_json:
+            context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-synthetic-defensive-filter",
+                    target_agent="modeler",
+                    query_text="threshold provenance",
+                    dataset="nasa_ims_bearing",
+                    data_provenance="synthetic",
+                )
+            )
+
+        self.assertEqual(context.items, [])
+        query_call = next(
+            call
+            for call in request_json.call_args_list
+            if call.args[1].endswith("/points/query")
+        )
+        provenance_scope = next(
+            condition
+            for condition in query_call.args[2]["filter"]["must"]
+            if condition.get("should")
+            and condition["should"][0].get("must")
+        )
+        specific_allowed = provenance_scope["should"][0]["must"][1]["should"]
+        self.assertIn(
+            {"key": "data_provenance", "match": {"value": "synthetic"}},
+            specific_allowed,
+        )
+        self.assertNotIn(
+            {"key": "data_provenance", "match": {"value": "official"}},
+            specific_allowed,
         )
 
     def test_qdrant_store_list_and_delete_use_scroll_payloads(self):
@@ -319,6 +687,34 @@ class VectorMemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(context.items[0].retrieval_use, "boundary_context")
 
+    def test_local_json_rejects_embedding_mismatch_without_rewriting_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = LocalJsonVectorMemoryStore(
+                tmp,
+                embedding_model=LocalHashEmbeddingModel(dimension=16),
+            )
+            original.upsert(_overcorrection_record())
+            index_path = Path(tmp) / "modeler_memory.json"
+            before = index_path.read_bytes()
+
+            incompatible = LocalJsonVectorMemoryStore(
+                tmp,
+                embedding_model=LocalHashEmbeddingModel(dimension=32),
+            )
+            with self.assertRaisesRegex(
+                VectorMemoryConfigError,
+                "dimension mismatch",
+            ):
+                incompatible.query(
+                    AgentMemoryQuery(
+                        query_id="query-incompatible-json",
+                        target_agent="modeler",
+                        query_text="threshold",
+                    )
+                )
+
+            self.assertEqual(index_path.read_bytes(), before)
+
     def test_default_query_excludes_unsafe_verdicts(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LocalJsonVectorMemoryStore(tmp)
@@ -373,6 +769,84 @@ class VectorMemoryStoreTests(unittest.TestCase):
             self.assertIn("memory-overcorrection-001", returned_ids)
             self.assertIn("memory-shared-methodology-001", returned_ids)
             self.assertNotIn("memory-cleaner-001", returned_ids)
+
+    def test_dataset_specific_memory_never_crosses_official_and_synthetic_runs(self):
+        official = _overcorrection_record().model_copy(
+            update={
+                "memory_record_id": "memory-official",
+                "data_provenance": "official",
+            }
+        )
+        synthetic = _overcorrection_record().model_copy(
+            update={
+                "memory_record_id": "memory-synthetic",
+                "data_provenance": "synthetic",
+            }
+        )
+        unknown = _overcorrection_record().model_copy(
+            update={
+                "memory_record_id": "memory-unknown",
+                "data_provenance": "unknown",
+            }
+        )
+        shared_unknown = _shared_methodology_record()
+        shared_official = _shared_methodology_record().model_copy(
+            update={
+                "memory_record_id": "memory-shared-official",
+                "data_provenance": "official",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalJsonVectorMemoryStore(tmp)
+            store.rebuild(
+                [official, synthetic, unknown, shared_unknown, shared_official]
+            )
+            synthetic_context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-synthetic-provenance",
+                    target_agent="modeler",
+                    query_text="threshold overcorrection methodology",
+                    dataset="nasa_ims_bearing",
+                    data_provenance="synthetic",
+                    excluded_verdicts=[],
+                    top_k=10,
+                )
+            )
+            official_context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-official-provenance",
+                    target_agent="modeler",
+                    query_text="threshold overcorrection methodology",
+                    dataset="nasa_ims_bearing",
+                    data_provenance="official",
+                    excluded_verdicts=[],
+                    top_k=10,
+                )
+            )
+
+        synthetic_ids = {
+            item.record.memory_record_id for item in synthetic_context.items
+        }
+        official_ids = {
+            item.record.memory_record_id for item in official_context.items
+        }
+        self.assertEqual(
+            synthetic_ids,
+            {
+                "memory-synthetic",
+                "memory-unknown",
+                "memory-shared-methodology-001",
+            },
+        )
+        self.assertEqual(
+            official_ids,
+            {
+                "memory-official",
+                "memory-unknown",
+                "memory-shared-methodology-001",
+            },
+        )
 
     def test_other_agents_have_their_own_memory_collections(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -432,6 +906,32 @@ class VectorMemoryStoreTests(unittest.TestCase):
             )
 
             self.assertEqual(context.items[0].record.memory_record_id, records[0].memory_record_id)
+
+    def test_local_json_reads_legacy_record_without_provenance_as_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalJsonVectorMemoryStore(tmp)
+            store.upsert(_overcorrection_record())
+            index_path = Path(tmp) / "modeler_memory.json"
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+            payload["entries"][0]["record"].pop("data_provenance")
+            index_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            reloaded = LocalJsonVectorMemoryStore(tmp)
+            records = reloaded.list_records("modeler_memory")
+            context = reloaded.query(
+                AgentMemoryQuery(
+                    query_id="query-legacy-unknown-provenance",
+                    target_agent="modeler",
+                    query_text="threshold overcorrection",
+                    dataset="nasa_ims_bearing",
+                    data_provenance="unknown",
+                    excluded_verdicts=[],
+                )
+            )
+
+        self.assertEqual(records[0].data_provenance, "unknown")
+        self.assertEqual(len(context.items), 1)
+        self.assertEqual(context.items[0].record.data_provenance, "unknown")
 
     def test_delete_removes_record_from_collection_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -509,7 +1009,7 @@ class VectorMemoryStoreTests(unittest.TestCase):
         self.assertEqual(reviewed_record.memory_role, "boundary_case")
         self.assertEqual(reviewed_record.collection_name, "modeler_memory")
 
-    def test_memory_record_from_usage_audit_becomes_warning_memory(self):
+    def test_memory_record_from_usage_audit_is_non_reusable_observation(self):
         record = memory_record_from_memory_usage_audit(
             _memory_usage_audit(),
             target_agent="modeler",
@@ -521,11 +1021,12 @@ class VectorMemoryStoreTests(unittest.TestCase):
         self.assertEqual(record.source_type, "memory_usage_audit")
         self.assertEqual(record.collection_name, "modeler_memory")
         self.assertEqual(record.memory_role, "warning")
-        self.assertTrue(record.reusable_as_context)
+        self.assertFalse(record.reusable_as_context)
+        self.assertIn("non_reusable_memory_observation", record.tags)
         self.assertIn("memory_repeated_boundary_failure", record.tags)
         self.assertIn("false_positive_rate", record.content)
 
-    def test_decision_episode_candidate_indexes_reusable_lesson(self):
+    def test_decision_episode_candidate_requires_source_bound_promotion(self):
         candidate = memory_candidate_from_decision_episode(
             _decision_episode(),
             human_verdict="partially_correct",
@@ -534,10 +1035,12 @@ class VectorMemoryStoreTests(unittest.TestCase):
         record = memory_record_from_candidate(
             candidate,
             source_path="reports/run/iteration/memory_candidate.json",
-            source_hash="def456",
+            source_hash="d" * 64,
         )
 
         self.assertEqual(record.source_type, "decision_episode")
+        self.assertEqual(candidate.data_provenance, "synthetic")
+        self.assertEqual(record.data_provenance, "synthetic")
         self.assertEqual(record.memory_role, "boundary_case")
         self.assertIn("When to reuse", record.content)
         self.assertIn("modeler", record.tags)
@@ -554,12 +1057,31 @@ class VectorMemoryStoreTests(unittest.TestCase):
                     target_agent="modeler",
                     query_text="moderate threshold recall false positive tradeoff",
                     dataset="nasa_ims_bearing",
+                    data_provenance="synthetic",
                     min_similarity=0.0,
                 )
             )
 
-            self.assertEqual(len(context.items), 1)
-            self.assertEqual(context.items[0].record.memory_record_id, record.memory_record_id)
+            self.assertEqual(context.items, [])
+
+            promoted = record.model_copy(
+                update={"promotion_source_hash": record.source_hash}
+            )
+            store.upsert(promoted)
+            promoted_context = store.query(
+                AgentMemoryQuery(
+                    query_id="query-decision-episode-promoted",
+                    target_agent="modeler",
+                    query_text="moderate threshold false positive rate",
+                    dataset="nasa_ims_bearing",
+                    data_provenance="synthetic",
+                    min_similarity=0.0,
+                )
+            )
+            self.assertEqual(
+                [item.record.memory_record_id for item in promoted_context.items],
+                [record.memory_record_id],
+            )
 
 
 class _FakeHTTPResponse:
@@ -574,6 +1096,36 @@ class _FakeHTTPResponse:
 
     def read(self) -> bytes:
         return json.dumps(self._payload).encode("utf-8")
+
+
+def _qdrant_collection_info_payload(
+    indexed_fields: dict[str, str] | None = None,
+    *,
+    vector_size: int = 16,
+    distance: str = "Cosine",
+) -> dict[str, object]:
+    resolved_fields = (
+        dict(QDRANT_MEMORY_PAYLOAD_INDEXES)
+        if indexed_fields is None
+        else indexed_fields
+    )
+    return {
+        "result": {
+            "status": "green",
+            "config": {
+                "params": {
+                    "vectors": {
+                        "size": vector_size,
+                        "distance": distance,
+                    }
+                }
+            },
+            "payload_schema": {
+                field_name: {"data_type": field_schema}
+                for field_name, field_schema in resolved_fields.items()
+            },
+        }
+    }
 
 
 def _overcorrection_record() -> ReasoningMemoryRecord:
@@ -718,6 +1270,7 @@ def _decision_episode() -> DecisionEpisode:
         target_agent="modeler",
         decision_type="modeling",
         dataset="nasa_ims_bearing",
+        data_provenance="synthetic",
         context_summary="Low recall with false negatives close to the threshold.",
         options_considered=[
             DecisionOption(

@@ -40,6 +40,16 @@ class ReasoningAuditTests(unittest.TestCase):
 
         self.assertEqual(postmortem.outcome, "overcorrected")
         self.assertEqual(postmortem.human_review_status, "pending_human_review")
+        self.assertEqual(postmortem.hypothesis, decision.hypothesis.statement)
+        self.assertNotEqual(postmortem.hypothesis, decision.learning_summary)
+        self.assertEqual(
+            postmortem.evidence_used,
+            [
+                "false_negative_summary",
+                "threshold_convention",
+                "metric:retry_f1",
+            ],
+        )
         self.assertIn("do_not_optimize_recall_without_fpr_control", postmortem.reusable_lessons)
 
     def test_write_postmortem_creates_review_request_when_triggered(self):
@@ -75,6 +85,20 @@ def _retry_decision(threshold_quantile: float) -> ModelingRetryDecision:
         decision_id="source-run:modeler_retry:001",
         rationale="Lower the threshold to catch missed anomalies.",
         confidence=0.85,
+        hypothesis={
+            "kind": "model_performance",
+            "statement": (
+                "Un ajuste moderado del umbral mejorara la deteccion retenida "
+                "sin elevar de forma excesiva las falsas alarmas."
+            ),
+            "scope": "Reintento actual sobre la particion retenida.",
+            "evidence_cutoff": "Metricas del intento anterior antes del reintento.",
+            "expected_observation": "Mejora recall sin desbordar el FPR retenido.",
+            "falsification_criterion": "El FPR se dispara o recall no mejora.",
+            "evidence_refs": ["metric:retry_f1"],
+            "risk_notes": ["El umbral puede sobreajustarse a validation."],
+            "assumptions": ["La particion retenida no contiene fuga."],
+        },
         source_run_id="source-run",
         attempt_number=1,
         max_attempts=2,

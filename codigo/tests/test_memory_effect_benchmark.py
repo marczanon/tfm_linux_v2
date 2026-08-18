@@ -112,6 +112,44 @@ class MemoryEffectBenchmarkTests(unittest.TestCase):
         self.assertEqual(modeler.outcome, "usage_invalid")
         self.assertEqual(modeler.cited_without_retrieval, ["memory-not-retrieved"])
 
+    def test_causal_v2_benchmark_reports_only_neutral_unlabeled_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            baseline = _state(
+                "memory-benchmark-causal-off",
+                model_name="pca_reconstruction_error",
+                causal_v2=True,
+            )
+            memory_run = _state(
+                "memory-benchmark-causal-on",
+                model_name="pca_reconstruction_error",
+                used_memory=True,
+                causal_v2=True,
+                context_path=Path(tmp) / "context-causal.json",
+                cited_memory_id="memory-modeler-temporal-001",
+            )
+            save_run_snapshot(baseline, runs_dir)
+            save_run_snapshot(memory_run, runs_dir)
+
+            benchmark = build_memory_effect_benchmark(
+                run_ids=[baseline.run_id, memory_run.run_id],
+                baseline_run_id=baseline.run_id,
+                runs_dir=runs_dir,
+            )
+
+        result = next(run for run in benchmark.runs if run.run_id == memory_run.run_id)
+        metric_names = {item.metric for item in result.effect_signals.metric_deltas}
+        self.assertIn("degradation_persistent_alert_run_rate", metric_names)
+        self.assertIn(
+            "degradation_mean_first_persistent_alert_time_to_trajectory_end",
+            metric_names,
+        )
+        self.assertIn("degradation_mean_pre_monitoring_alert_rate", metric_names)
+        self.assertNotIn("precision", metric_names)
+        self.assertNotIn("recall", metric_names)
+        self.assertNotIn("degradation_detected_before_failure_rate", metric_names)
+        self.assertNotIn("degradation_mean_lead_time_to_failure", metric_names)
+
 
 def _state(
     run_id: str,
@@ -120,18 +158,33 @@ def _state(
     used_memory: bool = False,
     context_path: Path | None = None,
     cited_memory_id: str | None = None,
+    causal_v2: bool = False,
 ) -> TFMStateModel:
+    extra = {
+        "degradation_detected_before_failure_rate": 1.0 if used_memory else 0.5,
+        "degradation_mean_lead_time_to_failure": 1200.0 if used_memory else 600.0,
+        "degradation_mean_false_alarm_rate_nominal": 0.1 if used_memory else 0.2,
+        "degradation_mean_score_trend_spearman": 0.8 if used_memory else 0.4,
+    }
+    if causal_v2:
+        extra.update(
+            {
+                "degradation_interpretation_mode": "causal_v2_unlabeled",
+                "degradation_persistent_alert_run_rate": 1.0,
+                "degradation_mean_first_persistent_alert_time_to_trajectory_end": (
+                    1200.0 if used_memory else 600.0
+                ),
+                "degradation_mean_pre_monitoring_alert_rate": (
+                    0.1 if used_memory else 0.2
+                ),
+            }
+        )
     metrics = MetricsReport(
         precision=0.8 if used_memory else 0.75,
         recall=0.9 if used_memory else 0.7,
         f1_score=0.847 if used_memory else 0.724,
         false_positive_rate=0.1 if used_memory else 0.2,
-        extra={
-            "degradation_detected_before_failure_rate": 1.0 if used_memory else 0.5,
-            "degradation_mean_lead_time_to_failure": 1200.0 if used_memory else 600.0,
-            "degradation_mean_false_alarm_rate_nominal": 0.1 if used_memory else 0.2,
-            "degradation_mean_score_trend_spearman": 0.8 if used_memory else 0.4,
-        },
+        extra=extra,
     )
     decision = _modeler_decision(
         run_id,
@@ -170,7 +223,8 @@ def _state(
             label_mode="degradation",
             supervision_profile="run_to_failure_degradation",
             label_granularity="proxy_temporal",
-            label_source="synthetic",
+            label_source="none" if causal_v2 else "synthetic",
+            data_provenance="official" if causal_v2 else "synthetic",
         ),
         raw_path="codigo/data/raw/nasa_ims_bearing/synthetic",
         messages=[

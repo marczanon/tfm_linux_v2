@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -33,6 +32,7 @@ from codigo.app.agents.structurer import (
     retrieve_structurer_memory_context,
 )
 from codigo.app.agents.supervisor import decide_supervisor_action
+from codigo.app.agents.monitoring_reviewer import decide_monitoring_review_action
 from codigo.app.executors.cleaning import (
     DEFAULT_CLEANING_CONFIG,
     generate_clean_signals,
@@ -61,6 +61,7 @@ from codigo.app.schemas.executor_results import (
     StructuringResult,
 )
 from codigo.app.schemas.agent_decisions import (
+    AgentName,
     CleaningDecision,
     EvaluationDecision,
     ModelingDecision,
@@ -69,6 +70,13 @@ from codigo.app.schemas.agent_decisions import (
     ReportVerificationDecision,
     StructuringDecision,
     SupervisorDecision,
+)
+from codigo.app.schemas.monitoring_replay import (
+    CausalEvidenceCatalog,
+    CausalInputView,
+    MONITORING_REVIEW_ROLES,
+    MonitoringReviewDecision,
+    MonitoringReviewRequest,
 )
 from codigo.app.schemas.reasoning import AgentMemoryQuery, RetrievedMemoryContext
 from codigo.app.schemas.state import (
@@ -88,6 +96,14 @@ from codigo.app.services.decision_memory import (
     build_structuring_memory_candidate,
     write_decision_memory_artifacts,
 )
+from codigo.app.services.agent_memory import call_agent_with_optional_memory
+from codigo.app.services.memory_quality_gate import (
+    MemoryQualityGatePolicy,
+    MemoryQualityGateReport,
+    evaluate_memory_quality,
+    filter_memory_context_by_quality,
+)
+from codigo.app.services.online_blind import is_online_blind_decision_agent
 from codigo.app.services.run_persistence import (
     DEFAULT_RUNS_DIR,
     RunSnapshot,
@@ -100,6 +116,7 @@ from codigo.app.services.report_debate import (
     write_report_debate_artifacts,
 )
 from codigo.app.services.vector_memory import VectorMemoryStore
+from codigo.app.services.llm import JSONLLMClient
 
 
 @dataclass(frozen=True)
@@ -143,8 +160,21 @@ class PipelineMemoryConfig:
     modeler_top_k: int = 3
     evaluator_top_k: int = 3
     min_similarity: float = 0.0
+    quality_gate_enabled: bool = True
+    quality_gate_policy: MemoryQualityGatePolicy | None = None
+    keep_caution_memory: bool = True
+    quality_gate_candidate_pool_size: int = 10
     generate_decision_memory: bool = True
-    reusable_as_context: bool = True
+    reusable_as_context: bool = False
+
+
+@dataclass(frozen=True)
+class PipelineMemoryRetrieval:
+    """Contexto bruto, evaluacion determinista y contexto efectivo del RAG."""
+
+    raw_context: RetrievedMemoryContext
+    effective_context: RetrievedMemoryContext
+    quality_report: MemoryQualityGateReport | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +183,17 @@ class PersistedPipelineRun:
 
     state: TFMState
     snapshot: RunSnapshot
+
+
+class MonitoringReviewGraphState(TypedDict):
+    """Estado minimo del subgrafo propose-only, sin rutas ni ejecutores."""
+
+    request: dict[str, Any]
+    causal_view: dict[str, Any]
+    evidence_records: list[dict[str, Any]]
+    evidence_catalog: dict[str, Any]
+    decisions: list[dict[str, Any]]
+    runtime_event_ids: dict[str, list[str]]
 
 
 def build_cwru_pipeline(
@@ -306,6 +347,214 @@ run_pipeline = run_cwru_pipeline
 run_and_persist_pipeline = run_and_persist_cwru_pipeline
 
 
+def build_monitoring_review_graph(
+    *,
+    llm_client: JSONLLMClient | None = None,
+    runtime_recorder: AgentRuntimeRecorder,
+    use_llm: bool = True,
+    decision_runner: Callable[..., MonitoringReviewDecision] = (
+        decide_monitoring_review_action
+    ),
+) -> Any:
+    """Compila la revision fija de siete roles sin nodos ejecutores ni RAG."""
+
+    graph = StateGraph(MonitoringReviewGraphState)
+    for role in MONITORING_REVIEW_ROLES:
+        graph.add_node(
+            role,
+            lambda state, selected_role=role: _monitoring_review_role_node(
+                state,
+                agent_name=selected_role,
+                llm_client=llm_client,
+                runtime_recorder=runtime_recorder,
+                use_llm=use_llm,
+                decision_runner=decision_runner,
+            ),
+        )
+    graph.add_edge(START, MONITORING_REVIEW_ROLES[0])
+    for current, following in zip(
+        MONITORING_REVIEW_ROLES[:-1],
+        MONITORING_REVIEW_ROLES[1:],
+        strict=True,
+    ):
+        graph.add_edge(current, following)
+    graph.add_edge(MONITORING_REVIEW_ROLES[-1], END)
+    return graph.compile()
+
+
+def run_monitoring_review_graph(
+    *,
+    request: MonitoringReviewRequest,
+    causal_view: CausalInputView,
+    evidence_records: list[dict[str, Any]],
+    evidence_catalog: CausalEvidenceCatalog | None = None,
+    allowed_evidence_refs: tuple[str, ...] | None = None,
+    runtime_recorder: AgentRuntimeRecorder,
+    llm_client: JSONLLMClient | None = None,
+    use_llm: bool = True,
+    decision_runner: Callable[..., MonitoringReviewDecision] = (
+        decide_monitoring_review_action
+    ),
+) -> MonitoringReviewGraphState:
+    """Ejecuta el subgrafo sobre una vista ya validada y solo en memoria."""
+
+    from codigo.app.services.monitoring_review_store import (
+        build_causal_evidence_catalog,
+    )
+
+    effective_catalog = evidence_catalog or build_causal_evidence_catalog(
+        causal_view,
+        evidence_records,
+    )
+    if allowed_evidence_refs is not None and allowed_evidence_refs != tuple(
+        item.evidence_id for item in causal_view.evidence
+    ):
+        raise ValueError(
+            "legacy allowed evidence refs must match the causal view exactly"
+        )
+
+    initial = MonitoringReviewGraphState(
+        request=request.model_dump(mode="json"),
+        causal_view=causal_view.model_dump(mode="json"),
+        evidence_records=evidence_records,
+        evidence_catalog=effective_catalog.model_dump(mode="json"),
+        decisions=[],
+        runtime_event_ids={},
+    )
+    final = build_monitoring_review_graph(
+        llm_client=llm_client,
+        runtime_recorder=runtime_recorder,
+        use_llm=use_llm,
+        decision_runner=decision_runner,
+    ).invoke(initial)
+    decisions = [
+        MonitoringReviewDecision.model_validate(item)
+        for item in final.get("decisions", [])
+    ]
+    if tuple(item.agent_name for item in decisions) != MONITORING_REVIEW_ROLES:
+        raise ValueError("monitoring review did not complete the seven fixed roles")
+    return MonitoringReviewGraphState(**final)
+
+
+def _monitoring_review_role_node(
+    state: MonitoringReviewGraphState,
+    *,
+    agent_name: AgentName,
+    llm_client: JSONLLMClient | None,
+    runtime_recorder: AgentRuntimeRecorder,
+    use_llm: bool,
+    decision_runner: Callable[..., MonitoringReviewDecision],
+) -> MonitoringReviewGraphState:
+    request = MonitoringReviewRequest.model_validate(state["request"])
+    causal_view = CausalInputView.model_validate(state["causal_view"])
+    evidence_catalog = CausalEvidenceCatalog.model_validate(
+        state["evidence_catalog"]
+    )
+    prior_decisions = tuple(
+        MonitoringReviewDecision.model_validate(item)
+        for item in state.get("decisions", [])
+    )
+    decision = decision_runner(
+        agent_name=agent_name,
+        request=request,
+        causal_view=causal_view,
+        evidence_records=list(state["evidence_records"]),
+        evidence_catalog=evidence_catalog,
+        prior_decisions=prior_decisions,
+        llm_client=llm_client,
+        use_llm=use_llm,
+    )
+    handle_by_ref = {
+        entry.support_ref: entry.handle for entry in evidence_catalog.entries
+    }
+    selected_handles = [handle_by_ref[ref] for ref in decision.evidence_refs]
+    from codigo.app.services.monitoring_review_store import (
+        causal_evidence_display_projection,
+    )
+
+    selected_records = []
+    for handle in selected_handles:
+        entry = next(item for item in evidence_catalog.entries if item.handle == handle)
+        record = state["evidence_records"][entry.record_index]
+        selected_records.append(
+            causal_evidence_display_projection(entry, record)
+        )
+    event = runtime_recorder.emit(
+        kind=("supervisor_decision" if agent_name == "supervisor" else "agent_decision"),
+        source=("supervisor" if agent_name == "supervisor" else "agent"),
+        title=_monitoring_review_event_title(agent_name),
+        summary=decision.observation_summary,
+        stage="monitoring_review",
+        node=f"{agent_name}_monitoring_review",
+        agent_name=agent_name,
+        decision_id=decision.decision_id,
+        rationale=decision.rationale,
+        confidence=decision.confidence,
+        payload={
+            "trace_origin": "persisted_runtime",
+            "review_kind": request.review_kind,
+            "session_id": request.session_id,
+            "trigger_id": request.trigger_id,
+            "trigger_event_id": request.trigger_event_id,
+            "origin_tick_id": request.origin_tick_id,
+            "cutoff_cursor": request.cutoff_cursor,
+            "cutoff_snapshot_id": request.cutoff_snapshot_id,
+            "causal_view_sha256": request.causal_view_sha256,
+            "evidence_binding": {
+                "mode": "server_record_catalog",
+                "selection_origin": (
+                    "agent"
+                    if decision.generation_trace.origin == "llm"
+                    else (
+                        "server_fallback"
+                        if decision.generation_trace.origin == "guardrail_fallback"
+                        else "server_protocol"
+                    )
+                ),
+                "catalog_sha256": evidence_catalog.catalog_sha256,
+                "causal_scope_refs": list(evidence_catalog.causal_scope_refs),
+                "available_count": len(evidence_catalog.entries),
+                "available_handles": [
+                    entry.handle for entry in evidence_catalog.entries
+                ],
+                "selected_handles": selected_handles,
+                "support_refs": list(decision.evidence_refs),
+                "selected_records": selected_records,
+            },
+            "memory_mode": "off",
+            "policy_application_status": "not_applied",
+            "decision": decision.model_dump(mode="json"),
+        },
+    )
+    runtime_ids = {
+        key: list(values)
+        for key, values in state.get("runtime_event_ids", {}).items()
+    }
+    runtime_ids.setdefault(agent_name, []).append(event.event_id)
+    return MonitoringReviewGraphState(
+        **{
+            **state,
+            "decisions": [
+                *state.get("decisions", []),
+                decision.model_dump(mode="json"),
+            ],
+            "runtime_event_ids": runtime_ids,
+        }
+    )
+
+
+def _monitoring_review_event_title(agent_name: AgentName) -> str:
+    return {
+        "supervisor": "Supervisor encuadra el trigger",
+        "cleaner": "Limpiador revisa calidad sensorial",
+        "structurer": "Estructurador revisa continuidad temporal",
+        "modeler": "Modelador contrasta score y umbral",
+        "evaluator": "Evaluador interpreta riesgo y evidencia",
+        "report_writer": "Redactor sintetiza la revision",
+        "report_verifier": "Verificador contrasta claims y limites",
+    }[agent_name]
+
+
 def _supervisor_node(
     state: TFMState,
     agents: PipelineAgents,
@@ -428,6 +677,10 @@ def _cleaning_node(
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
+    source_decision = _latest_cleaning_decision(model)
+    source_decision_id = (
+        None if source_decision is None else source_decision.decision_id
+    )
     if not model.manifest_path:
         return _missing_input_state(
             model,
@@ -435,6 +688,7 @@ def _cleaning_node(
             "cleaning_executor",
             "manifest_path",
             runtime_recorder,
+            source_decision_id=source_decision_id,
         )
     if not model.profile_path:
         return _missing_input_state(
@@ -443,6 +697,7 @@ def _cleaning_node(
             "cleaning_executor",
             "profile_path",
             runtime_recorder,
+            source_decision_id=source_decision_id,
         )
 
     config = model.cleaning_config or DEFAULT_CLEANING_CONFIG
@@ -458,6 +713,7 @@ def _cleaning_node(
         next_node="supervisor",
         extra_updates={"cleaning_config": config.model_dump(mode="json")},
         runtime_recorder=runtime_recorder,
+        source_decision_id=source_decision_id,
     )
 
 
@@ -468,11 +724,12 @@ def _structurer_node(
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
-    memory_context = _retrieve_structurer_context(model, memory_config)
+    memory_retrieval = _retrieve_structurer_context(model, memory_config)
+    memory_context = _effective_memory_context(memory_retrieval)
     memory_artifact_paths = _write_memory_retrieval_artifacts(
         model,
         "structurer",
-        memory_context,
+        memory_retrieval,
         memory_config,
     )
     _emit_memory_event(
@@ -480,9 +737,10 @@ def _structurer_node(
         model=model,
         agent_name="structurer",
         memory_context=memory_context,
+        memory_retrieval=memory_retrieval,
         artifact_paths=memory_artifact_paths,
     )
-    decision = _call_agent_with_optional_memory(
+    decision = call_agent_with_optional_memory(
         agents.structurer,
         model,
         memory_context,
@@ -519,7 +777,7 @@ def _structurer_node(
     updated = model.to_langgraph_state()
     memory_artifacts = _memory_context_artifacts(
         "structurer",
-        memory_context,
+        memory_retrieval,
         memory_artifact_paths,
     )
     updated["messages"] = [
@@ -547,6 +805,10 @@ def _structuring_node(
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
+    source_decision = _latest_structuring_decision(model)
+    source_decision_id = (
+        None if source_decision is None else source_decision.decision_id
+    )
     if not model.clean_path:
         return _missing_input_state(
             model,
@@ -554,6 +816,7 @@ def _structuring_node(
             "structuring_executor",
             "clean_path",
             runtime_recorder,
+            source_decision_id=source_decision_id,
         )
 
     config = model.structuring_config or DEFAULT_STRUCTURING_CONFIG
@@ -565,6 +828,7 @@ def _structuring_node(
         next_node="supervisor",
         extra_updates={"structuring_config": config.model_dump(mode="json")},
         runtime_recorder=runtime_recorder,
+        source_decision_id=source_decision_id,
     )
     if result.status != "success":
         return updated
@@ -582,11 +846,12 @@ def _modeler_node(
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
-    memory_context = _retrieve_modeler_context(model, memory_config)
+    memory_retrieval = _retrieve_modeler_context(model, memory_config)
+    memory_context = _effective_memory_context(memory_retrieval)
     memory_artifact_paths = _write_memory_retrieval_artifacts(
         model,
         "modeler",
-        memory_context,
+        memory_retrieval,
         memory_config,
     )
     _emit_memory_event(
@@ -594,9 +859,10 @@ def _modeler_node(
         model=model,
         agent_name="modeler",
         memory_context=memory_context,
+        memory_retrieval=memory_retrieval,
         artifact_paths=memory_artifact_paths,
     )
-    decision = _call_agent_with_optional_memory(
+    decision = call_agent_with_optional_memory(
         agents.modeler,
         model,
         memory_context,
@@ -636,7 +902,7 @@ def _modeler_node(
     updated = model.to_langgraph_state()
     memory_artifacts = _memory_context_artifacts(
         "modeler",
-        memory_context,
+        memory_retrieval,
         memory_artifact_paths,
     )
     updated["messages"] = [
@@ -664,6 +930,10 @@ def _modeling_node(
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
+    source_decision = _latest_modeling_decision(model)
+    source_decision_id = (
+        None if source_decision is None else source_decision.decision_id
+    )
     features_path = _artifact_path(model, "features") or _features_from_tensor_path(model)
     if not features_path:
         return _missing_input_state(
@@ -672,6 +942,7 @@ def _modeling_node(
             "modeling_executor",
             "features artifact",
             runtime_recorder,
+            source_decision_id=source_decision_id,
         )
 
     config = model.modeling_config or DEFAULT_MODELING_CONFIG
@@ -683,6 +954,7 @@ def _modeling_node(
         next_node="supervisor",
         extra_updates={"modeling_config": config.model_dump(mode="json")},
         runtime_recorder=runtime_recorder,
+        source_decision_id=source_decision_id,
     )
     if result.status != "success":
         return updated
@@ -731,11 +1003,12 @@ def _evaluator_agent_node(
     runtime_recorder: AgentRuntimeRecorder | None,
 ) -> TFMState:
     model = validate_state(state)
-    memory_context = _retrieve_evaluator_context(model, memory_config)
+    memory_retrieval = _retrieve_evaluator_context(model, memory_config)
+    memory_context = _effective_memory_context(memory_retrieval)
     memory_artifact_paths = _write_memory_retrieval_artifacts(
         model,
         "evaluator",
-        memory_context,
+        memory_retrieval,
         memory_config,
     )
     _emit_memory_event(
@@ -743,9 +1016,10 @@ def _evaluator_agent_node(
         model=model,
         agent_name="evaluator",
         memory_context=memory_context,
+        memory_retrieval=memory_retrieval,
         artifact_paths=memory_artifact_paths,
     )
-    decision = _call_agent_with_optional_memory(
+    decision = call_agent_with_optional_memory(
         agents.evaluator,
         model,
         memory_context,
@@ -780,7 +1054,7 @@ def _evaluator_agent_node(
     updated = model.to_langgraph_state()
     memory_artifacts = _memory_context_artifacts(
         "evaluator",
-        memory_context,
+        memory_retrieval,
         memory_artifact_paths,
     )
     updated["messages"] = [
@@ -847,6 +1121,7 @@ def _report_writer_node(
         next_stage="reporting",
         next_node="supervisor",
         runtime_recorder=runtime_recorder,
+        source_decision_id=decision.decision_id,
     )
     if result.status != "success":
         return reported_state
@@ -920,6 +1195,7 @@ def _report_debate_step(
             next_stage="reporting",
             next_node="supervisor",
             runtime_recorder=runtime_recorder,
+            source_decision_id=revision_decision.decision_id,
         )
         if result.status != "success":
             return rendered_revision
@@ -971,43 +1247,147 @@ def _report_debate_step(
 def _retrieve_structurer_context(
     model: TFMStateModel,
     memory_config: PipelineMemoryConfig | None,
-) -> RetrievedMemoryContext | None:
+) -> PipelineMemoryRetrieval | None:
     if memory_config is None or memory_config.memory_store is None:
         return None
-    return retrieve_structurer_memory_context(
+    effective_top_k = memory_config.structurer_top_k
+    context = retrieve_structurer_memory_context(
         model,
         memory_store=memory_config.memory_store,
-        top_k=memory_config.structurer_top_k,
+        top_k=_memory_candidate_pool_size(memory_config, effective_top_k),
         min_similarity=memory_config.min_similarity,
+    )
+    return _quality_checked_memory_retrieval(
+        model,
+        context,
+        memory_config,
+        effective_top_k=effective_top_k,
     )
 
 
 def _retrieve_modeler_context(
     model: TFMStateModel,
     memory_config: PipelineMemoryConfig | None,
-) -> RetrievedMemoryContext | None:
+) -> PipelineMemoryRetrieval | None:
     if memory_config is None or memory_config.memory_store is None:
         return None
-    return retrieve_modeler_memory_context(
+    effective_top_k = memory_config.modeler_top_k
+    context = retrieve_modeler_memory_context(
         model,
         memory_store=memory_config.memory_store,
-        top_k=memory_config.modeler_top_k,
+        top_k=_memory_candidate_pool_size(memory_config, effective_top_k),
         min_similarity=memory_config.min_similarity,
+    )
+    return _quality_checked_memory_retrieval(
+        model,
+        context,
+        memory_config,
+        effective_top_k=effective_top_k,
     )
 
 
 def _retrieve_evaluator_context(
     model: TFMStateModel,
     memory_config: PipelineMemoryConfig | None,
-) -> RetrievedMemoryContext | None:
+) -> PipelineMemoryRetrieval | None:
     if memory_config is None or memory_config.memory_store is None:
         return None
-    return retrieve_evaluator_memory_context(
+    effective_top_k = memory_config.evaluator_top_k
+    context = retrieve_evaluator_memory_context(
         model,
         memory_store=memory_config.memory_store,
-        top_k=memory_config.evaluator_top_k,
+        top_k=_memory_candidate_pool_size(memory_config, effective_top_k),
         min_similarity=memory_config.min_similarity,
     )
+    return _quality_checked_memory_retrieval(
+        model,
+        context,
+        memory_config,
+        effective_top_k=effective_top_k,
+    )
+
+
+def _quality_checked_memory_retrieval(
+    model: TFMStateModel,
+    context: RetrievedMemoryContext,
+    memory_config: PipelineMemoryConfig,
+    *,
+    effective_top_k: int,
+) -> PipelineMemoryRetrieval:
+    if not memory_config.quality_gate_enabled:
+        return PipelineMemoryRetrieval(
+            raw_context=context,
+            effective_context=context,
+        )
+    causal_online_decision = is_online_blind_decision_agent(
+        model,
+        context.query.target_agent,
+    )
+    quality_policy = memory_config.quality_gate_policy
+    if causal_online_decision:
+        base_policy = quality_policy or MemoryQualityGatePolicy()
+        quality_policy = base_policy.model_copy(
+            update={
+                "benchmark_mode": True,
+                "require_dataset_match": True,
+                "exclude_incompatible_sample_rate": True,
+            }
+        )
+    quality_report = evaluate_memory_quality(
+        context,
+        policy=quality_policy,
+        supervision_profile=model.project_context.supervision_profile,
+    )
+    effective_context = filter_memory_context_by_quality(
+        context,
+        quality_report,
+        # En structurer/modeler ``online_blind`` una cautela con grupos
+        # desconocidos sigue sin demostrar separacion causal. Se conserva en el
+        # informe bruto, pero nunca se inyecta al agente.
+        keep_caution=(
+            memory_config.keep_caution_memory and not causal_online_decision
+        ),
+    )
+    effective_context = _limit_effective_memory_context(
+        effective_context,
+        top_k=effective_top_k,
+    )
+    return PipelineMemoryRetrieval(
+        raw_context=context,
+        effective_context=effective_context,
+        quality_report=quality_report,
+    )
+
+
+def _memory_candidate_pool_size(
+    memory_config: PipelineMemoryConfig,
+    effective_top_k: int,
+) -> int:
+    if not memory_config.quality_gate_enabled:
+        return effective_top_k
+    return min(
+        10,
+        max(effective_top_k, memory_config.quality_gate_candidate_pool_size),
+    )
+
+
+def _limit_effective_memory_context(
+    context: RetrievedMemoryContext,
+    *,
+    top_k: int,
+) -> RetrievedMemoryContext:
+    items = [
+        item.model_copy(update={"rank": rank})
+        for rank, item in enumerate(context.items[:top_k], start=1)
+    ]
+    query = context.query.model_copy(update={"top_k": top_k})
+    return context.model_copy(update={"query": query, "items": items})
+
+
+def _effective_memory_context(
+    retrieval: PipelineMemoryRetrieval | None,
+) -> RetrievedMemoryContext | None:
+    return None if retrieval is None else retrieval.effective_context
 
 
 def _write_report_verification_artifacts(
@@ -1171,62 +1551,69 @@ def _report_evidence_output_dir(model: TFMStateModel) -> Path:
     )
 
 
-def _call_agent_with_optional_memory(
-    agent: Callable[..., Any],
-    model: TFMStateModel,
-    memory_context: RetrievedMemoryContext | None,
-) -> Any:
-    if memory_context is None or not _accepts_memory_context(agent):
-        return agent(model)
-    return agent(model, memory_context=memory_context)
-
-
-def _accepts_memory_context(agent: Callable[..., Any]) -> bool:
-    try:
-        signature = inspect.signature(agent)
-    except (TypeError, ValueError):
-        return False
-    return "memory_context" in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-
-
 def _write_memory_retrieval_artifacts(
     model: TFMStateModel,
     agent_name: str,
-    memory_context: RetrievedMemoryContext | None,
+    memory_retrieval: PipelineMemoryRetrieval | None,
     memory_config: PipelineMemoryConfig | None,
 ) -> dict[str, str]:
-    if memory_context is None or memory_config is None:
+    if memory_retrieval is None or memory_config is None:
         return {}
+    memory_context = memory_retrieval.effective_context
     output_dir = _agent_memory_output_dir(model, agent_name, memory_config)
     output_dir.mkdir(parents=True, exist_ok=True)
     query_path = output_dir / "memory_query.json"
     context_path = output_dir / "retrieved_memory_context.json"
     query_path.write_text(
-        json.dumps(memory_context.query.model_dump(mode="json"), indent=2),
+        json.dumps(
+            memory_retrieval.raw_context.query.model_dump(mode="json"),
+            indent=2,
+        ),
         encoding="utf-8",
     )
     context_path.write_text(
         json.dumps(memory_context.model_dump(mode="json"), indent=2),
         encoding="utf-8",
     )
-    return {
+    artifact_paths = {
         "query_path": query_path.as_posix(),
         "context_path": context_path.as_posix(),
     }
+    if memory_retrieval.quality_report is not None:
+        raw_context_path = output_dir / "retrieved_memory_context_raw.json"
+        quality_gate_path = output_dir / "memory_quality_gate.json"
+        raw_context_path.write_text(
+            json.dumps(memory_retrieval.raw_context.model_dump(mode="json"), indent=2),
+            encoding="utf-8",
+        )
+        quality_gate_path.write_text(
+            json.dumps(
+                memory_retrieval.quality_report.model_dump(mode="json"),
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        artifact_paths.update(
+            {
+                "raw_context_path": raw_context_path.as_posix(),
+                "quality_gate_path": quality_gate_path.as_posix(),
+            }
+        )
+    return artifact_paths
 
 
 def _memory_context_artifacts(
     agent_name: str,
-    memory_context: RetrievedMemoryContext | None,
+    memory_retrieval: PipelineMemoryRetrieval | None,
     artifact_paths: dict[str, str],
 ) -> list[ArtifactRef]:
-    if memory_context is None or not artifact_paths:
+    if memory_retrieval is None or not artifact_paths:
         return []
+    memory_context = memory_retrieval.effective_context
     query_path = artifact_paths.get("query_path")
     context_path = artifact_paths.get("context_path")
+    raw_context_path = artifact_paths.get("raw_context_path")
+    quality_gate_path = artifact_paths.get("quality_gate_path")
     artifacts: list[ArtifactRef] = []
     if query_path is not None:
         artifacts.append(
@@ -1236,7 +1623,7 @@ def _memory_context_artifacts(
                 path=query_path,
                 producer=agent_name,
                 description=f"Consulta RAG emitida para el agente {agent_name}.",
-                metadata=_memory_query_metadata(memory_context.query),
+                metadata=_memory_query_metadata(memory_retrieval.raw_context.query),
             )
         )
     if context_path is not None:
@@ -1259,6 +1646,42 @@ def _memory_context_artifacts(
                     "top_similarities": ",".join(
                         f"{item.similarity:.6f}" for item in memory_context.items[:5]
                     ),
+                },
+            )
+        )
+    if raw_context_path is not None:
+        artifacts.append(
+            ArtifactRef(
+                name=f"{agent_name}_retrieved_memory_context_raw",
+                artifact_type="config",
+                path=raw_context_path,
+                producer="memory_quality_gate",
+                description=(
+                    f"Contexto RAG bruto anterior al quality gate para {agent_name}."
+                ),
+                metadata={
+                    "context_id": memory_retrieval.raw_context.context_id,
+                    "n_items": len(memory_retrieval.raw_context.items),
+                },
+            )
+        )
+    if quality_gate_path is not None and memory_retrieval.quality_report is not None:
+        quality_report = memory_retrieval.quality_report
+        artifacts.append(
+            ArtifactRef(
+                name=f"{agent_name}_memory_quality_gate",
+                artifact_type="config",
+                path=quality_gate_path,
+                producer="memory_quality_gate",
+                description=(
+                    f"Evaluacion determinista de relevancia RAG para {agent_name}."
+                ),
+                metadata={
+                    "total_items": quality_report.total_items,
+                    "pass_count": quality_report.pass_count,
+                    "caution_count": quality_report.caution_count,
+                    "exclude_candidate_count": quality_report.exclude_candidate_count,
+                    "effective_items": len(memory_context.items),
                 },
             )
         )
@@ -1299,7 +1722,8 @@ def _append_structuring_decision_memory_artifacts(
             f"{result.message} n_windows={result.n_windows}; "
             f"features_path={result.features_path}; splits_path={result.splits_path}."
         ),
-        outcome="supported",
+        # La ejecucion estructural correcta no valida todavia su utilidad aguas abajo.
+        outcome="inconclusive",
         memory_context=memory_context,
     )
     candidate = build_structuring_memory_candidate(
@@ -1336,7 +1760,8 @@ def _append_modeling_decision_memory_artifacts(
             f"{result.message} model_path={result.model_path}; "
             f"predictions_path={result.predictions_path}."
         ),
-        outcome="supported",
+        # El entrenamiento correcto no equivale a una hipotesis validada.
+        outcome="inconclusive",
         memory_context=memory_context,
     )
     candidate = build_modeling_memory_candidate(
@@ -1446,6 +1871,13 @@ def _latest_structuring_decision(model: TFMStateModel) -> StructuringDecision | 
     return None
 
 
+def _latest_cleaning_decision(model: TFMStateModel) -> CleaningDecision | None:
+    for message in reversed(model.messages):
+        if message.role == "agent" and message.name == "cleaner":
+            return CleaningDecision.model_validate_json(message.content)
+    return None
+
+
 def _latest_modeling_decision(model: TFMStateModel) -> ModelingDecision | None:
     for message in reversed(model.messages):
         if message.role == "agent" and message.name == "modeler":
@@ -1520,6 +1952,7 @@ def _emit_memory_event(
     model: TFMStateModel,
     agent_name: str,
     memory_context: RetrievedMemoryContext | None,
+    memory_retrieval: PipelineMemoryRetrieval | None = None,
     artifact_paths: dict[str, str] | None = None,
 ) -> None:
     if memory_context is None:
@@ -1541,15 +1974,24 @@ def _emit_memory_event(
             },
         )
         return
+    raw_context = (
+        memory_retrieval.raw_context
+        if memory_retrieval is not None
+        else memory_context
+    )
+    quality_report = (
+        None if memory_retrieval is None else memory_retrieval.quality_report
+    )
+    requested_query = raw_context.query if raw_context is not None else memory_context.query
     _emit_runtime_event(
         runtime_recorder,
         kind="memory_retrieval",
         source="memory",
         title=f"Consulta RAG para {agent_name}",
         summary=(
-            f"Consulta {memory_context.query.query_id} con top_k="
-            f"{memory_context.query.top_k} y min_similarity="
-            f"{memory_context.query.min_similarity:.3f}."
+            f"Consulta {requested_query.query_id} con pool="
+            f"{requested_query.top_k} y min_similarity="
+            f"{requested_query.min_similarity:.3f}."
         ),
         stage=model.current_stage,
         node=f"{agent_name}_memory",
@@ -1559,7 +2001,8 @@ def _emit_memory_event(
             "state": _state_runtime_payload(model),
             "retrieval_event": "retrieval_requested",
             "available": True,
-            "query": memory_context.query.model_dump(mode="json"),
+            "query": requested_query.model_dump(mode="json"),
+            "candidate_pool_size": requested_query.top_k,
             "query_artifact_path": (artifact_paths or {}).get("query_path"),
         },
     )
@@ -1592,7 +2035,11 @@ def _emit_memory_event(
         kind="memory_retrieval",
         source="memory",
         title=f"Memoria recuperada para {agent_name}",
-        summary=f"{len(memory_context.items)} recuerdos recuperados.",
+        summary=(
+            f"{len(memory_context.items)} recuerdos efectivos de "
+            f"{len(raw_context.items) if raw_context is not None else len(memory_context.items)} "
+            "candidatos recuperados."
+        ),
         stage=model.current_stage,
         node=f"{agent_name}_memory",
         agent_name=agent_name,
@@ -1606,7 +2053,41 @@ def _emit_memory_event(
             "query": memory_context.query.model_dump(mode="json"),
             "retrieval_backend": memory_context.retrieval_backend,
             "embedding_model": memory_context.embedding_model,
+            "raw_count": (
+                len(raw_context.items)
+                if raw_context is not None
+                else len(memory_context.items)
+            ),
+            "effective_count": len(memory_context.items),
+            "filtered_count": (
+                max(0, len(raw_context.items) - len(memory_context.items))
+                if raw_context is not None
+                else 0
+            ),
+            "quality_gate": (
+                None
+                if quality_report is None
+                else {
+                    "pass_count": quality_report.pass_count,
+                    "caution_count": quality_report.caution_count,
+                    "exclude_candidate_count": quality_report.exclude_candidate_count,
+                    "excluded": [
+                        {
+                            "memory_record_id": item.memory_record_id,
+                            "reason_codes": item.reason_codes,
+                        }
+                        for item in quality_report.items
+                        if item.recommendation == "exclude_candidate"
+                    ],
+                }
+            ),
             "context_artifact_path": (artifact_paths or {}).get("context_path"),
+            "raw_context_artifact_path": (artifact_paths or {}).get(
+                "raw_context_path"
+            ),
+            "quality_gate_artifact_path": (artifact_paths or {}).get(
+                "quality_gate_path"
+            ),
             "items": items,
         },
     )
@@ -1677,7 +2158,18 @@ def _emit_executor_event(
     result: ExecutorResult,
     next_stage: str,
     next_node: str | None,
+    source_decision_id: str | None = None,
 ) -> None:
+    payload: dict[str, Any] = {
+        "state": _state_runtime_payload(model),
+        "status": result.status,
+        "artifact_names": [artifact.name for artifact in result.artifacts],
+        "artifact_types": [artifact.artifact_type for artifact in result.artifacts],
+        "errors": [error.model_dump(mode="json") for error in result.errors],
+        "state_updates": result.state_updates,
+    }
+    if source_decision_id is not None:
+        payload["source_decision_id"] = source_decision_id
     _emit_runtime_event(
         runtime_recorder,
         kind="executor_result",
@@ -1686,16 +2178,10 @@ def _emit_executor_event(
         summary=result.message,
         stage=result.stage,
         node=result.executor_name,
+        decision_id=source_decision_id,
         next_stage="failed" if result.status != "success" else next_stage,
         next_node=None if result.status != "success" else next_node,
-        payload={
-            "state": _state_runtime_payload(model),
-            "status": result.status,
-            "artifact_names": [artifact.name for artifact in result.artifacts],
-            "artifact_types": [artifact.artifact_type for artifact in result.artifacts],
-            "errors": [error.model_dump(mode="json") for error in result.errors],
-            "state_updates": result.state_updates,
-        },
+        payload=payload,
     )
 
 
@@ -1749,6 +2235,7 @@ def _apply_result(
     next_node: str | None,
     extra_updates: dict[str, Any] | None = None,
     runtime_recorder: AgentRuntimeRecorder | None = None,
+    source_decision_id: str | None = None,
 ) -> TFMState:
     _emit_executor_event(
         runtime_recorder,
@@ -1756,6 +2243,7 @@ def _apply_result(
         result=result,
         next_stage=next_stage,
         next_node=next_node,
+        source_decision_id=source_decision_id,
     )
     state = model.to_langgraph_state()
     state["artifacts"] = [
@@ -1796,6 +2284,8 @@ def _missing_input_state(
     node: str,
     field_name: str,
     runtime_recorder: AgentRuntimeRecorder | None = None,
+    *,
+    source_decision_id: str | None = None,
 ) -> TFMState:
     error = PipelineError(
         stage=stage,
@@ -1816,6 +2306,7 @@ def _missing_input_state(
         next_stage="failed",
         next_node=None,
         runtime_recorder=runtime_recorder,
+        source_decision_id=source_decision_id,
     )
 
 
@@ -1887,7 +2378,28 @@ def _metrics_from_path(path: str | None) -> MetricsReport | None:
                 else metric_families
             ),
             "degradation_available": degradation.get("available"),
+            "degradation_interpretation_mode": degradation.get(
+                "interpretation_mode"
+            ),
+            "degradation_acceptance_scope": degradation.get(
+                "acceptance_scope"
+            ),
+            "degradation_binary_ground_truth_available": degradation.get(
+                "binary_ground_truth_available"
+            ),
+            "degradation_physical_onset_ground_truth_available": degradation.get(
+                "physical_onset_ground_truth_available"
+            ),
             "degradation_n_runs": degradation.get("n_runs"),
+            "degradation_persistent_alert_run_rate": degradation.get(
+                "persistent_alert_run_rate"
+            ),
+            "degradation_mean_first_persistent_alert_time_to_trajectory_end": degradation.get(
+                "mean_first_persistent_alert_time_to_trajectory_end"
+            ),
+            "degradation_mean_pre_monitoring_alert_rate": degradation.get(
+                "mean_pre_monitoring_alert_rate"
+            ),
             "degradation_missed_runs": degradation.get("missed_runs"),
             "degradation_missed_confirmed_degradation_runs": degradation.get(
                 "missed_confirmed_degradation_runs"

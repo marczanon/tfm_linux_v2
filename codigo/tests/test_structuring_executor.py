@@ -78,6 +78,7 @@ class StructuringExecutorTests(unittest.TestCase):
 
         self.assertEqual(summary["n_windows"], 6)
         self.assertEqual(tensors["windows"].shape, (6, 4))
+        self.assertEqual(tensors["temporal_partitions"].tolist(), [""] * 6)
         self.assertEqual(rows[0]["split"], "train")
         self.assertEqual(rows[0]["target"], "0")
         self.assertIn("rms", rows[0])
@@ -101,6 +102,7 @@ class StructuringExecutorTests(unittest.TestCase):
                     "failure_mode": "bearing_1_outer_race",
                     "label_source": "temporal_proxy",
                     "label_granularity": "proxy_temporal",
+                    "temporal_partition": "baseline_train",
                     "split_hint": "train",
                 },
             }
@@ -118,7 +120,7 @@ class StructuringExecutorTests(unittest.TestCase):
                 clean_dir / "r1.npz",
                 list(range(8, 16)),
                 file_id="r1",
-                label="degradation",
+                label="unknown",
                 source_path="r1.txt",
                 timestamp_start="2004-02-12T10:00:04",
                 timestamp_end="2004-02-12T10:00:06",
@@ -126,9 +128,18 @@ class StructuringExecutorTests(unittest.TestCase):
                     **common,
                     "metadata_json": {
                         **common["metadata_json"],
+                        "temporal_partition": "monitoring",
                         "split_hint": "test",
                     },
                 },
+            )
+
+            online_summary = build_structuring_decision_summary(
+                clean_dir,
+                dataset="nasa_ims_bearing",
+                target_sample_rate_hz=4,
+                main_channel="channel_1",
+                allowed_split_hints={"train"},
             )
 
             summary = build_temporal_dataset(
@@ -143,8 +154,21 @@ class StructuringExecutorTests(unittest.TestCase):
             )
             with Path(summary["features_path"]).open(encoding="utf-8") as file:
                 rows = list(csv.DictReader(file))
+            tensors = np.load(summary["tensors_path"])
+            splits = json.loads(
+                Path(summary["splits_path"]).read_text(encoding="utf-8")
+            )
 
         self.assertEqual(rows[0]["run_id"], "set_2")
+        self.assertEqual(online_summary["summary"]["n_clean_files"], 1)
+        self.assertEqual(online_summary["summary"]["split_hint_counts"], {"train": 1})
+        self.assertNotIn(
+            "run_to_failure_temporal_split",
+            {
+                item["capability"]
+                for item in online_summary["unsupported_capabilities"]
+            },
+        )
         self.assertEqual(rows[0]["asset_id"], "bearing_test_rig")
         self.assertEqual(rows[0]["condition_id"], "test_to_failure")
         self.assertEqual(rows[0]["source_path"], "r0.txt")
@@ -157,6 +181,17 @@ class StructuringExecutorTests(unittest.TestCase):
         self.assertEqual(float(rows[-1]["time_since_start_seconds"]), 5.0)
         self.assertEqual(float(rows[-1]["time_to_failure_seconds"]), 5.0)
         self.assertEqual(float(rows[-1]["relative_life"]), 0.5)
+        self.assertEqual(rows[0]["temporal_partition"], "baseline_train")
+        self.assertEqual(rows[-1]["temporal_partition"], "monitoring")
+        self.assertEqual(rows[-1]["target"], "")
+        self.assertEqual(
+            tensors["temporal_partitions"].tolist(),
+            ["baseline_train"] * 3 + ["monitoring"] * 3,
+        )
+        self.assertEqual(
+            splits["temporal_partition_counts"],
+            {"baseline_train": 3, "monitoring": 3},
+        )
 
     def test_generate_temporal_structure_returns_structured_result(self):
         with tempfile.TemporaryDirectory() as tmp:

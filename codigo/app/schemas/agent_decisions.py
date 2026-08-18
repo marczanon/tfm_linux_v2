@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from codigo.app.schemas.common import StrictBaseModel
+from codigo.app.schemas.reasoning import AgentHypothesis, AgentHypothesisKind
 from codigo.app.schemas.state import (
     CleaningConfig,
     EvaluationResult,
@@ -27,21 +28,172 @@ AgentName = Literal[
     "report_verifier",
 ]
 
+AgentDecisionKind = Literal[
+    "routing",
+    "cleaning",
+    "structuring",
+    "modeling",
+    "modeling_retry",
+    "evaluation",
+    "report_draft",
+    "report_revision",
+    "report_verification",
+]
+
+DecisionGenerationOrigin = Literal[
+    "llm",
+    "deterministic",
+    "guardrail_fallback",
+    "protocol_restricted",
+    "unknown",
+]
+DecisionValidationStatus = Literal[
+    "validated",
+    "repaired",
+    "fallback_applied",
+    "unknown",
+]
+
+
+class DecisionGenerationTrace(StrictBaseModel):
+    """Procedencia verificable del intento que produjo la decision efectiva."""
+
+    origin: DecisionGenerationOrigin
+    attempt_id: str = Field(min_length=1)
+    attempt_index: int = Field(ge=1)
+    validation_status: DecisionValidationStatus
+    fallback_cause: str | None = Field(default=None, min_length=1)
+    fallback_from_attempt_id: str | None = Field(default=None, min_length=1)
+
+    @classmethod
+    def for_decision(
+        cls,
+        decision_id: str,
+        *,
+        origin: DecisionGenerationOrigin,
+        attempt_index: int = 1,
+        validation_status: DecisionValidationStatus = "validated",
+        fallback_cause: str | None = None,
+        fallback_from_attempt_index: int | None = None,
+    ) -> "DecisionGenerationTrace":
+        """Crea identificadores estables sin depender del reloj o del backend."""
+
+        return cls(
+            origin=origin,
+            attempt_id=cls.attempt_id_for(decision_id, attempt_index),
+            attempt_index=attempt_index,
+            validation_status=validation_status,
+            fallback_cause=fallback_cause,
+            fallback_from_attempt_id=(
+                None
+                if fallback_from_attempt_index is None
+                else cls.attempt_id_for(decision_id, fallback_from_attempt_index)
+            ),
+        )
+
+    @staticmethod
+    def attempt_id_for(decision_id: str, attempt_index: int) -> str:
+        if not decision_id:
+            raise ValueError("decision_id cannot be empty")
+        if attempt_index < 1:
+            raise ValueError("attempt_index must be positive")
+        return f"{decision_id}:attempt:{attempt_index:03d}"
+
+    @model_validator(mode="after")
+    def validate_origin_semantics(self) -> "DecisionGenerationTrace":
+        is_fallback = self.origin == "guardrail_fallback"
+        if is_fallback:
+            if self.validation_status != "fallback_applied":
+                raise ValueError(
+                    "guardrail_fallback requires validation_status=fallback_applied"
+                )
+            if not self.fallback_cause or not self.fallback_from_attempt_id:
+                raise ValueError(
+                    "guardrail_fallback requires cause and source attempt"
+                )
+        elif self.fallback_cause is not None or self.fallback_from_attempt_id is not None:
+            raise ValueError("fallback fields require origin=guardrail_fallback")
+        elif self.validation_status == "fallback_applied":
+            raise ValueError(
+                "validation_status=fallback_applied requires guardrail_fallback"
+            )
+
+        if self.origin == "llm" and self.validation_status not in {
+            "validated",
+            "repaired",
+        }:
+            raise ValueError("llm origin requires validated or repaired status")
+        if self.origin in {"deterministic", "protocol_restricted"} and (
+            self.validation_status != "validated"
+        ):
+            raise ValueError(
+                "deterministic and protocol decisions require validated status"
+            )
+        if self.origin == "unknown" and self.validation_status != "unknown":
+            raise ValueError("unknown origin requires unknown validation status")
+        return self
+
 
 class AgentDecisionBase(StrictBaseModel):
     """Campos comunes de una decision estructurada."""
 
     agent_name: AgentName
+    decision_kind: AgentDecisionKind | None = None
     decision_id: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
+    # Optional only to keep historical snapshots loadable. Every newly emitted
+    # agent decision is required to populate it by the live agent validators.
+    hypothesis: AgentHypothesis | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    generation_trace: DecisionGenerationTrace | None = None
+
+    @model_validator(mode="after")
+    def validate_generation_trace_link(self) -> "AgentDecisionBase":
+        trace = self.generation_trace
+        if trace is None:
+            return self
+        expected_attempt_id = DecisionGenerationTrace.attempt_id_for(
+            self.decision_id,
+            trace.attempt_index,
+        )
+        if trace.attempt_id != expected_attempt_id:
+            raise ValueError("generation attempt_id must be derived from decision_id")
+        if trace.fallback_from_attempt_id is not None:
+            valid_sources = {
+                DecisionGenerationTrace.attempt_id_for(self.decision_id, index)
+                for index in range(1, trace.attempt_index)
+            }
+            if trace.fallback_from_attempt_id not in valid_sources:
+                raise ValueError(
+                    "fallback source must be an earlier attempt of the same decision"
+                )
+        return self
+
+
+def require_agent_hypothesis(
+    decision: AgentDecisionBase,
+    *,
+    allowed_kinds: set[AgentHypothesisKind],
+) -> AgentHypothesis:
+    """Exige el contrato nuevo sin impedir la lectura de decisiones legacy."""
+
+    hypothesis = decision.hypothesis
+    if hypothesis is None:
+        raise ValueError("new agent decisions require an auditable hypothesis")
+    if hypothesis.kind not in allowed_kinds:
+        expected = ", ".join(sorted(allowed_kinds))
+        raise ValueError(
+            f"hypothesis kind for {decision.agent_name} must be one of {expected}"
+        )
+    return hypothesis
 
 
 class SupervisorDecision(AgentDecisionBase):
     """Decision del supervisor sobre el siguiente nodo."""
 
     agent_name: Literal["supervisor"] = "supervisor"
+    decision_kind: Literal["routing"] = "routing"
     current_stage: PipelineStage
     next_stage: PipelineStage
     next_node: NodeName | None
@@ -62,6 +214,7 @@ class CleaningDecision(AgentDecisionBase):
     """Decision del agente limpiador."""
 
     agent_name: Literal["cleaner"] = "cleaner"
+    decision_kind: Literal["cleaning"] = "cleaning"
     cleaning_config: CleaningConfig
     expected_artifact_path: str = Field(min_length=1)
     warnings: list[str] = Field(default_factory=list)
@@ -93,10 +246,11 @@ class MemoryRecordUse(StrictBaseModel):
     risk_mitigation: str | None = Field(default=None, min_length=1)
 
 
-class StructuringDecision(AgentDecisionBase):
-    """Decision del agente estructurador."""
+class StructuringDecisionProposal(AgentDecisionBase):
+    """Propuesta completa emitida por un agente estructurador."""
 
     agent_name: Literal["structurer"] = "structurer"
+    decision_kind: Literal["structuring"] = "structuring"
     structuring_config: StructuringConfig
     expected_features_path: str = Field(min_length=1)
     expected_tensors_path: str | None
@@ -109,7 +263,7 @@ class StructuringDecision(AgentDecisionBase):
     memory_record_uses: list[MemoryRecordUse] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_memory_declaration(self) -> "StructuringDecision":
+    def validate_memory_declaration(self) -> "StructuringDecisionProposal":
         _validate_memory_usage_declaration(
             used_memory_context=self.used_memory_context,
             memory_context_id=self.memory_context_id,
@@ -117,6 +271,69 @@ class StructuringDecision(AgentDecisionBase):
             memory_usage_summary=self.memory_usage_summary,
             memory_record_uses=self.memory_record_uses,
         )
+        return self
+
+
+StructuringOverriddenField = Literal[
+    "decision_id",
+    "rationale",
+    "confidence",
+    "hypothesis",
+    "structuring_config",
+    "expected_features_path",
+    "expected_tensors_path",
+    "expected_splits_path",
+    "comparison_candidates",
+    "memory_context_id",
+    "used_memory_context",
+    "memory_record_ids",
+    "memory_usage_summary",
+    "memory_record_uses",
+    "generation_trace",
+]
+
+
+class StructuringProtocolTrace(StrictBaseModel):
+    """Traza de una propuesta sometida a una restriccion experimental."""
+
+    constraint_kind: Literal["fixed_experiment_protocol"] = (
+        "fixed_experiment_protocol"
+    )
+    agent_proposal: StructuringDecisionProposal
+    overridden_fields: list[StructuringOverriddenField] = Field(min_length=1)
+    restriction_reason: str = Field(min_length=1)
+    proposal_influenced_by_memory: bool = False
+    execution_influenced_by_memory: bool = False
+
+    @model_validator(mode="after")
+    def validate_proposal_memory_influence(self) -> "StructuringProtocolTrace":
+        if (
+            self.proposal_influenced_by_memory
+            != self.agent_proposal.used_memory_context
+        ):
+            raise ValueError(
+                "proposal_influenced_by_memory must match the agent proposal"
+            )
+        if len(set(self.overridden_fields)) != len(self.overridden_fields):
+            raise ValueError("overridden_fields cannot contain duplicates")
+        return self
+
+
+class StructuringDecision(StructuringDecisionProposal):
+    """Decision ejecutable del estructurador, opcionalmente restringida."""
+
+    protocol_trace: StructuringProtocolTrace | None = None
+
+    @model_validator(mode="after")
+    def validate_protocol_trace(self) -> "StructuringDecision":
+        if (
+            self.protocol_trace is not None
+            and self.protocol_trace.execution_influenced_by_memory
+            != self.used_memory_context
+        ):
+            raise ValueError(
+                "execution_influenced_by_memory must match the executed decision"
+            )
         return self
 
 
@@ -148,10 +365,11 @@ class ModelingDecisionStrategy(StrictBaseModel):
     alert_policy: str | None = Field(default=None, min_length=1)
 
 
-class ModelingDecision(AgentDecisionBase):
-    """Decision del agente modelador."""
+class ModelingDecisionProposal(AgentDecisionBase):
+    """Propuesta completa emitida por un agente modelador."""
 
     agent_name: Literal["modeler"] = "modeler"
+    decision_kind: Literal["modeling"] = "modeling"
     decision_strategy: ModelingDecisionStrategy = Field(
         default_factory=ModelingDecisionStrategy
     )
@@ -167,7 +385,7 @@ class ModelingDecision(AgentDecisionBase):
     memory_record_uses: list[MemoryRecordUse] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_strategy_guardrails(self) -> "ModelingDecision":
+    def validate_strategy_guardrails(self) -> "ModelingDecisionProposal":
         _validate_memory_usage_declaration(
             used_memory_context=self.used_memory_context,
             memory_context_id=self.memory_context_id,
@@ -189,6 +407,70 @@ class ModelingDecision(AgentDecisionBase):
         return self
 
 
+ModelingOverriddenField = Literal[
+    "decision_id",
+    "rationale",
+    "confidence",
+    "hypothesis",
+    "decision_strategy",
+    "modeling_config",
+    "train_split",
+    "validation_split",
+    "expected_model_path",
+    "comparison_candidates",
+    "memory_context_id",
+    "used_memory_context",
+    "memory_record_ids",
+    "memory_usage_summary",
+    "memory_record_uses",
+    "generation_trace",
+]
+
+
+class ModelingProtocolTrace(StrictBaseModel):
+    """Traza de una propuesta sometida a una restriccion experimental."""
+
+    constraint_kind: Literal["fixed_experiment_protocol"] = (
+        "fixed_experiment_protocol"
+    )
+    agent_proposal: ModelingDecisionProposal
+    overridden_fields: list[ModelingOverriddenField] = Field(min_length=1)
+    restriction_reason: str = Field(min_length=1)
+    proposal_influenced_by_memory: bool = False
+    execution_influenced_by_memory: bool = False
+
+    @model_validator(mode="after")
+    def validate_proposal_memory_influence(self) -> "ModelingProtocolTrace":
+        if (
+            self.proposal_influenced_by_memory
+            != self.agent_proposal.used_memory_context
+        ):
+            raise ValueError(
+                "proposal_influenced_by_memory must match the agent proposal"
+            )
+        if len(set(self.overridden_fields)) != len(self.overridden_fields):
+            raise ValueError("overridden_fields cannot contain duplicates")
+        return self
+
+
+class ModelingDecision(ModelingDecisionProposal):
+    """Decision ejecutable del modelador, opcionalmente restringida."""
+
+    protocol_trace: ModelingProtocolTrace | None = None
+
+    @model_validator(mode="after")
+    def validate_protocol_trace(self) -> "ModelingDecision":
+        if (
+            self.protocol_trace is not None
+            and self.protocol_trace.execution_influenced_by_memory
+            != self.used_memory_context
+        ):
+            raise ValueError(
+                "execution_influenced_by_memory must match the executed decision"
+            )
+        return self
+
+
 class ModelingAlternative(StrictBaseModel):
     """Alternativa comparable propuesta por el agente modelador."""
 
@@ -202,6 +484,7 @@ class ModelingRetryDecision(AgentDecisionBase):
     """Decision del modelador tras analizar una ejecucion fallida."""
 
     agent_name: Literal["modeler"] = "modeler"
+    decision_kind: Literal["modeling_retry"] = "modeling_retry"
     decision_strategy: ModelingDecisionStrategy = Field(
         default_factory=ModelingDecisionStrategy
     )
@@ -262,6 +545,7 @@ class EvaluationDecision(AgentDecisionBase):
     """Decision estructurada del evaluador."""
 
     agent_name: Literal["evaluator"] = "evaluator"
+    decision_kind: Literal["evaluation"] = "evaluation"
     evaluation: EvaluationResult
     min_recall_required: float | None = Field(default=None, ge=0.0, le=1.0)
     max_false_positive_rate: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -327,6 +611,7 @@ class ReportDecision(AgentDecisionBase):
     """Decision del agente redactor sobre el informe tecnico."""
 
     agent_name: Literal["report_writer"] = "report_writer"
+    decision_kind: Literal["report_draft"] = "report_draft"
     output_path: str = Field(min_length=1)
     output_format: Literal["markdown", "pdf", "latex"] = "markdown"
     sections: list[ReportSection] = Field(min_length=1)
@@ -336,6 +621,7 @@ class ReportRevisionDecision(AgentDecisionBase):
     """Revision estructurada del informe tras una verificacion."""
 
     agent_name: Literal["report_writer"] = "report_writer"
+    decision_kind: Literal["report_revision"] = "report_revision"
     revision_round: int = Field(ge=1)
     revision_of_decision_id: str = Field(min_length=1)
     verifier_decision_id: str = Field(min_length=1)
@@ -369,6 +655,7 @@ class ReportVerificationDecision(AgentDecisionBase):
     """Decision del agente verificador sobre el informe final."""
 
     agent_name: Literal["report_verifier"] = "report_verifier"
+    decision_kind: Literal["report_verification"] = "report_verification"
     report_path: str = Field(min_length=1)
     verification_status: ReportVerificationStatus
     summary: str = Field(min_length=1)
@@ -378,9 +665,22 @@ class ReportVerificationDecision(AgentDecisionBase):
     required_corrections: list[str] = Field(default_factory=list)
     acceptable_style_notes: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    # Campos propiedad del servidor: indican que la decision efectiva incorpora
+    # comprobaciones deterministas que el verificador LLM no produjo o no
+    # clasifico con severidad suficiente.
+    policy_overlay_applied: bool = False
+    policy_overlay_issue_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_status_consistency(self) -> "ReportVerificationDecision":
+        if not self.policy_overlay_applied and self.policy_overlay_issue_ids:
+            raise ValueError(
+                "policy_overlay_issue_ids require policy_overlay_applied=true"
+            )
+        if len(set(self.policy_overlay_issue_ids)) != len(
+            self.policy_overlay_issue_ids
+        ):
+            raise ValueError("policy_overlay_issue_ids cannot contain duplicates")
         issues = [
             *self.unsupported_claims,
             *self.misleading_claims,
@@ -411,8 +711,13 @@ def _validate_memory_usage_declaration(
         if not memory_record_ids:
             raise ValueError("decisions using memory require memory_record_ids")
     if not used_memory_context:
-        if memory_context_id is not None or memory_record_ids:
-            raise ValueError("memory context declarations require used_memory_context=true")
+        # ``memory_context_id`` identifies the context observed by the agent,
+        # not necessarily a context that influenced the decision.  Keeping the
+        # identifier when ``used_memory_context`` is false lets the audit
+        # distinguish retrieval disabled from an empty or deliberately ignored
+        # context.  Individual record citations remain forbidden below.
+        if memory_record_ids:
+            raise ValueError("memory record citations require used_memory_context=true")
         if memory_usage_summary is not None or memory_record_uses:
             raise ValueError("memory usage details require used_memory_context=true")
     if len(set(memory_record_ids)) != len(memory_record_ids):

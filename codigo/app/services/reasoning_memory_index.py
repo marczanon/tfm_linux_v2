@@ -6,18 +6,25 @@ import hashlib
 import json
 from pathlib import Path
 
+from codigo.app.schemas.api_memory import MemoryGovernanceApplication
 from codigo.app.schemas.common import StrictBaseModel
 from codigo.app.schemas.reasoning import (
     AgentMemoryTarget,
     AgentReasoningPostmortem,
     HumanReasoningReview,
-    MemoryCandidate,
     MemoryUsageAudit,
     ReasoningMemoryRecord,
+)
+from codigo.app.services.memory_registry import (
+    apply_memory_governance_override,
+    load_memory_candidate_artifacts,
+    load_memory_governance_ledger,
+    memory_governance_ledger_path,
 )
 from codigo.app.services.vector_memory import (
     EmbeddingProvider,
     LocalJsonVectorMemoryStore,
+    VectorMemoryStore,
     get_default_embedding_provider,
     memory_record_from_candidate,
     memory_record_from_memory_usage_audit,
@@ -25,12 +32,15 @@ from codigo.app.services.vector_memory import (
 )
 
 DEFAULT_MEMORY_DIR = Path("codigo/reports/reasoning_memory")
+DEFAULT_REPORTS_ROOT = Path("codigo/reports")
 
 
 class ReasoningMemoryIndexResult(StrictBaseModel):
     """Resultado trazable de una indexacion de memoria agentica."""
 
     memory_dir: str
+    memory_backend: str | None = None
+    destructive_rebuild: bool = False
     indexed_records: list[ReasoningMemoryRecord]
     skipped_postmortems: list[str]
     missing_reviews: list[str]
@@ -38,6 +48,11 @@ class ReasoningMemoryIndexResult(StrictBaseModel):
     skipped_memory_usage_audits: list[str] = []
     indexed_memory_candidates: list[str] = []
     skipped_memory_candidates: list[str] = []
+    quarantined_memory_candidates: list[str] = []
+    governance_ledger_path: str
+    governance_overrides_loaded: int = 0
+    applied_governance_actions: list[MemoryGovernanceApplication] = []
+    active_tombstones: list[str] = []
     index_report_path: str | None = None
 
 
@@ -50,14 +65,19 @@ def index_reasoning_memory(
     include_memory_usage_audits: bool = False,
     dataset: str | None = None,
     embedding_provider: EmbeddingProvider | None = None,
+    memory_store: VectorMemoryStore | None = None,
     clear_existing: bool = False,
     write_report: bool = True,
 ) -> ReasoningMemoryIndexResult:
-    """Indexa razonamientos revisados en el store vectorial local."""
+    """Indexa razonamientos revisados en el backend vectorial seleccionado.
+
+    ``memory_store`` permite reutilizar el backend ya configurado por la API o
+    el runner. Si se omite, se conserva la compatibilidad historica con el
+    indice JSON local y ``embedding_provider`` configura sus embeddings.
+    """
 
     root = Path(reports_root)
     output_dir = Path(memory_dir)
-    provider = embedding_provider or get_default_embedding_provider()
     records: list[ReasoningMemoryRecord] = []
     skipped: list[str] = []
     missing_reviews: list[str] = []
@@ -65,6 +85,14 @@ def index_reasoning_memory(
     skipped_audits: list[str] = []
     indexed_candidates: list[str] = []
     skipped_candidates: list[str] = []
+    quarantined_candidates: list[str] = []
+    governance_ledger = load_memory_governance_ledger(output_dir)
+    applied_governance_actions: list[MemoryGovernanceApplication] = []
+    active_tombstones = sorted(
+        override.memory_record_id
+        for override in governance_ledger.overrides
+        if override.current_action == "delete"
+    )
 
     for postmortem_path in sorted(root.rglob("reasoning_postmortem.json")):
         postmortem = _load_postmortem(postmortem_path)
@@ -80,7 +108,22 @@ def index_reasoning_memory(
             source_path=postmortem_path.as_posix(),
             source_hash=_sha256_file(postmortem_path),
         )
+        record, governance_application = apply_memory_governance_override(
+            record,
+            governance_ledger,
+        )
+        if governance_application is not None:
+            applied_governance_actions.append(governance_application)
+        if record is None:
+            skipped.append(postmortem_path.as_posix())
+            continue
         if record.exclude_from_context:
+            if (
+                governance_application is not None
+                and governance_application.effect == "excluded"
+            ):
+                records.append(record)
+                continue
             skipped.append(postmortem_path.as_posix())
             continue
         records.append(record)
@@ -95,31 +138,102 @@ def index_reasoning_memory(
                 source_path=audit_path.as_posix(),
                 source_hash=_sha256_file(audit_path),
             )
-            if record.exclude_from_context:
+            record, governance_application = apply_memory_governance_override(
+                record,
+                governance_ledger,
+            )
+            if governance_application is not None:
+                applied_governance_actions.append(governance_application)
+            if record is None:
                 skipped_audits.append(audit_path.as_posix())
+                continue
+            if record.exclude_from_context:
+                if (
+                    governance_application is not None
+                    and governance_application.effect == "excluded"
+                ):
+                    indexed_audits.append(audit_path.as_posix())
+                    records.append(record)
+                    continue
+                skipped_audits.append(audit_path.as_posix())
+                continue
+            if not record.reusable_as_context:
+                # Se persiste para trazabilidad y para sobrescribir indices
+                # historicos, pero el filtro de retrieval nunca la inyecta.
+                indexed_audits.append(audit_path.as_posix())
+                records.append(record)
                 continue
             indexed_audits.append(audit_path.as_posix())
             records.append(record)
 
     if include_memory_candidates:
-        for candidate_path in sorted(root.rglob("memory_candidate.json")):
-            candidate = _load_memory_candidate(candidate_path)
+        for artifact in load_memory_candidate_artifacts(root):
+            candidate_path = artifact.path
+            candidate = artifact.candidate
             record = memory_record_from_candidate(
                 candidate,
                 source_path=candidate_path.as_posix(),
-                source_hash=_sha256_file(candidate_path),
+                source_hash=artifact.source_hash,
             )
+            record, governance_application = apply_memory_governance_override(
+                record,
+                governance_ledger,
+            )
+            if governance_application is not None:
+                applied_governance_actions.append(governance_application)
+            if record is None:
+                skipped_candidates.append(candidate_path.as_posix())
+                continue
+            if governance_application is None:
+                # Compatibilidad segura con artefactos historicos: el campo
+                # reusable_as_context del candidato nunca equivale por si solo
+                # a una promocion humana ligada al contenido revisado.
+                record = record.model_copy(
+                    update={
+                        "reusable_as_context": False,
+                        "exclude_from_context": record.exclude_from_context,
+                        "tags": sorted(
+                            dict.fromkeys(
+                                [*record.tags, "pending_manual_promotion"]
+                            )
+                        ),
+                    }
+                )
+                quarantined_candidates.append(candidate_path.as_posix())
+                indexed_candidates.append(candidate_path.as_posix())
+                records.append(record)
+                continue
             if record.exclude_from_context or not record.reusable_as_context:
+                if (
+                    governance_application is not None
+                    and governance_application.effect
+                    in {"excluded", "source_hash_mismatch"}
+                ):
+                    indexed_candidates.append(candidate_path.as_posix())
+                    records.append(record)
+                    continue
                 skipped_candidates.append(candidate_path.as_posix())
                 continue
             indexed_candidates.append(candidate_path.as_posix())
             records.append(record)
 
-    store = LocalJsonVectorMemoryStore(output_dir, embedding_model=provider)
-    indexed = store.rebuild(records, clear_existing=clear_existing)
+    store = memory_store
+    if store is None:
+        store = LocalJsonVectorMemoryStore(
+            output_dir,
+            embedding_model=embedding_provider or get_default_embedding_provider(),
+        )
+    indexed = _index_records(
+        store,
+        records,
+        clear_existing=clear_existing,
+        tombstoned_record_ids=active_tombstones,
+    )
     report_path = None
     result = ReasoningMemoryIndexResult(
         memory_dir=output_dir.as_posix(),
+        memory_backend=_memory_backend_name(store),
+        destructive_rebuild=clear_existing,
         indexed_records=indexed,
         skipped_postmortems=skipped,
         missing_reviews=missing_reviews,
@@ -127,6 +241,11 @@ def index_reasoning_memory(
         skipped_memory_usage_audits=skipped_audits,
         indexed_memory_candidates=indexed_candidates,
         skipped_memory_candidates=skipped_candidates,
+        quarantined_memory_candidates=quarantined_candidates,
+        governance_ledger_path=memory_governance_ledger_path(output_dir).as_posix(),
+        governance_overrides_loaded=len(governance_ledger.overrides),
+        applied_governance_actions=applied_governance_actions,
+        active_tombstones=active_tombstones,
         index_report_path=None,
     )
     if write_report:
@@ -143,6 +262,32 @@ def index_reasoning_memory(
     return result.model_copy(update={"index_report_path": report_path})
 
 
+def _index_records(
+    store: VectorMemoryStore,
+    records: list[ReasoningMemoryRecord],
+    *,
+    clear_existing: bool,
+    tombstoned_record_ids: list[str],
+) -> list[ReasoningMemoryRecord]:
+    """Actualiza por ID salvo que se solicite borrar y reconstruir el indice."""
+
+    if clear_existing:
+        return store.rebuild(records, clear_existing=True)
+    for memory_record_id in tombstoned_record_ids:
+        try:
+            store.delete(memory_record_id)
+        except FileNotFoundError:
+            pass
+    return [store.upsert(record) for record in records]
+
+
+def _memory_backend_name(store: VectorMemoryStore) -> str:
+    backend_name = getattr(store, "backend_name", None)
+    if isinstance(backend_name, str) and backend_name:
+        return backend_name
+    return type(store).__name__
+
+
 def _load_postmortem(path: Path) -> AgentReasoningPostmortem:
     return AgentReasoningPostmortem.model_validate_json(path.read_text(encoding="utf-8"))
 
@@ -153,10 +298,6 @@ def _load_review(path: Path) -> HumanReasoningReview:
 
 def _load_memory_usage_audit(path: Path) -> MemoryUsageAudit:
     return MemoryUsageAudit.model_validate_json(path.read_text(encoding="utf-8"))
-
-
-def _load_memory_candidate(path: Path) -> MemoryCandidate:
-    return MemoryCandidate.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def _sha256_file(path: Path) -> str:

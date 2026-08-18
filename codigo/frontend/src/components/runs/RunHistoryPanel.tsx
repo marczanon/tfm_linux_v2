@@ -279,8 +279,10 @@ function ComparisonView({
                 <strong>Degradacion run-to-failure</strong>
               </div>
               <small>
-                Prioriza primera alerta, lead time, falsas alarmas nominales y
-                tendencia del score. Las metricas binarias quedan como apoyo.
+                Prioriza alerta persistente, intervalo hasta el final
+                registrado, tasa premonitorizacion y tendencia del score. Las
+                metricas binarias solo aparecen cuando existen etiquetas
+                compatibles.
               </small>
             </div>
           ) : null}

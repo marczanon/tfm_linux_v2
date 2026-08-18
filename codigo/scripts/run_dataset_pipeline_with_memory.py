@@ -71,7 +71,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embedding-provider",
         choices=["ollama", "local_hash"],
-        default="local_hash",
+        default="ollama",
     )
     parser.add_argument("--embedding-model", default=DEFAULT_OLLAMA_EMBEDDING_MODEL)
     parser.add_argument("--ollama-host", default="http://127.0.0.1:11434")

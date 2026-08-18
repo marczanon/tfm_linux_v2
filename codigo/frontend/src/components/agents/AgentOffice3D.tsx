@@ -32,6 +32,11 @@ export function AgentOffice3D({
   const shouldFocusSelectionRef = useRef(false);
   const [hoveredAgentId, setHoveredAgentId] = useState<string | null>(null);
   const [webGlAvailable, setWebGlAvailable] = useState<boolean | null>(null);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(() =>
+    typeof window !== "undefined"
+      ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false,
+  );
   const model = useMemo(
     () => buildAgentOfficeModel(events, selectedAgentId),
     [events, selectedAgentId],
@@ -43,16 +48,6 @@ export function AgentOffice3D({
   const sceneStyle = {
     "--agent-office-state-color": activeNode.cssColor,
   } as CSSProperties;
-  const focusableNodes = useMemo(() => {
-    if (!model.hasRuntimeEvents) {
-      return model.nodes;
-    }
-    const activeNodes = model.nodes.filter(
-      (node) => node.eventCount > 0 || node.selected,
-    );
-    return activeNodes.length > 0 ? activeNodes : model.nodes;
-  }, [model.hasRuntimeEvents, model.nodes]);
-
   const resetCamera = useCallback(() => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
@@ -106,6 +101,16 @@ export function AgentOffice3D({
   }, []);
 
   useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = (event: MediaQueryListEvent) => {
+      setPrefersReducedMotion(event.matches);
+    };
+    setPrefersReducedMotion(mediaQuery.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container || webGlAvailable !== true) {
       return undefined;
@@ -126,7 +131,7 @@ export function AgentOffice3D({
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
+    controls.enableDamping = !prefersReducedMotion;
     controls.enablePan = false;
     controls.maxDistance = 7.6;
     controls.maxPolarAngle = Math.PI * 0.5;
@@ -160,6 +165,7 @@ export function AgentOffice3D({
       scene.add(group);
     }
 
+    let renderStaticScene: (() => void) | null = null;
     const resize = () => {
       const { height, width } = container.getBoundingClientRect();
       const safeWidth = Math.max(1, width);
@@ -167,6 +173,9 @@ export function AgentOffice3D({
       renderer.setSize(safeWidth, safeHeight, false);
       camera.aspect = safeWidth / safeHeight;
       camera.updateProjectionMatrix();
+      if (prefersReducedMotion) {
+        renderStaticScene?.();
+      }
     };
 
     const resizeObserver = new ResizeObserver(resize);
@@ -194,6 +203,9 @@ export function AgentOffice3D({
         hoverId = nextId;
         hoveredAgentIdRef.current = node?.id ?? null;
         setHoveredAgentId(node?.id ?? null);
+        if (prefersReducedMotion) {
+          renderStaticScene?.();
+        }
       }
       renderer.domElement.style.cursor = node ? "pointer" : "grab";
     };
@@ -203,6 +215,9 @@ export function AgentOffice3D({
       hoveredAgentIdRef.current = null;
       setHoveredAgentId(null);
       renderer.domElement.style.cursor = "";
+      if (prefersReducedMotion) {
+        renderStaticScene?.();
+      }
     };
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -232,10 +247,7 @@ export function AgentOffice3D({
     renderer.domElement.addEventListener("pointerdown", handlePointerDown);
     renderer.domElement.addEventListener("pointerup", handlePointerUp);
 
-    let animationFrame = 0;
-    const clock = new THREE.Clock();
-    const animate = () => {
-      const elapsed = clock.getElapsedTime();
+    const updateNodeVisuals = (elapsed: number, animateMotion: boolean) => {
       for (const node of model.nodes) {
         const desk = scene.getObjectByName(`agent-office-node-${node.id}`);
         const avatar = scene.getObjectByName(`agent-office-avatar-${node.id}`);
@@ -245,30 +257,59 @@ export function AgentOffice3D({
         if (beacon) {
           const selectedPulse = isSelected ? 0.18 : 0;
           const hoverPulse = isHovered ? 0.12 : 0;
-          const activePulse = node.state === "active" ? Math.sin(elapsed * 3.2) * 0.08 : 0;
+          const activePulse = animateMotion && node.state === "active"
+            ? Math.sin(elapsed * 3.2) * 0.08
+            : 0;
           beacon.scale.setScalar(1 + selectedPulse + hoverPulse + activePulse);
         }
         if (desk) {
           desk.scale.setScalar(isHovered ? 1.06 : isSelected ? 1.03 : 1);
-          if (node.state === "active") {
+          if (animateMotion && node.state === "active") {
             desk.rotation.y = Math.sin(elapsed * 0.7) * 0.035;
-          } else {
+          } else if (animateMotion) {
             desk.rotation.y = isHovered ? Math.sin(elapsed * 1.2) * 0.02 : 0;
+          } else {
+            desk.rotation.y = 0;
           }
         }
         if (avatar) {
-          const bob = node.state === "active" || isSelected ? Math.sin(elapsed * 2.2) * 0.018 : 0;
+          const bob = animateMotion && (node.state === "active" || isSelected)
+            ? Math.sin(elapsed * 2.2) * 0.018
+            : 0;
           avatar.position.y = bob;
         }
       }
-      controls.update();
-      renderer.render(scene, camera);
-      animationFrame = window.requestAnimationFrame(animate);
     };
-    animate();
+
+    renderStaticScene = () => {
+      updateNodeVisuals(0, false);
+      renderer.render(scene, camera);
+    };
+
+    let animationFrame = 0;
+    let handleControlsChange: (() => void) | null = null;
+    if (prefersReducedMotion) {
+      handleControlsChange = () => renderStaticScene?.();
+      controls.addEventListener("change", handleControlsChange);
+      renderStaticScene?.();
+    } else {
+      const clock = new THREE.Clock();
+      const animate = () => {
+        updateNodeVisuals(clock.getElapsedTime(), true);
+        controls.update();
+        renderer.render(scene, camera);
+        animationFrame = window.requestAnimationFrame(animate);
+      };
+      animate();
+    }
 
     return () => {
-      window.cancelAnimationFrame(animationFrame);
+      if (animationFrame !== 0) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+      if (handleControlsChange) {
+        controls.removeEventListener("change", handleControlsChange);
+      }
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener("pointermove", handlePointerMove);
       renderer.domElement.removeEventListener("pointerleave", handlePointerLeave);
@@ -282,7 +323,7 @@ export function AgentOffice3D({
       cameraRef.current = null;
       controlsRef.current = null;
     };
-  }, [focusCameraOnNode, model, onSelectAgent, webGlAvailable]);
+  }, [focusCameraOnNode, model, onSelectAgent, prefersReducedMotion, webGlAvailable]);
 
   useEffect(() => {
     if (webGlAvailable !== true || !shouldFocusSelectionRef.current) {
@@ -302,7 +343,11 @@ export function AgentOffice3D({
   }
 
   return (
-    <div className="agent-office-3d-shell" style={sceneStyle}>
+    <div
+      className="agent-office-3d-shell"
+      data-motion={prefersReducedMotion ? "reduced" : "full"}
+      style={sceneStyle}
+    >
       <div
         aria-label="Oficina 3D de agentes"
         className="agent-office-3d-canvas"
@@ -312,7 +357,7 @@ export function AgentOffice3D({
       <div className="agent-office-3d-overlay">
         <AgentOfficeFocusActions
           activeNodeId={activeNode.id}
-          nodes={focusableNodes}
+          nodes={model.nodes}
           onFocusAgent={focusAgent}
         />
         <button
@@ -324,6 +369,12 @@ export function AgentOffice3D({
         >
           <RotateCcw size={16} />
         </button>
+        <div className="agent-office-3d-legend" aria-label="Significado de las conexiones">
+          <span>
+            <i className="route" aria-hidden="true" />
+            Lineas: rutas explicitas del supervisor hacia agentes; se omiten ejecutores y no representan causalidad
+          </span>
+        </div>
         <AgentOfficeMiniTag node={activeNode} />
       </div>
     </div>
@@ -340,7 +391,11 @@ function AgentOfficeFocusActions({
   onFocusAgent: (node: AgentOfficeNode) => void;
 }) {
   return (
-    <div aria-label="Foco de agente 3D" className="agent-office-3d-focus-actions">
+    <div
+      aria-label="Foco de agente 3D"
+      className="agent-office-3d-focus-actions"
+      role="group"
+    >
       {nodes.map((node) => {
         const isActive = activeNodeId === node.id;
         const buttonStyle = {
@@ -348,6 +403,8 @@ function AgentOfficeFocusActions({
         } as CSSProperties;
         return (
           <button
+            aria-label={`Enfocar ${node.label}, ${countLabel(node.eventCount, "evento", "eventos")}`}
+            aria-pressed={node.selected}
             className={`agent-office-3d-focus-action ${node.selected ? "selected" : ""} ${
               isActive ? "active" : ""
             }`}
@@ -369,10 +426,27 @@ function AgentOfficeFocusActions({
 
 function AgentOfficeMiniTag({ node }: { node: AgentOfficeNode }) {
   const signalText = [
-    `${node.eventCount} ev`,
-    node.decisionCount > 0 ? `${node.decisionCount} dec` : null,
-    node.memoryCount > 0 ? `${node.memoryCount} mem` : null,
-    node.errorCount > 0 ? `${node.errorCount} err` : null,
+    node.decisionCount > 0
+      ? countLabel(node.decisionCount, "decision", "decisiones")
+      : null,
+    node.hypothesisCount > 0
+      ? countLabel(
+          node.hypothesisCount,
+          "hipotesis efectiva completa",
+          "hipotesis efectivas completas",
+        )
+      : null,
+    node.proposalHypothesisCount > 0
+      ? countLabel(
+          node.proposalHypothesisCount,
+          "propuesta adicional",
+          "propuestas adicionales",
+        )
+      : null,
+    node.memoryCount > 0
+      ? countLabel(node.memoryCount, "evento RAG", "eventos RAG")
+      : null,
+    node.errorCount > 0 ? countLabel(node.errorCount, "error", "errores") : null,
   ].filter((item): item is string => item !== null);
 
   return (
@@ -380,8 +454,57 @@ function AgentOfficeMiniTag({ node }: { node: AgentOfficeNode }) {
       <span>{node.selected ? "seleccionado" : "inspeccion"}</span>
       <strong>{node.label}</strong>
       <small>{node.role} · {node.stateLabel} · {signalText.join(" · ")}</small>
+      {node.primaryHypothesis ? (
+        <div className="agent-office-3d-hypothesis">
+          <em>
+            {node.primaryHypothesis.source === "legacy_modeler"
+              ? "Hipotesis legacy"
+              : node.primaryHypothesis.label}
+            {" · "}{officeHypothesisStatus(node.primaryHypothesis.assessmentStatus)}
+          </em>
+          <p>{node.primaryHypothesis.statement}</p>
+          {node.primaryHypothesis.expectedObservation ? (
+            <span>Esperado · {node.primaryHypothesis.expectedObservation}</span>
+          ) : null}
+          {node.primaryHypothesis.falsificationCriterion ? (
+            <span>Refutaria · {node.primaryHypothesis.falsificationCriterion}</span>
+          ) : null}
+          {node.primaryHypothesis.kind ? (
+            <small>Tipo · {node.primaryHypothesis.kind.replace(/_/g, " ")}</small>
+          ) : null}
+          {node.primaryHypothesis.scope ? (
+            <small>Alcance · {node.primaryHypothesis.scope}</small>
+          ) : null}
+          {node.primaryHypothesis.evidenceCutoff ? (
+            <small>Corte de evidencia · {node.primaryHypothesis.evidenceCutoff}</small>
+          ) : null}
+          {node.primaryHypothesis.evidenceRefs.length > 0 ? (
+            <small>
+              Evidencia declarada · {node.primaryHypothesis.evidenceRefs.join(" · ")}
+            </small>
+          ) : null}
+          {node.primaryHypothesis.riskNotes.length > 0 ? (
+            <small>Riesgos · {node.primaryHypothesis.riskNotes.join(" · ")}</small>
+          ) : null}
+          {node.primaryHypothesis.assumptions.length > 0 ? (
+            <small>Supuestos · {node.primaryHypothesis.assumptions.join(" · ")}</small>
+          ) : null}
+          {node.proposalHypothesisCount > 0 ? (
+            <small>La comparacion completa entre propuesta y decision efectiva permanece en el inspector 2D.</small>
+          ) : null}
+          {!node.primaryHypothesis.contractComplete ? (
+            <small>Contrato incompleto o legacy; no cuenta como cobertura auditable.</small>
+          ) : null}
+        </div>
+      ) : (
+        <em className="agent-office-3d-no-hypothesis">Hipotesis no registrada</em>
+      )}
     </div>
   );
+}
+
+function countLabel(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function agentFocusLabel(agentId: string): string {
@@ -395,6 +518,18 @@ function agentFocusLabel(agentId: string): string {
     report_verifier: "VER",
   };
   return labels[agentId] ?? agentId.slice(0, 3).toUpperCase();
+}
+
+function officeHypothesisStatus(status: string): string {
+  const labels: Record<string, string> = {
+    pending: "pendiente de contraste",
+    supported_in_run: "apoyada en esta run",
+    partially_supported: "apoyo parcial",
+    contradicted_in_run: "refutada en esta run",
+    inconclusive: "inconclusa",
+    not_evaluable: "no evaluable",
+  };
+  return labels[status] ?? "estado no registrado";
 }
 
 function createOfficeRoom(): THREE.Group {
@@ -919,10 +1054,11 @@ function agentShirtColor(agentId: string): number {
 
 function addAgentSignalMarkers(group: THREE.Group, node: AgentOfficeNode): void {
   const signals = [
-    { color: 0x2563eb, count: node.memoryCount, x: -0.27, z: 0.13 },
-    { color: 0x475569, count: node.toolCount, x: -0.09, z: 0.17 },
-    { color: 0xd97706, count: node.debateCount, x: 0.09, z: 0.17 },
-    { color: 0xdc2626, count: node.errorCount, x: 0.27, z: 0.13 },
+    { color: 0x7c3aed, count: node.hypothesisCount, x: -0.3, z: 0.12 },
+    { color: 0x2563eb, count: node.memoryCount, x: -0.15, z: 0.17 },
+    { color: 0x475569, count: node.toolCount, x: 0, z: 0.18 },
+    { color: 0xd97706, count: node.debateCount, x: 0.15, z: 0.17 },
+    { color: 0xdc2626, count: node.errorCount, x: 0.3, z: 0.12 },
   ].filter((signal) => signal.count > 0);
 
   for (const signal of signals) {

@@ -8,6 +8,7 @@ from pathlib import Path
 from codigo.app.schemas.agent_decisions import ReportDecision, ReportSection
 from codigo.app.schemas.executor_results import ReportExecutorResult
 from codigo.app.schemas.state import ArtifactRef, PipelineError, TFMStateModel
+from codigo.app.services.online_blind import uses_online_blind_view
 
 
 def generate_technical_report(
@@ -32,6 +33,16 @@ def generate_technical_report(
             metadata={
                 "output_format": decision.output_format,
                 "n_sections": len(decision.sections),
+                "data_provenance": state.project_context.data_provenance,
+                "provenance_detection_method": (
+                    state.project_context.provenance_detection_method
+                ),
+                "provenance_evidence_path": (
+                    state.project_context.provenance_evidence_path
+                ),
+                "provenance_evidence_sha256": (
+                    state.project_context.provenance_evidence_sha256
+                ),
             },
         )
         return ReportExecutorResult(
@@ -72,6 +83,13 @@ def _render_report(state: TFMStateModel, decision: ReportDecision) -> str:
         f"- Run ID: `{state.run_id}`",
         f"- Thread ID: `{state.thread_id}`",
         f"- Dataset: `{state.project_context.dataset}`",
+        f"- Procedencia de datos: `{state.project_context.data_provenance}`",
+        (
+            "- Metodo de deteccion de procedencia: "
+            f"`{state.project_context.provenance_detection_method}`"
+        ),
+        *_provenance_evidence_lines(state),
+        _provenance_scope_line(state),
         f"- Objetivo: `{state.project_context.objective}`",
         f"- Decision del redactor: `{decision.decision_id}`",
         "",
@@ -136,6 +154,10 @@ def _paragraph_lines(body: str) -> list[str]:
 def _summary_lines(state: TFMStateModel) -> list[str]:
     if state.evaluation is None:
         status = "pendiente de evaluacion"
+    elif uses_online_blind_view(state) and state.evaluation.approved:
+        status = "aceptada por controles operativos internos"
+    elif uses_online_blind_view(state):
+        status = "completada sin superar los controles operativos internos"
     elif state.evaluation.approved:
         status = "aprobada"
     else:
@@ -152,9 +174,41 @@ def _context_lines(state: TFMStateModel) -> list[str]:
         f"- Dominio: `{state.project_context.domain}`",
         f"- Maquina: `{state.project_context.machine_type}`",
         f"- Tipo de senal: `{state.project_context.signal_type}`",
+        f"- Procedencia de datos: `{state.project_context.data_provenance}`",
+        _provenance_scope_line(state),
         f"- Canal principal: `{state.project_context.main_channel}`",
         f"- Ficheros perfilados: `{None if profile is None else profile.n_files}`",
     ]
+
+
+def _provenance_evidence_lines(state: TFMStateModel) -> list[str]:
+    lines: list[str] = []
+    if state.project_context.provenance_evidence_path:
+        lines.append(
+            "- Evidencia de procedencia: "
+            f"`{state.project_context.provenance_evidence_path}`"
+        )
+    if state.project_context.provenance_evidence_sha256:
+        lines.append(
+            "- SHA-256 de evidencia de procedencia: "
+            f"`{state.project_context.provenance_evidence_sha256}`"
+        )
+    return lines
+
+
+def _provenance_scope_line(state: TFMStateModel) -> str:
+    provenance = state.project_context.data_provenance
+    if provenance == "synthetic":
+        return (
+            "- Alcance de procedencia: datos sinteticos tipo NASA IMS; no son "
+            "senales oficiales del NASA IMS Bearing Dataset."
+        )
+    if provenance == "unknown":
+        return (
+            "- Alcance de procedencia: origen no verificado; no debe presentarse "
+            "como datos oficiales del dataset de referencia."
+        )
+    return "- Alcance de procedencia: origen oficial declarado."
 
 
 def _configuration_lines(state: TFMStateModel) -> list[str]:
@@ -169,6 +223,35 @@ def _metrics_lines(state: TFMStateModel) -> list[str]:
     metrics = state.metrics
     if metrics is None:
         return ["No hay metricas en el estado."]
+    if uses_online_blind_view(state):
+        status = (
+            "aceptados"
+            if state.evaluation is not None and state.evaluation.approved
+            else "no superados"
+        )
+        return [
+            f"- Controles operativos internos: `{status}`",
+            (
+                "- Trayectorias con alerta algoritmica persistente: "
+                f"`{_format_metric(_metric_extra_float_any(metrics, 'degradation_confirmed_degradation_before_failure_rate', 'degradation_detected_before_failure_rate'))}`"
+            ),
+            (
+                "- Tiempo retrospectivo medio hasta el final registrado: "
+                f"`{_format_metric(_metric_extra_float_any(metrics, 'degradation_mean_persistent_lead_time_to_failure', 'degradation_mean_lead_time_to_failure'))}`"
+            ),
+            (
+                "- Tasa media de alertas pre-monitorizacion: "
+                f"`{_format_metric(_metric_extra_float(metrics, 'degradation_mean_false_alarm_rate_nominal'))}`"
+            ),
+            (
+                "- Tendencia Spearman media del score: "
+                f"`{_format_metric(_metric_extra_float(metrics, 'degradation_mean_score_trend_spearman'))}`"
+            ),
+            (
+                "- Alcance: no hay ground truth fisico por snapshot; el resultado "
+                "no valida deteccion, diagnostico, inicio fisico ni RUL."
+            ),
+        ]
     lines = [
         f"- Precision: `{_format_metric(metrics.precision)}`",
         f"- Recall: `{_format_metric(metrics.recall)}`",
@@ -199,6 +282,24 @@ def _limitation_lines(state: TFMStateModel) -> list[str]:
 
 def _format_metric(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
+
+
+def _metric_extra_float(metrics: object, key: str) -> float | None:
+    extra = getattr(metrics, "extra", {})
+    value = extra.get(key) if isinstance(extra, dict) else None
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _metric_extra_float_any(metrics: object, *keys: str) -> float | None:
+    for key in keys:
+        value = _metric_extra_float(metrics, key)
+        if value is not None:
+            return value
+    return None
 
 
 def _config_summary(value: object) -> str:

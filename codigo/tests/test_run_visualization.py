@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import httpx
+import pandas as pd
 
 from codigo.app.api import create_app
 from codigo.app.graph.state import create_initial_cwru_state, validate_state
@@ -155,6 +156,9 @@ class RunVisualizationTests(unittest.TestCase):
         self.assertEqual(recommendation["source_agent"], "evaluator")
         self.assertEqual(recommendation["status"], "caution")
         self.assertEqual(recommendation["confidence"], 0.78)
+        self.assertEqual(recommendation["decision_origin"], "llm")
+        self.assertIn("generation_trace", recommendation["origin_evidence"])
+        self.assertIn("intento=2", recommendation["origin_evidence"])
         self.assertIn("temporal:current_health", recommendation["evidence_refs"])
         self.assertIn("temporal_health_lookup", recommendation["tool_names"])
         self.assertIn(
@@ -163,6 +167,65 @@ class RunVisualizationTests(unittest.TestCase):
         )
         self.assertTrue(recommendation["guardrail_checks"])
         self.assertIn("pca_reconstruction_error", recommendation["modeler_summary"])
+
+    def test_visualization_prefers_snapshot_trajectory_and_respects_gaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            state = _state_with_temporal_artifacts(base, "run-snapshot-viz")
+            trajectory_path = base / "snapshot_trajectory.csv"
+            _write_snapshot_trajectory(trajectory_path)
+            state.artifacts.append(
+                ArtifactRef(
+                    name="evaluation_snapshot_trajectory",
+                    artifact_type="metrics",
+                    path=str(trajectory_path),
+                    producer="evaluator",
+                )
+            )
+            save_run_snapshot(state, runs_dir)
+
+            payload = build_run_visualization("run-snapshot-viz", runs_dir)
+
+        self.assertEqual(
+            payload.source_paths["snapshot_trajectory"],
+            str(trajectory_path),
+        )
+        self.assertTrue(payload.temporal_series.available)
+        self.assertEqual(payload.temporal_series.n_points_total, 4)
+        run = payload.temporal_series.runs[0]
+        self.assertEqual(run.n_points_total, 4)
+        self.assertEqual(run.longest_alert_streak, 2)
+        self.assertFalse(run.onset_confirmed)
+        self.assertTrue(
+            all(point.window_id.startswith("snapshot:") for point in run.points)
+        )
+
+    def test_visualization_hides_binary_metrics_when_ground_truth_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs_dir = base / "runs"
+            state = _state_with_temporal_artifacts(base, "run-unlabeled-viz")
+            metrics_path = base / "temporal_metrics.json"
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            metrics["metric_families"] = ["run_to_failure_degradation"]
+            metrics["binary_metric_context"] = {
+                "available": False,
+                "reason": "No window-level ground truth.",
+                "target_interpretation": "not_ground_truth",
+            }
+            metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+            save_run_snapshot(state, runs_dir)
+
+            payload = build_run_visualization("run-unlabeled-viz", runs_dir)
+
+        self.assertEqual(payload.metrics, [])
+        self.assertEqual(payload.auxiliary_metrics, [])
+        self.assertTrue(payload.primary_metrics)
+        self.assertNotIn(
+            "binary_classification",
+            payload.metric_families,
+        )
 
     def test_visualization_service_degrades_when_projection_artifacts_are_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -281,6 +344,14 @@ def _state_with_temporal_agent_decisions(base: Path, run_id: str):
         "decision_id": f"{run_id}:evaluator:001",
         "rationale": "La deteccion llega antes del fallo historico.",
         "confidence": 0.78,
+        "generation_trace": {
+            "origin": "llm",
+            "attempt_id": f"{run_id}:evaluator:001:attempt:002",
+            "attempt_index": 2,
+            "validation_status": "repaired",
+            "fallback_cause": None,
+            "fallback_from_attempt_id": None,
+        },
         "tool_names": [
             "temporal_health_lookup",
             "degradation_metrics_lookup",
@@ -488,6 +559,41 @@ def _write_temporal_metrics(metrics_path: Path) -> None:
 """.strip(),
         encoding="utf-8",
     )
+
+
+def _write_snapshot_trajectory(path: Path) -> None:
+    pd_rows = [
+        {
+            "window_id": f"snapshot:bearing_1_test_1:s{index}",
+            "file_id": f"s{index}",
+            "run_id": "bearing_1_test_1",
+            "window_index": index,
+            "timestamp_start": timestamp,
+            "timestamp_end": timestamp,
+            "time_since_start_seconds": elapsed,
+            "time_to_failure_seconds": 3000.0 - elapsed,
+            "relative_life": index / 3,
+            "split": "test",
+            "label": "degradation",
+            "anomaly_score": score,
+            "anomaly_score_median": score,
+            "anomaly_score_p90": score,
+            "window_alert_fraction": 1.0,
+            "threshold": 0.5,
+            "predicted_anomaly": 1,
+            "gap_detected": index == 2,
+            "temporal_segment_id": int(index >= 2),
+        }
+        for index, (timestamp, elapsed, score) in enumerate(
+            [
+                ("2004-02-12T10:00:00", 0.0, 0.9),
+                ("2004-02-12T10:10:00", 600.0, 0.8),
+                ("2004-02-12T10:40:00", 2400.0, 0.1),
+                ("2004-02-12T10:50:00", 3000.0, 0.2),
+            ]
+        )
+    ]
+    pd.DataFrame(pd_rows).to_csv(path, index=False)
 
 
 def _get(app, path: str, **kwargs) -> httpx.Response:

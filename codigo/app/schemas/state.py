@@ -5,10 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import Field, NonNegativeInt, PositiveInt
+from pydantic import Field, NonNegativeInt, PositiveInt, model_validator
 
 from codigo.app.schemas.common import JsonScalar, StrictBaseModel
-from codigo.app.schemas.dataset import LabelGranularity, LabelSource, SupervisionProfile
+from codigo.app.schemas.dataset import (
+    DataProvenance,
+    LabelGranularity,
+    LabelSource,
+    ProvenanceDetectionMethod,
+    SupervisionProfile,
+)
+from codigo.app.schemas.reasoning import MemoryApplicability, MemoryTransferScope
 
 PipelineStage = Literal[
     "initialized",
@@ -65,7 +72,52 @@ class ProjectContext(StrictBaseModel):
     supervision_profile: SupervisionProfile = "binary_fault_classification"
     label_granularity: LabelGranularity = "file"
     label_source: LabelSource = "official"
+    trajectory_group_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=160,
+    )
+    evaluation_group_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=160,
+    )
+    transfer_scope: MemoryTransferScope = "same_dataset"
+    data_provenance: DataProvenance = "unknown"
+    provenance_detection_method: ProvenanceDetectionMethod = "unverified"
+    provenance_evidence_path: str | None = Field(default=None, min_length=1)
+    provenance_evidence_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     notes: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_provenance_by_dataset(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "data_provenance" in value:
+            return value
+        updated = dict(value)
+        if updated.get("dataset", "cwru_bearing") == "cwru_bearing":
+            updated["data_provenance"] = "official"
+            updated.setdefault("provenance_detection_method", "trusted_adapter")
+        else:
+            updated["data_provenance"] = "unknown"
+            updated.setdefault("provenance_detection_method", "unverified")
+        return updated
+
+    def to_memory_applicability(self) -> MemoryApplicability:
+        """Proyecta solo el contexto necesario para gobernar transferencia RAG."""
+
+        return MemoryApplicability(
+            supervision_profile=self.supervision_profile,
+            label_source=self.label_source,
+            label_granularity=self.label_granularity,
+            target_sample_rate_hz=self.target_sample_rate_hz,
+            trajectory_group_id=self.trajectory_group_id,
+            evaluation_group_id=self.evaluation_group_id,
+            transfer_scope=self.transfer_scope,
+        )
 
 
 class StateMessage(StrictBaseModel):
@@ -108,7 +160,9 @@ class StructuringConfig(StrictBaseModel):
     overlap: float = Field(default=0.5, ge=0.0, lt=1.0)
     main_channel: str = Field(default="DE_time", min_length=1)
     target_sample_rate_hz: PositiveInt = 12000
-    label_mode: Literal["binary_anomaly", "fault_type"] = "binary_anomaly"
+    label_mode: Literal["binary_anomaly", "fault_type", "degradation"] = (
+        "binary_anomaly"
+    )
     features: list[str] = Field(
         default_factory=lambda: [
             "mean",

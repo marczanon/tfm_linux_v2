@@ -28,6 +28,7 @@ from codigo.app.graph.state import TFMState
 from codigo.app.schemas.state import CleaningConfig, ProjectContext, TFMStateModel
 from codigo.app.services.llm import OllamaJSONClient
 from codigo.app.services.run_persistence import DEFAULT_RUNS_DIR, extract_decisions
+from codigo.app.services.dataset_adapters import describe_dataset
 from codigo.app.services.synthetic_nasa_ims import (
     generate_synthetic_nasa_ims_binary_manifest,
     prepare_synthetic_nasa_ims_binary_dataset,
@@ -96,6 +97,7 @@ def _run_paths(run_id: str) -> dict[str, Path]:
 
 
 def _initial_state(run_id: str, raw_dir: Path) -> TFMState:
+    descriptor = describe_dataset(raw_dir, adapter_id="nasa_ims_bearing")
     state = TFMStateModel(
         thread_id=f"{run_id}-thread",
         run_id=run_id,
@@ -109,6 +111,13 @@ def _initial_state(run_id: str, raw_dir: Path) -> TFMState:
             target_sample_rate_hz=20000,
             main_channel="channel_1",
             label_mode="binary_anomaly",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="file",
+            label_source="synthetic",
+            data_provenance=descriptor.data_provenance,
+            provenance_detection_method=descriptor.provenance_detection_method,
+            provenance_evidence_path=descriptor.provenance_evidence_path,
+            provenance_evidence_sha256=descriptor.provenance_evidence_sha256,
             notes=(
                 "Synthetic NASA IMS-like binary benchmark. Labels are generated "
                 "by construction and are not official NASA IMS annotations."

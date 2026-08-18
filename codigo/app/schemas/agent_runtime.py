@@ -15,6 +15,7 @@ AgentRuntimeEventKind = Literal[
     "agent_decision",
     "memory_retrieval",
     "executor_result",
+    "policy_proposal",
     "error",
 ]
 
@@ -24,6 +25,7 @@ AgentRuntimeEventSource = Literal[
     "agent",
     "memory",
     "executor",
+    "system",
 ]
 
 

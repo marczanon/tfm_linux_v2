@@ -69,6 +69,7 @@ class RunPersistenceTests(unittest.TestCase):
         )
         self.assertIn("# Evidence pack run-persist-001", evidence_markdown)
         self.assertIn("# Auditoria de ejecucion run-persist-001", audit_report)
+        self.assertIn("## Estado operativo y estado agentico", audit_report)
         self.assertIn("## Cronologia de agentes", audit_report)
         self.assertIn("## Verificacion del informe", audit_report)
         self.assertIn("## Debate del informe", audit_report)
@@ -111,6 +112,148 @@ class RunPersistenceTests(unittest.TestCase):
 
         self.assertEqual(len(decisions), 2)
         self.assertEqual([item["role"] for item in decisions], ["supervisor", "agent"])
+
+    def test_evidence_pack_preserves_generation_hypothesis_and_protocol_trace(self):
+        state = _completed_state("run-persist-agent-audit")
+        state_dict = state.to_langgraph_state()
+        decision_id = "run-persist-agent-audit:modeler:001"
+        state_dict["messages"].append(
+            StateMessage(
+                role="agent",
+                name="modeler",
+                content=json.dumps(
+                    {
+                        "agent_name": "modeler",
+                        "decision_id": decision_id,
+                        "rationale": "El protocolo conserva una propuesta auditable.",
+                        "confidence": 1.0,
+                        "hypothesis": {
+                            "kind": "model_performance",
+                            "statement": "PCA puede estabilizar la tendencia temporal.",
+                            "scope": "Comparacion temporal controlada.",
+                            "evidence_cutoff": "Train y validation antes de monitoring.",
+                            "expected_observation": "Tendencia mas estable que el baseline.",
+                            "falsification_criterion": "La tendencia empeora bajo el mismo protocolo.",
+                            "evidence_refs": ["metric:trend_spearman"],
+                            "risk_notes": ["Un caso no demuestra generalizacion."],
+                            "assumptions": [],
+                        },
+                        "generation_trace": {
+                            "origin": "protocol_restricted",
+                            "attempt_id": f"{decision_id}:attempt:003",
+                            "attempt_index": 3,
+                            "validation_status": "validated",
+                            "fallback_cause": None,
+                            "fallback_from_attempt_id": None,
+                        },
+                        "decision_strategy": {
+                            "hypothesis": "PCA puede estabilizar la tendencia temporal.",
+                            "evidence_refs": ["metric:trend_spearman"],
+                        },
+                        "comparison_candidates": [
+                            {"alternative_id": "isolation_forest_candidate"}
+                        ],
+                        "protocol_trace": {
+                            "constraint_kind": "fixed_experiment_protocol",
+                            "restriction_reason": "Comparacion controlada.",
+                            "agent_proposal": {
+                                "decision_strategy": {
+                                    "hypothesis": "Comparar dos familias sin mirar monitoring.",
+                                    "evidence_refs": ["policy:online_blind"],
+                                },
+                                "comparison_candidates": [
+                                    {"alternative_id": "one_class_svm_candidate"}
+                                ],
+                                "generation_trace": {
+                                    "origin": "guardrail_fallback",
+                                    "attempt_id": f"{decision_id}:attempt:002",
+                                    "attempt_index": 2,
+                                    "validation_status": "fallback_applied",
+                                    "fallback_cause": "ValueError: retrospective evidence",
+                                    "fallback_from_attempt_id": f"{decision_id}:attempt:001",
+                                },
+                            },
+                        },
+                    }
+                ),
+            ).model_dump(mode="json")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            save_run_snapshot(validate_state(state_dict), runs_dir)
+            run_dir = runs_dir / "run-persist-agent-audit"
+            evidence_pack = _read_json(run_dir / "evidence_pack.json")
+            audit_report = (run_dir / "execution_audit.md").read_text(
+                encoding="utf-8"
+            )
+
+        modeler = evidence_pack["decisions"][-1]
+        self.assertEqual(modeler["generation_origin"], "protocol_restricted")
+        self.assertEqual(modeler["generation_attempt_index"], 3)
+        self.assertEqual(modeler["proposal_generation_origin"], "guardrail_fallback")
+        self.assertIn("PCA puede estabilizar", modeler["hypothesis"])
+        self.assertEqual(modeler["hypothesis_kind"], "model_performance")
+        self.assertIn("tendencia empeora", modeler["hypothesis_falsification_criterion"])
+        self.assertEqual(
+            modeler["hypothesis_evidence_refs"],
+            ["metric:trend_spearman"],
+        )
+        self.assertEqual(
+            modeler["alternatives"],
+            ["isolation_forest_candidate", "one_class_svm_candidate"],
+        )
+        self.assertEqual(
+            modeler["evidence_refs"],
+            ["metric:trend_spearman", "policy:online_blind"],
+        )
+        self.assertIn("protocolo fijo=`1`", audit_report)
+        self.assertIn("Causa del fallback: ValueError", audit_report)
+
+    def test_evidence_pack_normalizes_report_section_sources_and_refs(self):
+        state = _completed_state("run-persist-report-evidence")
+        state_dict = state.to_langgraph_state()
+        state_dict["messages"].append(
+            StateMessage(
+                role="agent",
+                name="report_writer",
+                content=json.dumps(
+                    {
+                        "agent_name": "report_writer",
+                        "decision_id": "run-persist-report-evidence:report_writer:001",
+                        "rationale": "Redactar cada afirmacion desde evidencia trazable.",
+                        "confidence": 0.9,
+                        "output_path": "reports/final_report.md",
+                        "sections": [
+                            {
+                                "title": "Resultados",
+                                "source_paths": ["reports/metrics.json"],
+                                "evidence_refs": [
+                                    "artifact:metrics",
+                                    "metric:f1_score",
+                                ],
+                            }
+                        ],
+                    }
+                ),
+            ).model_dump(mode="json")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            save_run_snapshot(validate_state(state_dict), runs_dir)
+            evidence_pack = _read_json(
+                runs_dir
+                / "run-persist-report-evidence"
+                / "evidence_pack.json"
+            )
+
+        report_decision = evidence_pack["decisions"][-1]
+        self.assertIn("reports/metrics.json", report_decision["source_paths"])
+        self.assertEqual(
+            report_decision["evidence_refs"],
+            ["artifact:metrics", "metric:f1_score"],
+        )
 
 
 def _completed_state(run_id: str):

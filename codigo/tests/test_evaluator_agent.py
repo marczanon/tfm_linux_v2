@@ -10,6 +10,7 @@ from codigo.app.schemas.reasoning import (
     RetrievedMemoryItem,
 )
 from codigo.app.schemas.state import MetricsReport, ProjectContext
+from codigo.tests.agent_hypothesis_fixtures import with_test_agent_hypothesis
 
 
 class FakeLLMClient:
@@ -23,8 +24,8 @@ class FakeLLMClient:
         self.json_schema = json_schema
         if isinstance(self.payload, list):
             index = min(self.calls - 1, len(self.payload) - 1)
-            return self.payload[index]
-        return self.payload
+            return with_test_agent_hypothesis(self.payload[index])
+        return with_test_agent_hypothesis(self.payload)
 
 
 class EvaluatorAgentTests(unittest.TestCase):
@@ -47,6 +48,10 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertEqual(decision.evaluation.next_action, "continue")
         self.assertEqual(decision.min_recall_required, 0.9)
         self.assertEqual(decision.max_false_positive_rate, 0.1)
+        self.assertIsNotNone(decision.generation_trace)
+        self.assertEqual(decision.generation_trace.origin, "deterministic")
+        self.assertEqual(decision.hypothesis.kind, "operational_acceptance")
+        self.assertTrue(decision.hypothesis.risk_notes)
 
     def test_deterministic_evaluator_rejects_low_recall(self):
         state_dict = create_initial_cwru_state(
@@ -117,6 +122,56 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertIn("F1", " ".join(decision.temporal_debate_points))
         self.assertIn("run-to-failure", decision.evaluation.summary)
         self.assertIn("no son oficiales", " ".join(decision.evaluation.limitations))
+
+    def test_official_v2_evaluator_uses_operational_not_physical_semantics(self):
+        state = _official_v2_temporal_state("run-evaluator-nasa-official-v2-001")
+
+        decision = decide_evaluation_action(state)
+
+        narrative = " ".join(
+            [
+                decision.rationale,
+                decision.evaluation.summary,
+                *decision.evaluation.limitations,
+                decision.operational_assessment or "",
+                *decision.temporal_debate_points,
+            ]
+        ).lower()
+        self.assertTrue(decision.evaluation.approved)
+        self.assertIn("aceptada por controles operativos internos", narrative)
+        self.assertIn("alerta algoritmica persistente", narrative)
+        self.assertIn("final registrado", narrative)
+        self.assertIn("pre-monitorizacion", narrative)
+        self.assertIn("ground truth", narrative)
+        self.assertNotIn("onset confirmado", narrative)
+        self.assertNotIn("lead time persistente hasta fallo", narrative)
+        self.assertNotIn("ejecucion run-to-failure aprobada", narrative)
+        self.assertIn(
+            "physical_ground_truth_not_available",
+            decision.temporal_guardrail_checks,
+        )
+
+    def test_official_v2_evaluator_rejects_llm_physical_claims(self):
+        state = _official_v2_temporal_state(
+            "run-evaluator-nasa-official-v2-claims-001"
+        )
+        payload = decide_evaluation_action(state).model_dump(mode="json")
+        payload["rationale"] = "Onset confirmado antes del fallo."
+        payload["evaluation"]["summary"] = (
+            "Ejecucion run-to-failure aprobada; fallo detectado."
+        )
+        client = FakeLLMClient(payload)
+
+        decision = decide_evaluation_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 2)
+        self.assertIn("Guardrail correction", decision.rationale)
+        self.assertIn(
+            "aceptada por controles operativos internos",
+            decision.evaluation.summary,
+        )
+        self.assertNotIn("onset confirmado", decision.evaluation.summary.lower())
+        self.assertIn("final registrado", client.messages[-1].content)
 
     def test_llm_temporal_evaluator_accepts_operational_audit(self):
         state = _temporal_state("run-evaluator-nasa-temporal-llm-001")
@@ -294,6 +349,9 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.86)
         self.assertNotIn("Fallback after LLM failure", decision.rationale)
         self.assertIn("guardarrails del evaluador", client.messages[-1].content)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 2)
+        self.assertEqual(decision.generation_trace.validation_status, "repaired")
 
     def test_llm_temporal_evaluator_receives_tool_catalog_in_prompt(self):
         state = _temporal_state("run-evaluator-nasa-temporal-prompt-001")
@@ -408,6 +466,53 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertTrue(decision.evaluation.approved)
         self.assertEqual(decision.confidence, 0.91)
         self.assertIn("EvaluationDecision", str(client.json_schema))
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 1)
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+
+    def test_llm_evaluator_uses_server_owned_envelope_without_repair(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="cwru-evaluator-envelope-test",
+            run_id="run-evaluator-envelope-001",
+        )
+        state_dict["metrics"] = MetricsReport(
+            recall=0.95,
+            f1_score=0.92,
+            false_positive_rate=0.08,
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        payload = decide_evaluation_action(state).model_dump(mode="json")
+        payload.update(
+            {
+                "agent_name": "cleaner",
+                "decision_id": "foreign-run:evaluator:999",
+                "created_at": "not-a-server-timestamp",
+                "min_recall_required": 0.0,
+                "max_false_positive_rate": 1.0,
+                "rationale": "Current metrics satisfy the fixed protocol.",
+            }
+        )
+        payload["generation_trace"] = {"forged": True}
+        client = FakeLLMClient(payload)
+
+        decision = decide_evaluation_action(
+            state,
+            llm_client=client,
+            use_llm=True,
+        )
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(decision.agent_name, "evaluator")
+        self.assertEqual(
+            decision.decision_id,
+            "run-evaluator-envelope-001:evaluator:001",
+        )
+        self.assertEqual(decision.min_recall_required, 0.9)
+        self.assertEqual(decision.max_false_positive_rate, 0.1)
+        self.assertTrue(decision.evaluation.approved)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+        self.assertIn("server-owned", client.messages[1].content)
 
     def test_evaluator_memory_query_targets_evaluator(self):
         state_dict = create_initial_cwru_state(
@@ -424,6 +529,16 @@ class EvaluatorAgentTests(unittest.TestCase):
         query = build_evaluator_memory_query(state, top_k=4, min_similarity=0.2)
 
         self.assertEqual(query.target_agent, "evaluator")
+        self.assertEqual(query.data_provenance, "official")
+        self.assertEqual(query.decision_context["data_provenance"], "official")
+        self.assertEqual(
+            query.decision_context["supervision_profile"],
+            "binary_fault_classification",
+        )
+        self.assertEqual(query.decision_context["label_source"], "official")
+        self.assertEqual(query.decision_context["label_granularity"], "file")
+        self.assertEqual(query.decision_context["target_sample_rate_hz"], 12000)
+        self.assertEqual(query.decision_context["transfer_scope"], "same_dataset")
         self.assertEqual(query.top_k, 4)
         self.assertEqual(query.min_similarity, 0.2)
         self.assertIn("metric trade-offs", query.query_text)
@@ -573,6 +688,15 @@ class EvaluatorAgentTests(unittest.TestCase):
         self.assertEqual(decision.evaluation.next_action, "continue")
         self.assertLessEqual(decision.confidence, 0.82)
         self.assertIn("Guardrail correction", decision.rationale)
+        trace = decision.generation_trace
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.origin, "guardrail_fallback")
+        self.assertEqual(trace.attempt_index, 3)
+        self.assertEqual(trace.validation_status, "fallback_applied")
+        self.assertEqual(
+            trace.fallback_from_attempt_id,
+            "run-evaluator-004:evaluator:001:attempt:002",
+        )
 
 
 def _evaluator_memory_context(run_id: str) -> RetrievedMemoryContext:
@@ -654,6 +778,41 @@ def _temporal_state(run_id: str):
             "degradation_mean_health_robustness": 0.88,
             "degradation_mean_false_alarm_rate_nominal": 0.0,
             "degradation_mean_score_trend_spearman": 0.9,
+        },
+    ).model_dump(mode="json")
+    return validate_state(state_dict)
+
+
+def _official_v2_temporal_state(run_id: str):
+    state_dict = create_initial_cwru_state(
+        thread_id="nasa-evaluator-official-v2-test",
+        run_id=run_id,
+    )
+    state_dict["project_context"] = ProjectContext(
+        dataset="nasa_ims_bearing",
+        machine_type="rotating_machinery",
+        signal_type="vibration",
+        objective="run_to_failure_degradation",
+        target_sample_rate_hz=20000,
+        main_channel="channel_1",
+        label_mode="degradation",
+        supervision_profile="run_to_failure_degradation",
+        label_granularity="event",
+        label_source="none",
+        data_provenance="official",
+        provenance_detection_method="official_dataset_provenance",
+    ).model_dump(mode="json")
+    state_dict["metrics"] = MetricsReport(
+        extra={
+            "metric_families": "run_to_failure_degradation",
+            "degradation_available": True,
+            "degradation_confirmed_degradation_before_failure_rate": 1.0,
+            "degradation_mean_persistent_lead_time_to_failure": 201600.5632,
+            "degradation_mean_health_index_drop": 91.1146,
+            "degradation_mean_health_monotonicity": 0.5293,
+            "degradation_mean_health_robustness": 0.9820,
+            "degradation_mean_false_alarm_rate_nominal": 0.0,
+            "degradation_mean_score_trend_spearman": 0.7937,
         },
     ).model_dump(mode="json")
     return validate_state(state_dict)

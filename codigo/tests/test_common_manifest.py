@@ -17,6 +17,7 @@ class CommonManifestServiceTests(unittest.TestCase):
             dataset="nasa_ims_bearing",
             source_path="codigo/data/raw/nasa_ims_bearing/2nd_test/2004.02.12.10.32.39",
             source_format="txt",
+            data_provenance="synthetic",
             label="unknown",
             label_detail="bearing_1_outer_race",
             condition_id="test_to_failure",
@@ -46,6 +47,7 @@ class CommonManifestServiceTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].record_id, "run_001")
         self.assertEqual(records[0].timestamp_start, record.timestamp_start)
+        self.assertEqual(records[0].data_provenance, "synthetic")
         self.assertEqual(
             records[0].metadata_json["failure_event_time"],
             "2004-02-12T10:52:40.024000",

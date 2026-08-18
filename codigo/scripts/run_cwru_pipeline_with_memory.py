@@ -80,7 +80,7 @@ def main() -> None:
             include_memory_candidates=not args.skip_memory_candidates,
             include_memory_usage_audits=not args.skip_memory_usage_audits,
             dataset=None,
-            embedding_provider=embedding_provider,
+            memory_store=memory_store,
             clear_existing=args.clear_existing,
             write_report=True,
         )
@@ -108,7 +108,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluator-top-k", type=int, default=3)
     parser.add_argument("--memory-min-similarity", type=float, default=0.0)
     parser.add_argument("--skip-decision-memory", action="store_true")
-    parser.add_argument("--require-human-review-before-reuse", action="store_true")
+    parser.add_argument(
+        "--require-human-review-before-reuse",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--rebuild-index", action="store_true")
     parser.add_argument("--clear-existing", action="store_true")
     parser.add_argument("--include-unreviewed", action="store_true")
@@ -250,6 +254,8 @@ def _summary(
 def _index_summary(result: ReasoningMemoryIndexResult) -> dict[str, Any]:
     return {
         "memory_dir": result.memory_dir,
+        "memory_backend": result.memory_backend,
+        "destructive_rebuild": result.destructive_rebuild,
         "index_report_path": result.index_report_path,
         "indexed_records": len(result.indexed_records),
         "by_collection": dict(Counter(record.collection_name for record in result.indexed_records)),

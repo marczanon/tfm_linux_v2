@@ -4,6 +4,7 @@ import type {
   ApiRunRequest,
   ApiRunResponse,
   DatasetAdapterInfo,
+  RunSnapshot,
 } from "../../types";
 import { StatusPill } from "../common/StatusPill";
 
@@ -12,29 +13,60 @@ export function RunContextBand({
   adapter,
   response,
   job,
+  jobRequest,
+  selectedSnapshot,
 }: {
   request: ApiRunRequest;
   adapter: DatasetAdapterInfo;
   response: ApiRunResponse | null;
   job: ApiRunJobStatus | null;
+  jobRequest?: ApiRunRequest | null;
+  selectedSnapshot?: RunSnapshot | null;
 }) {
-  const planOk = response?.plan.can_execute_requested_stages;
+  const showingJobContext =
+    job !== null && job.status !== "completed" && selectedSnapshot == null;
+  const persistedRun = showingJobContext ? null : selectedSnapshot ?? null;
+  const frozenJobRequest =
+    showingJobContext && jobRequest?.run_id === job?.run_id ? jobRequest : null;
+  const contextRequest = frozenJobRequest ?? request;
+  const contextRunId =
+    (showingJobContext ? job?.run_id : persistedRun?.run_id) ??
+    response?.run_id ??
+    request.run_id ??
+    "-";
+  const contextDataset =
+    (showingJobContext ? contextRequest.dataset_id : persistedRun?.dataset) ||
+    contextRequest.dataset_id ||
+    adapter.dataset_id;
+  const matchingResponse = response?.run_id === contextRunId ? response : null;
+  const matchingJob = job?.run_id === contextRunId ? job : null;
+  const planOk = matchingResponse?.plan.can_execute_requested_stages;
   const stageCount =
-    response?.plan.effective_stages.length ??
-    request.requested_stages?.length ??
+    matchingResponse?.plan.effective_stages.length ??
+    contextRequest.requested_stages?.length ??
     PIPELINE_STAGES.length;
-  const jobStatus = job?.status ?? "sin job";
+  const executionStatus =
+    matchingJob?.status ?? persistedRun?.current_stage ?? "sin ejecucion";
+  const executionComplete = executionStatus === "completed";
+  const executionPending =
+    executionStatus === "sin ejecucion" ||
+    executionStatus === "queued" ||
+    executionStatus === "running";
 
   return (
     <details className="compact-disclosure run-context-disclosure">
       <summary>
         <span>Contexto</span>
-        <strong>{request.dataset_id || adapter.dataset_id} · {request.run_id || "-"}</strong>
+        <strong>{contextDataset} · {contextRunId}</strong>
         <StatusPill
-          ok={planOk === true}
-          muted={planOk === undefined}
+          ok={persistedRun !== null || showingJobContext || planOk === true}
+          muted={persistedRun === null && !showingJobContext && planOk === undefined}
           label={
-            planOk === undefined
+            persistedRun !== null
+              ? "traza persistida"
+              : showingJobContext
+                ? "runtime del job"
+              : planOk === undefined
               ? "sin plan"
               : planOk
                 ? "plan ok"
@@ -42,28 +74,45 @@ export function RunContextBand({
           }
         />
         <StatusPill
-          ok={job?.status === "completed"}
-          muted={job === null || job.status === "queued" || job.status === "running"}
-          label={jobStatus}
+          ok={executionComplete}
+          muted={executionPending}
+          label={executionStatus}
         />
       </summary>
       <section className="context-band context-band-detail" aria-label="Contexto de ejecucion">
         <ContextItem
           label="Dataset"
-          value={request.dataset_id || adapter.dataset_id}
-          detail={adapter.display_name}
+          value={contextDataset}
+          detail={
+            persistedRun === null
+              ? contextRequest.adapter_id === adapter.adapter_id
+                ? adapter.display_name
+                : contextRequest.adapter_id ?? undefined
+              : undefined
+          }
         />
-        <ContextItem label="Run" value={request.run_id || "-"} />
-        <ContextItem label="Modo" value={request.execution_mode} />
-        <ContextItem label="Politica" value={request.dataset_policy_id ?? "default"} />
-        <ContextItem label="Fases" value={stageCount.toString()} />
+        <ContextItem label="Run" value={contextRunId} />
+        <ContextItem
+          label={persistedRun ? "Fuente" : "Modo"}
+          value={persistedRun ? "runtime persistido" : contextRequest.execution_mode}
+        />
+        <ContextItem
+          label={persistedRun ? "Decisiones" : "Politica"}
+          value={persistedRun ? persistedRun.n_decisions.toString() : contextRequest.dataset_policy_id ?? "default"}
+        />
+        <ContextItem
+          label={persistedRun ? "Errores" : "Fases"}
+          value={persistedRun ? persistedRun.n_errors.toString() : stageCount.toString()}
+        />
         <div className="context-item context-status">
-          <span>Plan</span>
+          <span>{persistedRun ? "Evidencia" : "Plan"}</span>
           <StatusPill
-            ok={planOk === true}
-            muted={planOk === undefined}
+            ok={persistedRun !== null || planOk === true}
+            muted={persistedRun === null && planOk === undefined}
             label={
-              planOk === undefined
+              persistedRun !== null
+                ? "persistida"
+                : planOk === undefined
                 ? "sin plan"
                 : planOk
                   ? "ejecutable"
@@ -72,11 +121,11 @@ export function RunContextBand({
           />
         </div>
         <div className="context-item context-status">
-          <span>Job</span>
+          <span>Estado</span>
           <StatusPill
-            ok={job?.status === "completed"}
-            muted={job === null || job.status === "queued" || job.status === "running"}
-            label={jobStatus}
+            ok={executionComplete}
+            muted={executionPending}
+            label={executionStatus}
           />
         </div>
       </section>

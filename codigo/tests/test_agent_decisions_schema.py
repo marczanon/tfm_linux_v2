@@ -4,7 +4,9 @@ import unittest
 from pydantic import ValidationError
 
 from codigo.app.schemas.agent_decisions import (
+    AgentHypothesis,
     CleaningDecision,
+    DecisionGenerationTrace,
     EvaluationDecision,
     ModelingAlternative,
     ModelingDecision,
@@ -30,6 +32,52 @@ from codigo.app.schemas.state import CleaningConfig, ModelingConfig, Structuring
 
 
 class AgentDecisionSchemaTests(unittest.TestCase):
+    def test_common_agent_hypothesis_is_falsifiable_and_strict(self):
+        hypothesis = AgentHypothesis(
+            kind="data_quality",
+            statement="La limpieza preservara la señal util.",
+            scope="Canal principal antes del modelado.",
+            evidence_cutoff="Perfil previo a la limpieza.",
+            expected_observation="No finitos a cero con cobertura estable.",
+            falsification_criterion="Persisten no finitos o cae la cobertura.",
+            evidence_refs=["profile:dataset_summary"],
+            risk_notes=["La limpieza excesiva puede borrar señal."],
+        )
+
+        self.assertEqual(hypothesis.kind, "data_quality")
+        self.assertIn("cobertura", hypothesis.falsification_criterion)
+
+    def test_common_agent_hypothesis_rejects_duplicate_evidence(self):
+        with self.assertRaises(ValidationError):
+            AgentHypothesis(
+                kind="model_performance",
+                statement="El modelo mantendra el compromiso operativo.",
+                scope="Validacion retenida.",
+                evidence_cutoff="Train y validation.",
+                expected_observation="Metricas dentro de objetivo.",
+                falsification_criterion="Incumplir un objetivo.",
+                evidence_refs=["metric:recall", "metric:recall"],
+                risk_notes=["Resultado local."],
+            )
+
+    def test_common_agent_hypothesis_rejects_blank_list_items(self):
+        base = {
+            "kind": "data_quality",
+            "statement": "La limpieza preservara la señal util.",
+            "scope": "Canal principal antes del modelado.",
+            "evidence_cutoff": "Perfil previo a la limpieza.",
+            "expected_observation": "No finitos a cero con cobertura estable.",
+            "falsification_criterion": "Persisten no finitos o cae la cobertura.",
+            "evidence_refs": ["profile:dataset_summary"],
+            "risk_notes": ["La limpieza excesiva puede borrar señal."],
+            "assumptions": ["El perfil representa el tramo observado."],
+        }
+        for field_name in ("evidence_refs", "risk_notes", "assumptions"):
+            with self.subTest(field_name=field_name):
+                payload = {**base, field_name: ["   "]}
+                with self.assertRaises(ValidationError):
+                    AgentHypothesis.model_validate(payload)
+
     def test_supervisor_decision_requires_next_node_when_not_terminal(self):
         with self.assertRaises(ValidationError):
             SupervisorDecision(
@@ -74,7 +122,68 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         payload = decision.model_dump(mode="json")
 
         self.assertEqual(payload["agent_name"], "cleaner")
+        self.assertIsNone(payload["generation_trace"])
+        self.assertIsNone(payload["hypothesis"])
         json.dumps(payload)
+
+    def test_generation_trace_is_optional_but_strict_when_present(self):
+        legacy_payload = {
+            "agent_name": "cleaner",
+            "decision_id": "clean-trace-001",
+            "rationale": "Legacy decision without generation metadata.",
+            "confidence": 0.8,
+            "cleaning_config": {
+                "strategy_id": "cwru_cleaning_v1",
+                "remove_non_finite": True,
+                "resample_to_hz": 12000,
+                "normalization": "none",
+                "audit_log_path": None,
+            },
+            "expected_artifact_path": (
+                "codigo/data/processed/cwru_bearing/clean_signals"
+            ),
+        }
+
+        legacy = CleaningDecision.model_validate(legacy_payload)
+        self.assertIsNone(legacy.generation_trace)
+
+        fallback_trace = DecisionGenerationTrace.for_decision(
+            legacy.decision_id,
+            origin="guardrail_fallback",
+            attempt_index=2,
+            validation_status="fallback_applied",
+            fallback_cause="ValueError: unsupported sample rate",
+            fallback_from_attempt_index=1,
+        )
+        traced = legacy.model_copy(update={"generation_trace": fallback_trace})
+        restored = CleaningDecision.model_validate_json(traced.model_dump_json())
+
+        self.assertEqual(restored.generation_trace, fallback_trace)
+        self.assertEqual(
+            fallback_trace.fallback_from_attempt_id,
+            "clean-trace-001:attempt:001",
+        )
+
+        with self.assertRaisesRegex(ValidationError, "requires cause"):
+            DecisionGenerationTrace(
+                origin="guardrail_fallback",
+                attempt_id="clean-trace-001:attempt:002",
+                attempt_index=2,
+                validation_status="fallback_applied",
+            )
+
+        with self.assertRaisesRegex(ValidationError, "derived from decision_id"):
+            CleaningDecision.model_validate(
+                {
+                    **legacy_payload,
+                    "generation_trace": {
+                        "origin": "deterministic",
+                        "attempt_id": "another-decision:attempt:001",
+                        "attempt_index": 1,
+                        "validation_status": "validated",
+                    },
+                }
+            )
 
     def test_agent_decision_rejects_extra_fields(self):
         with self.assertRaises(ValidationError):
@@ -430,6 +539,46 @@ class AgentDecisionSchemaTests(unittest.TestCase):
                 max_false_positive_rate=0.1,
                 used_memory_context=False,
                 memory_record_ids=["memory-evaluator-tradeoff-001"],
+            )
+
+    def test_evaluation_can_trace_an_observed_but_unused_memory_context(self):
+        decision = EvaluationDecision(
+            decision_id="eval-memory-observed-001",
+            rationale=(
+                "The retrieved context was empty or irrelevant and did not "
+                "influence the current evidence-based assessment."
+            ),
+            confidence=0.9,
+            evaluation={
+                "approved": False,
+                "summary": "Rejected by the current run evidence.",
+                "next_action": "continue",
+            },
+            memory_context_id="eval-query:retrieved_memory_context",
+            used_memory_context=False,
+        )
+
+        self.assertEqual(
+            decision.memory_context_id,
+            "eval-query:retrieved_memory_context",
+        )
+        self.assertFalse(decision.used_memory_context)
+        self.assertEqual(decision.memory_record_ids, [])
+
+    def test_unused_memory_context_still_cannot_cite_or_describe_records(self):
+        with self.assertRaises(ValidationError):
+            EvaluationDecision(
+                decision_id="eval-memory-observed-invalid-001",
+                rationale="Claims an individual memory influence while marking it unused.",
+                confidence=0.9,
+                evaluation={
+                    "approved": False,
+                    "summary": "Rejected by the current run evidence.",
+                    "next_action": "continue",
+                },
+                memory_context_id="eval-query:retrieved_memory_context",
+                used_memory_context=False,
+                memory_usage_summary="A record changed the decision.",
             )
 
     def test_report_verification_decision_blocks_inconsistent_approval(self):

@@ -290,14 +290,14 @@ def build_memory_migration_verification_queries(
     """Genera consultas de smoke a partir de recuerdos migrados."""
 
     queries: list[AgentMemoryQuery] = []
-    seen: set[tuple[str, str | None]] = set()
+    seen: set[tuple[str, str | None, str]] = set()
     candidates = [
         record
         for record in sorted(records, key=lambda item: item.memory_record_id)
         if record.reusable_as_context and not record.exclude_from_context
     ]
     for record in candidates:
-        key = (record.target_agent, record.dataset)
+        key = (record.target_agent, record.dataset, record.data_provenance)
         if key in seen:
             continue
         seen.add(key)
@@ -310,11 +310,13 @@ def build_memory_migration_verification_queries(
                 target_agent=record.target_agent,
                 query_text=_verification_query_text(record),
                 dataset=record.dataset,
+                data_provenance=record.data_provenance,
                 top_k=top_k,
                 min_similarity=0.0,
                 decision_context={
                     "source_type": record.source_type,
                     "memory_role": record.memory_role,
+                    "data_provenance": record.data_provenance,
                 },
             )
         )

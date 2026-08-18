@@ -455,3 +455,67 @@ Documentos iniciales:
   10.10; crea un centro de evidencia reutilizable para informe, auditoria,
   debate, evidence pack y artefactos, visible desde `Nueva run`, reutilizado en
   el registro de runs y enlazado desde `Agentes`, sin tocar backend.
+- `128_fase11_hoja_ruta_industrializacion_agentica_event_driven.md`: propuesta
+  historica amplia de Fase 11 para streaming simulado, cola persistente, worker,
+  automatizacion y datasets no vistos. Su alcance queda diferido; la guia
+  activa y acotada es `133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`.
+- `129_decision_backend_y_ciclo_memoria_rag_run_to_failure.md`: decision
+  tecnica sobre backend vectorial, calidad del corpus y orden de validacion del
+  ciclo RAG para el caso run-to-failure.
+- `130_auditoria_base_agentes_pre_memoria.md`: auditoria transversal que
+  separa exito operativo y exito agentico, cuantifica la evidencia historica,
+  revisa los siete roles y fija la puerta `decision-only` previa a comparar
+  ejecuciones con y sin memoria, ejecutable de forma segura con
+  `python -m codigo.scripts.run_agent_decision_reliability --plan-only`.
+- `131_fase10_sala_control_agentica_historia_visual.md`: reorganiza la vista
+  `Agentes` como una historia visual progresiva, con siete roles compactos,
+  ficha `Cree-Elige-Recuerda-Ocurre`, microflujo RAG, recorrido temporal
+  sincronizado y auditoria completa bajo demanda, sin cambiar backend.
+- `132_fase10_qa_e2e_playwright_agent_story.md`: versiona la infraestructura
+  Playwright para validar la historia agentica en Chromium desktop y movil,
+  define aislamiento completo de backend, Ollama y Qwen mediante fixtures API,
+  congela los escenarios RAG sin actividad, `1/1`, filtrado `1/0` y no
+  disponible, y cierra el gate con 16 casos correctos en escritorio y movil.
+- `133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`: hoja de ruta activa
+  para convertir NASA IMS en una monitorizacion continua simulada mediante
+  replay causal, con scoring determinista, triggers periodicos/event-driven,
+  runs multiagente hijas, politicas versionadas y sala 2D/3D; separa el
+  benchmark congelado de una demo adaptativa exploratoria y difiere la
+  industrializacion amplia de `128`.
+- `134_fase11_vertical_replay_manual_visual.md`: cierre del primer vertical P0
+  de la Fase 11; documenta el replay historico manual de NASA IMS Set 2, su
+  frontera causal y hashes congelados, los contratos y la API, la nueva vista
+  2D y la paridad full NASA, sin atribuirle tiempo real, holdout, Qwen, RAG ni
+  triggers todavia.
+- `135_fase11_motor_triggers_p3_determinista.md`: cierra el motor backend P3
+  sobre el replay congelado, con K/R, critical, gap, cooldown, coalescing,
+  presupuesto, cierre y co-commit atomico de tick y triggers; documenta el
+  ledger real de NASA Set 2 sin activar Qwen, RAG ni runs hijas.
+- `136_fase11_conexion_trigger_run_multiagente.md`: cierra el puente manual
+  desde un trigger emitido a una run hija consultable, con vista causal por
+  whitelist, ledger de lifecycle separado, siete roles propose-only, memoria
+  OFF, hashes extremo a extremo y navegacion Monitorizacion--Agentes, sin
+  ejecutores ni aplicacion de politica.
+- `137_fase11_gate_repetido_qwen_triggers_nasa.md`: cierra la bateria repetida
+  `3 x 4 x 7` sobre todos los triggers primarios P3 con Qwen 3.5, memoria OFF,
+  prerregistro, traza de 86 llamadas fisicas, publicacion hasheada, agregado
+  visual y figura reproducible. Documenta v2 bloqueada por tres claims fuera de
+  alcance y v3 bloqueada por dos fallbacks de referencias; no autoriza RAG ni
+  adaptacion.
+- `138_fase11_refuerzo_binding_evidencia_monitoring_review.md`: refuerza, sin
+  ejecutar otro gate, la frontera que bloqueo V3. El LLM usa el alias cerrado
+  `causal_view`, el backend lo materializa como referencia canonica y el handoff
+  de registros queda ligado por hash, whitelist y cutoff; conserva V2/V3 como
+  resultados inmutables y no atribuye seleccion semantica a un catalogo
+  singleton.
+- `139_fase11_catalogo_evidencia_causal_por_registro.md`: sustituye para nuevas
+  runs el binding singleton por un catalogo sellado `E01..EN`; separa alcance
+  causal, seleccion del agente y referencias canonicas por registro, integra
+  fingerprints, traza y persistencia sin reescribir V3, y deja un gate
+  prospectivo completo como validacion futura.
+- `140_fase11_policy_proposal_consultiva.md`: proyecta las siete decisiones de
+  una revision hija en una `MonitoringPolicyProposal` consultiva creada por el
+  servidor, conserva cada contribucion y su evidencia, distingue unanimidad,
+  desacuerdo e invalidez y declara siempre `not_applied`; no ejecuta Qwen, no
+  inventa parametros ni implementa validacion, aprobacion o aplicacion de
+  politicas.

@@ -13,6 +13,7 @@ import {
   getRun,
   getRunAuditReport,
   getRunArtifacts,
+  getRunEvents,
   getRunJob,
   getRunReport,
   getRunReportDebate,
@@ -20,12 +21,14 @@ import {
   getMemoryRecord,
   listDatasetAdapters,
   listMemoryCollections,
+  getMemoryStatus,
   listMemoryRecords,
   listRuns,
 } from "./api";
 import { AgentObservabilityView } from "./components/agents/AgentObservabilityView";
 import { CockpitView } from "./components/cockpit/CockpitView";
 import { PipelineDashboard } from "./components/pipeline/PipelineDashboard";
+import { MonitoringView } from "./components/monitoring/MonitoringView";
 import { RunContextBand } from "./components/runs/RunContextBand";
 import { AppShell } from "./components/shell/AppShell";
 import { VisualizationView } from "./components/visualization/VisualizationView";
@@ -41,6 +44,7 @@ import {
 } from "./lib/runRequest";
 import type {
   ArtifactRef,
+  AgentRuntimeEvent,
   ApiRunJobStatus,
   ApiRunRequest,
   ApiRunResponse,
@@ -51,6 +55,7 @@ import type {
   HumanReviewMode,
   LLMStatusResponse,
   MemoryCollectionSummary,
+  MemoryStatusResponse,
   MemoryRecordSummary,
   PipelineRunStage,
   ReasoningMemoryRecord,
@@ -60,10 +65,14 @@ import type {
   RunVisualizationData,
   RunSnapshot,
 } from "./types";
-import type { AppView } from "./types/ui";
+import type {
+  AppView,
+  MonitoringAgentBridgeContext,
+} from "./types/ui";
 
 export default function App() {
   const [activeView, setActiveView] = useState<AppView>("cockpit");
+  const [pipelineContextMode, setPipelineContextMode] = useState<"request" | "selected">("request");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [llmStatus, setLlmStatus] = useState<LLMStatusResponse | null>(null);
   const [adapters, setAdapters] = useState<DatasetAdapterInfo[]>([FALLBACK_ADAPTER]);
@@ -72,6 +81,7 @@ export default function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedSnapshot, setSelectedSnapshot] = useState<RunSnapshot | null>(null);
   const [selectedArtifacts, setSelectedArtifacts] = useState<ArtifactRef[]>([]);
+  const [selectedRunEvents, setSelectedRunEvents] = useState<AgentRuntimeEvent[]>([]);
   const [selectedReport, setSelectedReport] = useState<string | null>(null);
   const [selectedAuditReport, setSelectedAuditReport] = useState<string | null>(null);
   const [selectedReportDebate, setSelectedReportDebate] = useState<string | null>(null);
@@ -86,9 +96,15 @@ export default function App() {
     useState<DatasetDescribeResponse | null>(null);
   const [planResponse, setPlanResponse] = useState<ApiRunResponse | null>(null);
   const [job, setJob] = useState<ApiRunJobStatus | null>(null);
+  const [jobRequest, setJobRequest] = useState<ApiRunRequest | null>(null);
   const [jobSnapshot, setJobSnapshot] = useState<RunSnapshot | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string>("supervisor");
+  const [monitoringAgentContext, setMonitoringAgentContext] =
+    useState<MonitoringAgentBridgeContext | null>(null);
+  const [monitoringChildJob, setMonitoringChildJob] =
+    useState<ApiRunJobStatus | null>(null);
   const [memoryCollections, setMemoryCollections] = useState<MemoryCollectionSummary[]>([]);
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatusResponse | null>(null);
   const [memoryRecords, setMemoryRecords] = useState<MemoryRecordSummary[]>([]);
   const [selectedMemoryRecord, setSelectedMemoryRecord] =
     useState<ReasoningMemoryRecord | null>(null);
@@ -105,7 +121,35 @@ export default function App() {
   const cockpitFocusAttemptRef = useRef<string | null>(null);
 
   const visibleRuns = useMemo(() => runs.slice(0, 20), [runs]);
-  const runtimeEvents = useMemo(() => job?.events ?? [], [job?.events]);
+  const focusedJob = useMemo(
+    () => (job !== null && job.run_id === selectedRunId ? job : null),
+    [job, selectedRunId],
+  );
+  const focusedSnapshot =
+    focusedJob !== null && isActiveJob(focusedJob) ? null : selectedSnapshot;
+  const runtimeEvents = useMemo(() => {
+    if (focusedJob !== null && (isActiveJob(focusedJob) || focusedJob.events.length > 0)) {
+      return focusedJob.events;
+    }
+    return selectedRunEvents;
+  }, [focusedJob, selectedRunEvents]);
+  const monitoringChildSnapshot =
+    monitoringAgentContext !== null &&
+    selectedSnapshot?.run_id === monitoringAgentContext.childRunId
+      ? selectedSnapshot
+      : null;
+  const monitoringChildEvents = useMemo(() => {
+    if (monitoringAgentContext === null) {
+      return [];
+    }
+    if (
+      monitoringChildJob !== null &&
+      (isActiveJob(monitoringChildJob) || selectedRunEvents.length === 0)
+    ) {
+      return monitoringChildJob.events;
+    }
+    return selectedRunEvents;
+  }, [monitoringAgentContext, monitoringChildJob, selectedRunEvents]);
   const completedRuns = useMemo(
     () => runs.filter((run) => run.current_stage === "completed").length,
     [runs],
@@ -215,6 +259,53 @@ export default function App() {
   }, [job?.job_id, job?.status]);
 
   useEffect(() => {
+    if (
+      activeView !== "agents" ||
+      monitoringAgentContext === null ||
+      monitoringChildJob === null ||
+      !isActiveJob(monitoringChildJob)
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function pollMonitoringChildJob() {
+      try {
+        const next = await getRunJob(monitoringAgentContext!.childRunId);
+        if (cancelled) {
+          return;
+        }
+        assertMonitoringChildRunIdentity(next, monitoringAgentContext!);
+        setMonitoringChildJob(next);
+        if (next.status === "completed") {
+          await loadRunDetail(next.run_id);
+        } else if (next.status === "failed") {
+          setError(next.detail ?? "La run hija de monitorización ha fallado.");
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorText(caught));
+        }
+      }
+    }
+
+    const intervalId = window.setInterval(
+      () => void pollMonitoringChildJob(),
+      1500,
+    );
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [
+    activeView,
+    monitoringAgentContext?.childRunId,
+    monitoringChildJob?.job_id,
+    monitoringChildJob?.status,
+  ]);
+
+  useEffect(() => {
     if (activeView !== "agents") {
       return;
     }
@@ -302,6 +393,7 @@ export default function App() {
     setExecuting(true);
     setError(null);
     setJob(null);
+    setJobRequest(null);
     setJobSnapshot(null);
     try {
       const normalized = normalizedRequest(request, customStages);
@@ -343,7 +435,16 @@ export default function App() {
       if (response.job === null) {
         throw new Error("La API no devolvio job para la ejecucion background.");
       }
+      setJobRequest(normalized);
       setJob(response.job);
+      setSelectedRunId(response.job.run_id);
+      setSelectedSnapshot(null);
+      setSelectedArtifacts([]);
+      setSelectedRunEvents([]);
+      setSelectedReport(null);
+      setSelectedAuditReport(null);
+      setSelectedReportDebate(null);
+      setSelectedVisualization(null);
       setActiveView("agents");
     } catch (caught) {
       setError(errorText(caught));
@@ -357,9 +458,15 @@ export default function App() {
     setLoadingVisualization(true);
     setError(null);
     try {
-      const [snapshot, artifacts, report, auditReport, reportDebate, visualization] = await Promise.all([
+      const [snapshot, artifacts, events, report, auditReport, reportDebate, visualization] = await Promise.all([
         getRun(runId),
         getRunArtifacts(runId),
+        getRunEvents(runId).catch((caught) => {
+          if (caught instanceof ApiClientError && caught.status === 404) {
+            return [];
+          }
+          throw caught;
+        }),
         getRunReport(runId).catch((caught) => {
           if (caught instanceof ApiClientError && caught.status === 404) {
             return null;
@@ -388,6 +495,7 @@ export default function App() {
       setSelectedRunId(runId);
       setSelectedSnapshot(snapshot);
       setSelectedArtifacts(artifacts);
+      setSelectedRunEvents(events);
       setSelectedReport(report);
       setSelectedAuditReport(auditReport);
       setSelectedReportDebate(reportDebate);
@@ -405,13 +513,15 @@ export default function App() {
     setError(null);
     try {
       const targetAgent = memoryTargetForAgent(selectedAgentId);
-      const [collectionsPayload, recordsPayload] = await Promise.all([
+      const [statusPayload, collectionsPayload, recordsPayload] = await Promise.all([
+        getMemoryStatus(),
         listMemoryCollections(),
         listMemoryRecords({
           target_agent: targetAgent,
           search_text: emptyToNull(memorySearchText),
         }),
       ]);
+      setMemoryStatus(statusPayload);
       setMemoryCollections(collectionsPayload);
       setMemoryRecords(recordsPayload);
       if (
@@ -473,7 +583,7 @@ export default function App() {
 
   async function handleDeleteMemoryRecord(memoryRecordId: string) {
     const confirmed = window.confirm(
-      "Borrar este recuerdo del indice local de memoria? Esta accion no elimina los artefactos fuente.",
+      "Excluir y borrar este recuerdo del indice configurado? Se conservara un tombstone auditable y no se eliminaran los artefactos fuente.",
     );
     if (!confirmed) {
       return;
@@ -525,6 +635,10 @@ export default function App() {
   }
 
   function applyAdapter(adapterId: string) {
+    if (job !== null && isActiveJob(job)) {
+      setError("La configuracion queda bloqueada mientras la ejecucion esta activa.");
+      return;
+    }
     const adapter =
       adapters.find((candidate) => candidate.adapter_id === adapterId) ??
       adapters[0] ??
@@ -535,6 +649,7 @@ export default function App() {
     setDatasetDescription(null);
     setPlanResponse(null);
     setJob(null);
+    setJobRequest(null);
     setJobSnapshot(null);
   }
 
@@ -542,6 +657,10 @@ export default function App() {
     key: Key,
     value: ApiRunRequest[Key],
   ) {
+    if (job !== null && isActiveJob(job)) {
+      setError("La configuracion queda bloqueada mientras la ejecucion esta activa.");
+      return;
+    }
     setRequest((current) => ({ ...current, [key]: value }));
     setDatasetDescription(null);
     setPlanResponse(null);
@@ -630,10 +749,87 @@ export default function App() {
     setSelectedMemoryRecord(null);
   }
 
+  function clearSelectedRunDetail(runId: string) {
+    setSelectedRunId(runId);
+    setSelectedSnapshot(null);
+    setSelectedArtifacts([]);
+    setSelectedRunEvents([]);
+    setSelectedReport(null);
+    setSelectedAuditReport(null);
+    setSelectedReportDebate(null);
+    setSelectedVisualization(null);
+  }
+
+  async function openMonitoringAgentRun(context: MonitoringAgentBridgeContext) {
+    setMonitoringAgentContext(context);
+    setMonitoringChildJob(null);
+    setSelectedAgentId("supervisor");
+    setSelectedMemoryRecord(null);
+    clearSelectedRunDetail(context.childRunId);
+    setError(null);
+    setActiveView("agents");
+
+    try {
+      const childJob = await getRunJob(context.childRunId);
+      assertMonitoringChildRunIdentity(childJob, context);
+      setMonitoringChildJob(childJob);
+      if (childJob.status === "completed") {
+        await loadRunDetail(childJob.run_id);
+      } else if (childJob.status === "failed") {
+        setError(childJob.detail ?? "La run hija de monitorización ha fallado.");
+      }
+    } catch (caught) {
+      if (caught instanceof ApiClientError && caught.status === 404) {
+        try {
+          await loadRunDetail(context.childRunId);
+          return;
+        } catch (persistedError) {
+          setError(errorText(persistedError));
+          return;
+        }
+      }
+      setError(errorText(caught));
+    }
+  }
+
+  function returnToMonitoringTrigger() {
+    setActiveView("monitoring");
+  }
+
+  function finishMonitoringBridgeRestore() {
+    setMonitoringAgentContext(null);
+    setMonitoringChildJob(null);
+  }
+
   function openRunInView(runId: string, view: AppView) {
+    if (view === "pipeline") {
+      setPipelineContextMode("selected");
+    }
     setActiveView(view);
     void loadRunDetail(runId);
   }
+
+  function changeView(view: AppView) {
+    if (view === "pipeline") {
+      setPipelineContextMode("request");
+    }
+    setActiveView(view);
+  }
+
+  function openSelectedRunEvidence() {
+    setPipelineContextMode("selected");
+    setActiveView("pipeline");
+  }
+
+  function selectPipelineRun(runId: string) {
+    setPipelineContextMode("selected");
+    void loadRunDetail(runId);
+  }
+
+  const showingSelectedRunContext =
+    activeView === "agents" ||
+    activeView === "visualization" ||
+    (activeView === "pipeline" && pipelineContextMode === "selected");
 
   return (
     <AppShell
@@ -648,14 +844,24 @@ export default function App() {
       runsCount={runs.length}
       showHealthSummary={false}
       onRefresh={() => void refreshDashboard()}
-      onViewChange={setActiveView}
+      onViewChange={changeView}
     >
-      {activeView !== "cockpit" ? (
+      {activeView !== "cockpit" &&
+      activeView !== "monitoring" &&
+      !(activeView === "agents" && monitoringAgentContext !== null) ? (
         <RunContextBand
           request={request}
           adapter={selectedAdapter}
           response={planResponse}
-          job={job}
+          job={showingSelectedRunContext ? focusedJob : job}
+          jobRequest={
+            showingSelectedRunContext
+              ? focusedJob !== null
+                ? jobRequest
+                : null
+              : jobRequest
+          }
+          selectedSnapshot={showingSelectedRunContext ? focusedSnapshot : null}
         />
       ) : null}
 
@@ -682,7 +888,7 @@ export default function App() {
           selectedVisualization={selectedVisualization}
           loadingFocusRun={loadingRunDetail}
           onExecute={() => void executeBackgroundRun()}
-          onNavigate={setActiveView}
+          onNavigate={changeView}
           onOpenRun={openRunInView}
           onRefreshLlm={() => void refreshLLMStatus()}
         />
@@ -723,7 +929,7 @@ export default function App() {
           onRefreshLlm={() => void refreshLLMStatus()}
           onResetRunFilters={resetRunFilters}
           onRunFilterChange={updateRunFilter}
-          onSelectRun={(runId) => void loadRunDetail(runId)}
+          onSelectRun={selectPipelineRun}
           onSubmitDryRun={(event) => void submitDryRun(event)}
           onToggleCompareRun={toggleCompareRun}
           onToggleCustomStages={updateCustomStages}
@@ -734,15 +940,24 @@ export default function App() {
           onUpdateHumanReviewer={updateHumanReviewer}
           onUpdateRequest={updateRequest}
         />
+      ) : activeView === "monitoring" ? (
+        <MonitoringView
+          bridgeContext={monitoringAgentContext}
+          onBridgeRestored={finishMonitoringBridgeRestore}
+          onOpenAgentRun={(context) => void openMonitoringAgentRun(context)}
+        />
       ) : activeView === "agents" ? (
         <AgentObservabilityView
-          job={job}
-          events={runtimeEvents}
-          selectedSnapshot={selectedSnapshot}
+          job={monitoringAgentContext ? monitoringChildJob : focusedJob}
+          events={monitoringAgentContext ? monitoringChildEvents : runtimeEvents}
+          selectedSnapshot={monitoringAgentContext ? monitoringChildSnapshot : focusedSnapshot}
           selectedAgentId={selectedAgentId}
           onSelectAgent={selectAgent}
-          onOpenEvidence={() => setActiveView("pipeline")}
+          onOpenEvidence={openSelectedRunEvidence}
+          monitoringContext={monitoringAgentContext}
+          onReturnToMonitoring={returnToMonitoringTrigger}
           memoryCollections={memoryCollections}
+          memoryStatus={memoryStatus}
           memoryRecords={memoryRecords}
           selectedMemoryRecord={selectedMemoryRecord}
           memorySearchText={memorySearchText}
@@ -783,4 +998,15 @@ function errorText(caught: unknown): string {
     return caught.message;
   }
   return "Error desconocido";
+}
+
+function assertMonitoringChildRunIdentity(
+  job: ApiRunJobStatus,
+  context: MonitoringAgentBridgeContext,
+) {
+  if (job.job_id !== context.childRunId || job.run_id !== context.childRunId) {
+    throw new Error(
+      "El backend no conserva el invariante child_run_id = child_job_id = run_id.",
+    );
+  }
 }

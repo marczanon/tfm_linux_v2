@@ -6,6 +6,7 @@ from pathlib import Path
 from codigo.app.agents.cleaner import decide_cleaning_action
 from codigo.app.graph.state import create_initial_cwru_state, validate_state
 from codigo.app.schemas.state import ProjectContext
+from codigo.tests.agent_hypothesis_fixtures import with_test_agent_hypothesis
 
 
 class FakeLLMClient:
@@ -17,7 +18,10 @@ class FakeLLMClient:
         self.calls += 1
         self.messages = messages
         self.json_schema = json_schema
-        return self.payload
+        if isinstance(self.payload, list):
+            index = min(self.calls - 1, len(self.payload) - 1)
+            return with_test_agent_hypothesis(self.payload[index])
+        return with_test_agent_hypothesis(self.payload)
 
 
 class CleanerAgentTests(unittest.TestCase):
@@ -36,6 +40,11 @@ class CleanerAgentTests(unittest.TestCase):
         self.assertTrue(decision.cleaning_config.remove_non_finite)
         self.assertEqual(decision.cleaning_config.resample_to_hz, 12000)
         self.assertEqual(decision.cleaning_config.normalization, "none")
+        self.assertIsNotNone(decision.generation_trace)
+        self.assertEqual(decision.generation_trace.origin, "deterministic")
+        self.assertEqual(decision.generation_trace.attempt_index, 1)
+        self.assertEqual(decision.hypothesis.kind, "data_quality")
+        self.assertTrue(decision.hypothesis.expected_observation)
 
     def test_deterministic_cleaner_uses_dataset_context_for_nasa_ims(self):
         state_dict = create_initial_cwru_state(
@@ -79,6 +88,12 @@ class CleanerAgentTests(unittest.TestCase):
                 "decision_id": "run-cleaner-002:cleaner:001",
                 "rationale": "The profile uses CWRU vibration signals and should be resampled.",
                 "confidence": 0.91,
+                "generation_trace": {
+                    "origin": "deterministic",
+                    "attempt_id": "forged:attempt:999",
+                    "attempt_index": 999,
+                    "validation_status": "validated",
+                },
                 "cleaning_config": {
                     "strategy_id": "cwru_clean_llm_v1",
                     "remove_non_finite": True,
@@ -96,6 +111,44 @@ class CleanerAgentTests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         self.assertEqual(decision.confidence, 0.91)
         self.assertEqual(decision.cleaning_config.strategy_id, "cwru_clean_llm_v1")
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+
+    def test_llm_cleaner_uses_server_owned_envelope_without_repair(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-cleaner-envelope-test",
+                run_id="run-cleaner-envelope-001",
+            )
+        )
+        payload = decide_cleaning_action(state).model_dump(mode="json")
+        payload.update(
+            {
+                "agent_name": "evaluator",
+                "decision_id": "foreign-run:cleaner:999",
+                "created_at": "not-a-server-timestamp",
+                "expected_artifact_path": "/tmp/llm-invented-output",
+                "rationale": "Keep the valid cleaning configuration for this signal.",
+            }
+        )
+        payload["generation_trace"] = {"forged": True}
+        client = FakeLLMClient(payload)
+
+        decision = decide_cleaning_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(decision.agent_name, "cleaner")
+        self.assertEqual(
+            decision.decision_id,
+            "run-cleaner-envelope-001:cleaner:001",
+        )
+        self.assertEqual(
+            decision.expected_artifact_path,
+            "codigo/data/processed/cwru_bearing/clean_signals",
+        )
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+        self.assertIn("server-owned", client.messages[1].content)
 
     def test_llm_cleaner_receives_profile_decision_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -206,6 +259,56 @@ class CleanerAgentTests(unittest.TestCase):
         self.assertIn("continuidad temporal", prompt)
         self.assertIn("El cleaner no decide fallos ni RUL", prompt)
 
+    def test_official_online_blind_cleaner_hides_full_trajectory_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_path = Path(tmp) / "profile.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "nasa_ims_bearing",
+                        "n_files": 984,
+                        "label_counts": {"SECRET_FAILURE_MODE": 984},
+                        "sample_rate_counts": {"20000": 984},
+                        "channels_detected": ["channel_1", "channel_2"],
+                        "decision_summary": {
+                            "final_failure": "SECRET_FINAL_EVENT",
+                        },
+                        "files": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_dict = create_initial_cwru_state(
+                thread_id="nasa-cleaner-online-blind-test",
+                run_id="run-cleaner-online-blind-001",
+            )
+            state_dict["project_context"] = ProjectContext(
+                dataset="nasa_ims_bearing",
+                machine_type="rotating_machinery",
+                signal_type="vibration",
+                objective="run_to_failure_degradation",
+                target_sample_rate_hz=20000,
+                main_channel="channel_1",
+                label_mode="degradation",
+                supervision_profile="run_to_failure_degradation",
+                label_granularity="event",
+                label_source="none",
+                data_provenance="official",
+                provenance_detection_method="official_dataset_provenance",
+            ).model_dump(mode="json")
+            state_dict["profile_path"] = profile_path.as_posix()
+            state = validate_state(state_dict)
+            client = FakeLLMClient(decide_cleaning_action(state).model_dump(mode="json"))
+
+            decide_cleaning_action(state, llm_client=client, use_llm=True)
+
+        prompt = client.messages[1].content
+        self.assertIn("online_blind_baseline_profile", prompt)
+        self.assertNotIn("SECRET_FAILURE_MODE", prompt)
+        self.assertNotIn("SECRET_FINAL_EVENT", prompt)
+        self.assertNotIn('"n_files"', prompt)
+        self.assertNotIn('"label_counts"', prompt)
+
     def test_invalid_llm_cleaning_decision_falls_back(self):
         state = validate_state(
             create_initial_cwru_state(
@@ -233,11 +336,59 @@ class CleanerAgentTests(unittest.TestCase):
 
         decision = decide_cleaning_action(state, llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertEqual(decision.cleaning_config.strategy_id, "cwru_clean_v1")
         self.assertEqual(decision.cleaning_config.resample_to_hz, 12000)
-        self.assertLessEqual(decision.confidence, 0.7)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.82)
+        self.assertIn("Guardrail correction", decision.rationale)
+        trace = decision.generation_trace
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.origin, "guardrail_fallback")
+        self.assertEqual(trace.attempt_index, 3)
+        self.assertEqual(trace.validation_status, "fallback_applied")
+        self.assertEqual(
+            trace.fallback_from_attempt_id,
+            "run-cleaner-003:cleaner:001:attempt:002",
+        )
+        self.assertIn("ValueError", trace.fallback_cause)
+
+    def test_invalid_llm_cleaning_decision_is_repaired_before_fallback(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-cleaner-repair-test",
+                run_id="run-cleaner-repair-001",
+            )
+        )
+        invalid_payload = {
+            "agent_name": "cleaner",
+            "decision_id": "run-cleaner-repair-001:cleaner:001",
+            "rationale": "Use an invalid sample rate.",
+            "confidence": 0.99,
+            "cleaning_config": {
+                "strategy_id": "bad_config",
+                "remove_non_finite": True,
+                "resample_to_hz": 48000,
+                "normalization": "none",
+                "audit_log_path": None,
+            },
+            "expected_artifact_path": (
+                "codigo/data/processed/cwru_bearing/clean_signals"
+            ),
+            "warnings": [],
+        }
+        repaired_payload = decide_cleaning_action(state).model_dump(mode="json")
+        client = FakeLLMClient([invalid_payload, repaired_payload])
+
+        decision = decide_cleaning_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(decision.cleaning_config.resample_to_hz, 12000)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 2)
+        self.assertEqual(decision.generation_trace.validation_status, "repaired")
+        repair_prompt = client.messages[-1].content
+        self.assertIn("resample_to_hz must be 12000", repair_prompt)
+        self.assertIn("remove_non_finite debe permanecer true", repair_prompt)
 
 
 if __name__ == "__main__":

@@ -2,8 +2,19 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from codigo.app.schemas.reasoning import AgentMemoryQuery
+from codigo.app.services.memory_registry import (
+    append_memory_governance_event,
+    curate_memory_record,
+    decide_memory_candidate,
+    delete_memory_record,
+    load_memory_candidate_artifacts,
+    load_memory_governance_ledger,
+    list_memory_candidate_queue,
+    memory_governance_ledger_path,
+)
 from codigo.app.services.reasoning_memory_index import index_reasoning_memory
 from codigo.app.services.vector_memory import (
     LocalHashEmbeddingModel,
@@ -68,7 +79,7 @@ class ReasoningMemoryIndexTests(unittest.TestCase):
             self.assertEqual(len(context.items), 1)
             self.assertEqual(context.items[0].record.run_id, "retry-run")
 
-    def test_indexer_can_promote_memory_usage_audits_as_warning_memory(self):
+    def test_indexer_keeps_memory_usage_audits_as_non_reusable_observations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
@@ -90,6 +101,8 @@ class ReasoningMemoryIndexTests(unittest.TestCase):
             self.assertEqual(record.target_agent, "modeler")
             self.assertEqual(record.memory_role, "warning")
             self.assertEqual(record.collection_name, "modeler_memory")
+            self.assertFalse(record.reusable_as_context)
+            self.assertIn("non_reusable_memory_observation", record.tags)
 
             store = LocalJsonVectorMemoryStore(
                 root / "memory",
@@ -104,10 +117,9 @@ class ReasoningMemoryIndexTests(unittest.TestCase):
                     min_similarity=0.0,
                 )
             )
-            self.assertEqual(len(context.items), 1)
-            self.assertEqual(context.items[0].retrieval_use, "negative_warning")
+            self.assertEqual(context.items, [])
 
-    def test_indexer_adds_reusable_memory_candidates_by_default(self):
+    def test_indexer_quarantines_legacy_reusable_candidate_without_promotion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
@@ -123,10 +135,13 @@ class ReasoningMemoryIndexTests(unittest.TestCase):
 
             self.assertEqual(len(result.indexed_records), 1)
             self.assertEqual(len(result.indexed_memory_candidates), 1)
+            self.assertEqual(len(result.quarantined_memory_candidates), 1)
             record = result.indexed_records[0]
             self.assertEqual(record.source_type, "memory_candidate")
             self.assertEqual(record.memory_role, "boundary_case")
             self.assertEqual(record.collection_name, "modeler_memory")
+            self.assertFalse(record.reusable_as_context)
+            self.assertIn("pending_manual_promotion", record.tags)
 
             store = LocalJsonVectorMemoryStore(
                 root / "memory",
@@ -141,8 +156,395 @@ class ReasoningMemoryIndexTests(unittest.TestCase):
                     min_similarity=0.0,
                 )
             )
-            self.assertEqual(len(context.items), 1)
-            self.assertEqual(context.items[0].retrieval_use, "boundary_context")
+            self.assertEqual(context.items, [])
+            queue = list_memory_candidate_queue(root / "reports", root / "memory")
+            self.assertEqual(queue.summary.n_pending, 1)
+            self.assertEqual(queue.candidates[0].status, "pending")
+
+    def test_pending_candidate_becomes_retrievable_only_after_manual_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
+            reports.mkdir(parents=True)
+            _write_memory_candidate(
+                reports / "memory_candidate.json",
+                reusable_as_context=False,
+            )
+            memory_dir = root / "memory"
+            store = _local_store(memory_dir)
+
+            with self.assertRaisesRegex(ValueError, "source_hash"):
+                append_memory_governance_event(
+                    memory_dir,
+                    _candidate_memory_record_id(),
+                    action="promote",
+                    reason="Unbound promotion must be rejected.",
+                    reviewer="advisor",
+                )
+
+            pending_result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+            self.assertEqual(len(pending_result.indexed_records), 1)
+            self.assertFalse(pending_result.indexed_records[0].reusable_as_context)
+            self.assertEqual(len(pending_result.quarantined_memory_candidates), 1)
+            self.assertEqual(_query_candidate(store).items, [])
+
+            append_memory_governance_event(
+                memory_dir,
+                _candidate_memory_record_id(),
+                action="promote",
+                reason="Advisor validated the boundary lesson.",
+                reviewer="advisor",
+                source_hash=load_memory_candidate_artifacts(
+                    root / "reports"
+                )[0].source_hash,
+            )
+            promoted_result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+
+            promoted_record = promoted_result.indexed_records[0]
+            self.assertTrue(promoted_record.reusable_as_context)
+            self.assertFalse(promoted_record.exclude_from_context)
+            self.assertEqual(promoted_record.promotion_source_hash, promoted_record.source_hash)
+            self.assertEqual(promoted_record.human_verdict, "partially_correct")
+            self.assertIn("manual_promote", promoted_record.tags)
+            self.assertEqual(
+                [item.effect for item in promoted_result.applied_governance_actions],
+                ["promoted"],
+            )
+            self.assertEqual(len(_query_candidate(store).items), 1)
+
+            reindexed_result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+            self.assertEqual(
+                reindexed_result.applied_governance_actions[0].effect,
+                "promoted",
+            )
+            self.assertEqual(len(_query_candidate(store).items), 1)
+
+    def test_excluded_pending_candidate_stays_out_of_retrieval_after_reindex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
+            reports.mkdir(parents=True)
+            _write_memory_candidate(
+                reports / "memory_candidate.json",
+                reusable_as_context=False,
+            )
+            memory_dir = root / "memory"
+            store = _local_store(memory_dir)
+            append_memory_governance_event(
+                memory_dir,
+                _candidate_memory_record_id(),
+                action="exclude",
+                reason="Candidate uses incompatible evidence.",
+                reviewer="advisor",
+            )
+
+            first_result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+            second_result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+
+            self.assertEqual(_query_candidate(store).items, [])
+            self.assertTrue(first_result.indexed_records[0].exclude_from_context)
+            self.assertFalse(first_result.indexed_records[0].reusable_as_context)
+            self.assertEqual(
+                second_result.applied_governance_actions[0].effect,
+                "excluded",
+            )
+
+    def test_promotion_fails_closed_when_candidate_changes_after_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
+            reports.mkdir(parents=True)
+            candidate_path = reports / "memory_candidate.json"
+            _write_memory_candidate(candidate_path, reusable_as_context=False)
+            memory_dir = root / "memory"
+            store = _local_store(memory_dir)
+            reviewed_hash = load_memory_candidate_artifacts(
+                root / "reports"
+            )[0].source_hash
+            append_memory_governance_event(
+                memory_dir,
+                _candidate_memory_record_id(),
+                action="promote",
+                reason="Reviewed exact candidate contents.",
+                reviewer="advisor",
+                source_hash=reviewed_hash,
+            )
+            index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+            self.assertEqual(len(_query_candidate(store).items), 1)
+
+            mutated = json.loads(candidate_path.read_text(encoding="utf-8"))
+            mutated["content"] = "Changed lesson after the manual review."
+            candidate_path.write_text(json.dumps(mutated), encoding="utf-8")
+            result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=False,
+            )
+
+            self.assertEqual(_query_candidate(store).items, [])
+            stored = {
+                record.memory_record_id: record for record in store.list_records()
+            }[_candidate_memory_record_id()]
+            self.assertFalse(stored.reusable_as_context)
+            self.assertTrue(stored.exclude_from_context)
+            self.assertIn("manual_promote_source_hash_mismatch", stored.tags)
+            self.assertEqual(
+                result.applied_governance_actions[0].effect,
+                "source_hash_mismatch",
+            )
+            queue = list_memory_candidate_queue(root / "reports", memory_dir)
+            self.assertEqual(queue.summary.n_stale_promotions, 1)
+            self.assertEqual(queue.candidates[0].status, "stale_promotion")
+            self.assertNotEqual(
+                reviewed_hash,
+                load_memory_candidate_artifacts(root / "reports")[0].source_hash,
+            )
+
+    def test_indexer_reuses_injected_store_with_incremental_upsert_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
+            reports.mkdir(parents=True)
+            _write_memory_candidate(reports / "memory_candidate.json")
+            store = Mock()
+            store.backend_name = "configured_qdrant_store"
+            store.upsert.side_effect = lambda record: record
+
+            result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=root / "memory",
+                memory_store=store,
+            )
+
+            store.upsert.assert_called_once()
+            store.rebuild.assert_not_called()
+            self.assertEqual(result.memory_backend, "configured_qdrant_store")
+            self.assertFalse(result.destructive_rebuild)
+            self.assertFalse((root / "memory" / "modeler_memory.json").exists())
+            self.assertTrue(
+                (root / "memory" / "reasoning_memory_index_report.json").exists()
+            )
+
+    def test_indexer_only_rebuilds_destructively_when_explicitly_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
+            reports.mkdir(parents=True)
+            _write_memory_candidate(reports / "memory_candidate.json")
+            store = Mock()
+            store.backend_name = "configured_qdrant_store"
+            store.rebuild.side_effect = lambda records, **_: records
+
+            result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=root / "memory",
+                memory_store=store,
+                clear_existing=True,
+            )
+
+            store.rebuild.assert_called_once()
+            _, kwargs = store.rebuild.call_args
+            self.assertEqual(kwargs, {"clear_existing": True})
+            store.upsert.assert_not_called()
+            self.assertTrue(result.destructive_rebuild)
+
+    def test_manual_exclude_survives_reindex_and_stays_out_of_retrieval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = _prepare_memory_candidate(root)
+            memory_dir = root / "memory"
+            store = _local_store(memory_dir)
+            index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+            record_id = _candidate_memory_record_id()
+
+            curate_memory_record(
+                memory_dir,
+                record_id,
+                action="exclude",
+                reason="Contaminated benchmark evidence.",
+                reviewer="advisor",
+                memory_store=store,
+            )
+            result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+
+            stored = {record.memory_record_id: record for record in store.list_records()}
+            self.assertIn(record_id, stored)
+            self.assertTrue(stored[record_id].exclude_from_context)
+            self.assertFalse(stored[record_id].reusable_as_context)
+            self.assertEqual(_query_candidate(store).items, [])
+            self.assertTrue(memory_governance_ledger_path(memory_dir).exists())
+            self.assertEqual(result.governance_overrides_loaded, 1)
+            self.assertEqual(
+                [item.effect for item in result.applied_governance_actions],
+                ["excluded"],
+            )
+
+    def test_source_bound_promotion_survives_reindex_after_exclusion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _prepare_memory_candidate(root)
+            memory_dir = root / "memory"
+            store = _local_store(memory_dir)
+            index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+            record_id = _candidate_memory_record_id()
+            curate_memory_record(
+                memory_dir,
+                record_id,
+                action="exclude",
+                reason="Hold until a second review.",
+                reviewer="advisor",
+                memory_store=store,
+            )
+            decide_memory_candidate(
+                root / "reports",
+                memory_dir,
+                "candidate-modeler-threshold-095",
+                action="promote",
+                reason="Second review accepted the evidence.",
+                reviewer="advisor_2",
+                memory_store=store,
+            )
+
+            result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+
+            retrieved = _query_candidate(store)
+            self.assertEqual(
+                [item.record.memory_record_id for item in retrieved.items],
+                [record_id],
+            )
+            ledger = load_memory_governance_ledger(memory_dir)
+            self.assertEqual(ledger.overrides[0].current_action, "promote")
+            self.assertEqual(len(ledger.overrides[0].history), 2)
+            self.assertEqual(
+                [event.reviewer for event in ledger.overrides[0].history],
+                ["advisor", "advisor_2"],
+            )
+            self.assertEqual(
+                [item.effect for item in result.applied_governance_actions],
+                ["promoted"],
+            )
+
+    def test_manual_delete_tombstone_prevents_resurrection_on_reindex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _prepare_memory_candidate(root)
+            memory_dir = root / "memory"
+            store = _local_store(memory_dir)
+            index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+            record_id = _candidate_memory_record_id()
+            delete_memory_record(
+                memory_dir,
+                record_id,
+                reason="Superseded and unsafe memory.",
+                reviewer="advisor",
+                memory_store=store,
+            )
+
+            result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+                clear_existing=True,
+            )
+
+            self.assertNotIn(
+                record_id,
+                {record.memory_record_id for record in store.list_records()},
+            )
+            self.assertEqual(_query_candidate(store).items, [])
+            self.assertEqual(result.active_tombstones, [record_id])
+            self.assertEqual(
+                [item.effect for item in result.applied_governance_actions],
+                ["tombstoned"],
+            )
+
+    def test_governance_overlay_is_applied_with_an_injected_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _prepare_memory_candidate(root)
+            memory_dir = root / "memory"
+            record_id = _candidate_memory_record_id()
+            append_memory_governance_event(
+                memory_dir,
+                record_id,
+                action="exclude",
+                reason="Cross-backend governance check.",
+                reviewer="test_runner",
+            )
+            store = Mock()
+            store.backend_name = "configured_qdrant_store"
+            store.upsert.side_effect = lambda record: record
+
+            result = index_reasoning_memory(
+                reports_root=root / "reports",
+                memory_dir=memory_dir,
+                memory_store=store,
+            )
+
+            store.upsert.assert_called_once()
+            governed_record = store.upsert.call_args.args[0]
+            self.assertEqual(governed_record.memory_record_id, record_id)
+            self.assertTrue(governed_record.exclude_from_context)
+            self.assertFalse(governed_record.reusable_as_context)
+            self.assertEqual(result.memory_backend, "configured_qdrant_store")
+            self.assertEqual(result.applied_governance_actions[0].effect, "excluded")
+            self.assertFalse((memory_dir / "modeler_memory.json").exists())
 
 
 def _write_postmortem(path: Path) -> None:
@@ -172,6 +574,36 @@ def _write_postmortem(path: Path) -> None:
             }
         ),
         encoding="utf-8",
+    )
+
+
+def _prepare_memory_candidate(root: Path) -> Path:
+    reports = root / "reports" / "nasa_ims_bearing" / "run" / "iteration"
+    reports.mkdir(parents=True)
+    _write_memory_candidate(reports / "memory_candidate.json")
+    return reports
+
+
+def _local_store(memory_dir: Path) -> LocalJsonVectorMemoryStore:
+    return LocalJsonVectorMemoryStore(
+        memory_dir,
+        embedding_model=LocalHashEmbeddingModel(dimension=32),
+    )
+
+
+def _candidate_memory_record_id() -> str:
+    return "candidate-modeler-threshold-095:memory:modeler"
+
+
+def _query_candidate(store: LocalJsonVectorMemoryStore):
+    return store.query(
+        AgentMemoryQuery(
+            query_id="query-governed-candidate",
+            target_agent="modeler",
+            query_text="moderate threshold memory warning fpr",
+            dataset="nasa_ims_bearing",
+            min_similarity=0.0,
+        )
     )
 
 
@@ -229,7 +661,11 @@ def _write_memory_usage_audit(path: Path) -> None:
     )
 
 
-def _write_memory_candidate(path: Path) -> None:
+def _write_memory_candidate(
+    path: Path,
+    *,
+    reusable_as_context: bool = True,
+) -> None:
     path.write_text(
         json.dumps(
             {
@@ -244,7 +680,7 @@ def _write_memory_candidate(path: Path) -> None:
                 "outcome": "partially_supported",
                 "human_verdict": "partially_correct",
                 "memory_role": "boundary_case",
-                "reusable_as_context": True,
+                "reusable_as_context": reusable_as_context,
                 "exclude_from_context": False,
                 "summary": (
                     "A moderate threshold move improved recall but raised FPR."

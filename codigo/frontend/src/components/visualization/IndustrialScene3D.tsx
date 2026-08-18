@@ -285,7 +285,7 @@ export function IndustrialScene3D({
           <span><i className="critical" /> critico</span>
           <span><i className="marker first" /> primer pico</span>
           <span><i className="marker persistent" /> sostenido</span>
-          <span><i className="marker failure" /> fallo</span>
+          <span><i className="marker failure" /> final registrado</span>
         </div>
         <IndustrialMarkerActions
           markers={timeline.markers}
@@ -678,7 +678,7 @@ function selectionId(selection: IndustrialSceneSelection): string {
 
 function markerKindLabel(kind: IndustrialTimelineMarker["kind"]): string {
   const labels: Record<IndustrialTimelineMarker["kind"], string> = {
-    failure: "fallo",
+    failure: "final registrado",
     first_alert: "primer pico",
     persistent_alert: "aviso sostenido",
   };

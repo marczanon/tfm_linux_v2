@@ -67,6 +67,8 @@ def create_initial_cwru_state(
             target_sample_rate_hz=12000,
             main_channel="DE_time",
             label_mode="binary_anomaly",
+            data_provenance="official",
+            provenance_detection_method="trusted_adapter",
         ),
         raw_path=raw_path,
         manifest_path=None,

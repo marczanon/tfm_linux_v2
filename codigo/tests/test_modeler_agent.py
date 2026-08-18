@@ -1,7 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from codigo.app.agents.modeler import (
     build_modeler_memory_query,
+    build_modeler_retry_memory_query,
     decide_modeling_action,
     decide_modeling_retry_action,
 )
@@ -12,7 +15,8 @@ from codigo.app.schemas.reasoning import (
     RetrievedMemoryContext,
     RetrievedMemoryItem,
 )
-from codigo.app.schemas.state import ProjectContext
+from codigo.app.schemas.state import DatasetProfileSummary, ProjectContext
+from codigo.tests.agent_hypothesis_fixtures import with_test_agent_hypothesis
 
 
 class FakeLLMClient:
@@ -24,7 +28,10 @@ class FakeLLMClient:
         self.calls += 1
         self.messages = messages
         self.json_schema = json_schema
-        return self.payload
+        if isinstance(self.payload, list):
+            index = min(self.calls - 1, len(self.payload) - 1)
+            return with_test_agent_hypothesis(self.payload[index])
+        return with_test_agent_hypothesis(self.payload)
 
 
 class ModelerAgentTests(unittest.TestCase):
@@ -51,6 +58,10 @@ class ModelerAgentTests(unittest.TestCase):
             decision.modeling_config.hyperparameters["threshold_quantile"],
             0.99,
         )
+        self.assertIsNotNone(decision.generation_trace)
+        self.assertEqual(decision.generation_trace.origin, "deterministic")
+        self.assertEqual(decision.hypothesis.kind, "model_performance")
+        self.assertTrue(decision.hypothesis.evidence_cutoff)
 
     def test_llm_modeling_decision_is_used_when_valid(self):
         state = validate_state(
@@ -114,6 +125,46 @@ class ModelerAgentTests(unittest.TestCase):
             "pca_reconstruction_error",
         )
         self.assertIn("ModelingDecision", str(client.json_schema))
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+
+    def test_llm_modeler_uses_server_owned_envelope_without_repair(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-modeler-envelope-test",
+                run_id="run-modeler-envelope-001",
+            )
+        )
+        payload = decide_modeling_action(state).model_dump(mode="json")
+        payload.update(
+            {
+                "agent_name": "evaluator",
+                "decision_id": "foreign-run:modeler:999",
+                "created_at": "not-a-server-timestamp",
+                "expected_model_path": "/tmp/llm-model.bin",
+                "protocol_trace": {"forged": True},
+                "rationale": "Keep the supported Isolation Forest hypothesis.",
+            }
+        )
+        payload["generation_trace"] = {"forged": True}
+        client = FakeLLMClient(payload)
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(decision.agent_name, "modeler")
+        self.assertEqual(
+            decision.decision_id,
+            "run-modeler-envelope-001:modeler:001",
+        )
+        self.assertEqual(
+            decision.expected_model_path,
+            "codigo/models/cwru_bearing/isolation_forest.joblib",
+        )
+        self.assertIsNone(decision.protocol_trace)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+        self.assertIn("server-owned", client.messages[1].content)
 
     def test_llm_modeler_can_select_pca_when_expected_path_matches(self):
         state = validate_state(
@@ -302,10 +353,189 @@ class ModelerAgentTests(unittest.TestCase):
 
         self.assertEqual(query.target_agent, "modeler")
         self.assertEqual(query.dataset, "nasa_ims_bearing")
+        self.assertEqual(query.data_provenance, "synthetic")
+        self.assertEqual(
+            query.decision_context["supervision_profile"],
+            "run_to_failure_degradation",
+        )
+        self.assertEqual(query.decision_context["label_source"], "temporal_proxy")
+        self.assertEqual(
+            query.decision_context["label_granularity"],
+            "proxy_temporal",
+        )
+        self.assertEqual(query.decision_context["target_sample_rate_hz"], 20000)
+        self.assertEqual(query.decision_context["transfer_scope"], "same_dataset")
         self.assertEqual(query.top_k, 4)
         self.assertEqual(query.min_similarity, 0.2)
         self.assertIn("run_to_failure_degradation", query.query_text)
         self.assertIn("lead time", query.query_text)
+
+    def test_modeler_retry_memory_query_preserves_run_provenance(self):
+        state = _temporal_state("run-modeler-retry-memory-query-001")
+
+        query = build_modeler_retry_memory_query(
+            state,
+            failure_analysis={"failure_modes": ["late_detection"]},
+            source_run_id="source-run",
+            attempt_number=1,
+            max_attempts=2,
+        )
+
+        self.assertEqual(query.data_provenance, "synthetic")
+        self.assertEqual(query.decision_context["data_provenance"], "synthetic")
+        self.assertIn("Data provenance: synthetic", query.query_text)
+
+    def test_official_online_blind_query_hides_monitoring_and_retrospective_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            features_path = Path(tmp) / "features.csv"
+            features_path.write_text(
+                "\n".join(
+                    [
+                        (
+                            "window_id,run_id,split,label,target,fault_type,"
+                            "relative_life,time_to_failure_seconds,"
+                            "time_since_start_seconds,rms"
+                        ),
+                        "train-1,set_2,train,normal,0,,0.01,9999,0,0.10",
+                        "cal-1,set_2,validation,unknown,0,,0.21,8888,600,0.12",
+                        (
+                            "monitor-secret,set_2,test,degradation,1,"
+                            "SECRET_FAILURE_MODE,0.99,SECRET_TTF,1200,9.99"
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            state = _official_online_blind_state(
+                "run-modeler-online-blind-query-001",
+                features_path=features_path,
+            )
+
+            query = build_modeler_memory_query(state)
+
+        self.assertIn('"evidence_view": "online_blind"', query.query_text)
+        self.assertIn('"held_out_monitoring_present": true', query.query_text)
+        self.assertNotIn("monitor-secret", query.query_text)
+        self.assertNotIn("SECRET_FAILURE_MODE", query.query_text)
+        self.assertNotIn("SECRET_TTF", query.query_text)
+        self.assertNotIn("relative_life", query.query_text)
+        self.assertNotIn("time_to_failure_seconds", query.query_text)
+        self.assertNotIn('"target"', query.query_text)
+        self.assertNotIn('"label_counts"', query.query_text)
+        self.assertNotIn("lead time", query.query_text)
+
+    def test_official_online_blind_decision_uses_only_causal_targets(self):
+        state = _official_online_blind_state(
+            "run-modeler-online-blind-decision-001",
+        )
+
+        decision = decide_modeling_action(state)
+
+        self.assertEqual(
+            set(decision.decision_strategy.optimization_targets),
+            {
+                "calibration_false_alarm_rate",
+                "monitoring_alert_persistence",
+                "score_trend_stability",
+                "causal_leakage_prevention",
+            },
+        )
+        self.assertEqual(decision.decision_strategy.tool_names, [])
+        strategy_text = str(decision.decision_strategy.model_dump(mode="json")).lower()
+        self.assertNotIn("lead_time", strategy_text)
+        self.assertNotIn("time_to_failure", strategy_text)
+        self.assertIn(
+            "temporal:monitoring_held_out",
+            decision.decision_strategy.evidence_refs,
+        )
+        self.assertNotIn(
+            "autoencoder_dense",
+            {
+                candidate.modeling_config.model_name
+                for candidate in decision.comparison_candidates
+            },
+        )
+
+    def test_official_online_blind_llm_template_passes_guardrails(self):
+        state = _official_online_blind_state(
+            "run-modeler-online-blind-valid-001",
+        )
+        payload = decide_modeling_action(state).model_dump(mode="json")
+        client = FakeLLMClient(payload)
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 1)
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+        self.assertIn(
+            "policy:nasa_ims_run_to_failure_v2",
+            decision.decision_strategy.evidence_refs,
+        )
+
+    def test_official_online_blind_rejects_extra_retrospective_evidence_ref(self):
+        state = _official_online_blind_state(
+            "run-modeler-online-blind-retrospective-ref-001",
+        )
+        payload = decide_modeling_action(state).model_dump(mode="json")
+        payload["decision_strategy"]["evidence_refs"].append("metric:failure_time")
+        client = FakeLLMClient(payload)
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(decision.generation_trace.origin, "guardrail_fallback")
+        self.assertEqual(decision.generation_trace.attempt_index, 3)
+        self.assertIn("retrospective evidence", decision.generation_trace.fallback_cause)
+        repair_prompt = client.messages[-1].content
+        self.assertIn("decision online_blind", repair_prompt)
+        self.assertIn("No menciones resultados de fallo", repair_prompt)
+
+    def test_official_online_blind_prompt_hides_dataset_profile_future_metadata(self):
+        state = _official_online_blind_state(
+            "run-modeler-online-blind-prompt-001",
+        )
+        memory_context = _memory_context_for_initial_modeler(state.run_id)
+        payload = decide_modeling_action(state).model_dump(mode="json")
+        client = FakeLLMClient(payload)
+
+        decide_modeling_action(
+            state,
+            memory_context=memory_context,
+            llm_client=client,
+            use_llm=True,
+        )
+        prompt = "\n".join(message.content for message in client.messages)
+
+        self.assertIn('"evidence_view": "online_blind"', prompt)
+        self.assertIn("online_blind_causal_projection_v1", prompt)
+        self.assertIn("Separar picos aislados de alertas sostenidas", prompt)
+        self.assertNotIn("SECRET_FINAL_EVENT", prompt)
+        self.assertNotIn("SECRET_FAILURE_MODE", prompt)
+        self.assertNotIn("A single critical window", prompt)
+        self.assertNotIn("3600.0", prompt)
+        self.assertNotIn('"n_files": 984', prompt)
+        self.assertNotIn('"label_counts"', prompt)
+        self.assertNotIn('"tool_name": "degradation_metrics_lookup"', prompt)
+        self.assertNotIn('"tool_name": "temporal_health_lookup"', prompt)
+
+    def test_official_online_blind_blocks_retrospective_retry_query(self):
+        state = _official_online_blind_state(
+            "run-modeler-online-blind-retry-001",
+        )
+
+        with self.assertRaisesRegex(ValueError, "monitoring evidence is held out"):
+            build_modeler_retry_memory_query(
+                state,
+                failure_analysis={
+                    "failure_mode": "SECRET_FAILURE_MODE",
+                    "mean_lead_time_to_failure": 3600.0,
+                },
+                source_run_id="source-run",
+                attempt_number=1,
+                max_attempts=2,
+            )
 
     def test_llm_initial_modeler_can_use_retrieved_memory(self):
         state = _temporal_state("run-modeler-memory-001")
@@ -423,6 +653,8 @@ class ModelerAgentTests(unittest.TestCase):
         self.assertEqual(decision.memory_record_ids, [memory_id])
         self.assertIn("Memoria recuperada para el modelador", prompt)
         self.assertIn(memory_id, prompt)
+        self.assertIn('"data_provenance": "unknown"', prompt)
+        self.assertIn('"provenance_caution": true', prompt)
 
     def test_llm_temporal_modeler_accepts_agentic_strategy_with_tools(self):
         state = _temporal_state("run-modeler-nasa-temporal-llm-001")
@@ -695,7 +927,7 @@ class ModelerAgentTests(unittest.TestCase):
         decision = decide_modeling_action(state, llm_client=client, use_llm=True)
 
         self.assertEqual(decision.modeling_config.model_name, "pca_reconstruction_error")
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("Guardrail correction", decision.rationale)
 
     def test_llm_temporal_modeler_receives_tool_catalog_in_prompt(self):
         state = _temporal_state("run-modeler-nasa-temporal-prompt-001")
@@ -774,9 +1006,9 @@ class ModelerAgentTests(unittest.TestCase):
 
         decision = decide_modeling_action(state, llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertEqual(decision.modeling_config.model_name, "pca_reconstruction_error")
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("Guardrail correction", decision.rationale)
 
     def test_invalid_llm_modeling_decision_falls_back(self):
         state = validate_state(
@@ -804,10 +1036,55 @@ class ModelerAgentTests(unittest.TestCase):
 
         decision = decide_modeling_action(state, llm_client=client, use_llm=True)
 
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertEqual(decision.modeling_config.model_name, "isolation_forest")
-        self.assertLessEqual(decision.confidence, 0.7)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.82)
+        self.assertIn("Guardrail correction", decision.rationale)
+        trace = decision.generation_trace
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.origin, "guardrail_fallback")
+        self.assertEqual(trace.attempt_index, 3)
+        self.assertEqual(
+            trace.fallback_from_attempt_id,
+            "run-modeler-003:modeler:001:attempt:002",
+        )
+
+    def test_invalid_llm_modeling_decision_is_repaired_before_fallback(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-modeler-repair-test",
+                run_id="run-modeler-repair-001",
+            )
+        )
+        invalid_payload = {
+            "agent_name": "modeler",
+            "decision_id": "run-modeler-repair-001:modeler:001",
+            "rationale": "Select an unsupported model.",
+            "confidence": 0.99,
+            "modeling_config": {
+                "model_name": "local_outlier_factor",
+                "random_state": 42,
+                "hyperparameters": {},
+            },
+            "train_split": "train",
+            "validation_split": "validation",
+            "expected_model_path": (
+                "codigo/models/cwru_bearing/isolation_forest.joblib"
+            ),
+        }
+        repaired_payload = decide_modeling_action(state).model_dump(mode="json")
+        client = FakeLLMClient([invalid_payload, repaired_payload])
+
+        decision = decide_modeling_action(state, llm_client=client, use_llm=True)
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(decision.modeling_config.model_name, "isolation_forest")
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 2)
+        self.assertEqual(decision.generation_trace.validation_status, "repaired")
+        repair_prompt = client.messages[-1].content
+        self.assertIn("model_name", repair_prompt)
+        self.assertIn("Declaracion de memoria segura", repair_prompt)
 
     def test_llm_retry_decision_can_change_threshold_after_failure(self):
         state = validate_state(
@@ -840,6 +1117,16 @@ class ModelerAgentTests(unittest.TestCase):
                 "source_run_id": "failed-run",
                 "attempt_number": 1,
                 "max_attempts": 2,
+                "decision_strategy": {
+                    "strategy_type": (
+                        "threshold_calibration_with_alternative_comparison"
+                    ),
+                    "hypothesis": (
+                        "Compare a bounded threshold adjustment with a family change."
+                    ),
+                    "evidence_refs": ["failure_analysis"],
+                    "risk_notes": ["Do not optimize recall in isolation."],
+                },
                 "should_retry": True,
                 "learning_summary": (
                     "The failed run missed too many anomalies; lowering the "
@@ -861,6 +1148,7 @@ class ModelerAgentTests(unittest.TestCase):
                 "expected_effect": "Increase recall with possible FPR cost.",
                 "stop_reason": None,
                 "evidence_used": ["false_negative_summary", "threshold_convention"],
+                "memory_record_uses_details": [],
             }
         )
 
@@ -880,6 +1168,65 @@ class ModelerAgentTests(unittest.TestCase):
             0.95,
         )
         self.assertIn("ModelingRetryDecision", str(client.json_schema))
+        self.assertEqual(
+            decision.decision_strategy.strategy_type,
+            "threshold_calibration",
+        )
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 1)
+
+    def test_llm_modeler_retry_uses_server_owned_envelope_without_repair(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-modeler-retry-envelope-test",
+                run_id="run-modeler-retry-envelope-001",
+            )
+        )
+        failure_analysis = {"failure_modes": ["insufficient_evidence"]}
+        payload = decide_modeling_retry_action(
+            state,
+            failure_analysis=failure_analysis,
+            source_run_id="failed-run",
+            attempt_number=1,
+            max_attempts=2,
+        ).model_dump(mode="json")
+        payload.update(
+            {
+                "agent_name": "cleaner",
+                "decision_id": "foreign-run:modeler_retry:999",
+                "created_at": "not-a-server-timestamp",
+                "source_run_id": "llm-invented-source",
+                "attempt_number": 99,
+                "max_attempts": 100,
+                "rationale": "Stop because the evidence does not justify a retry.",
+            }
+        )
+        payload["generation_trace"] = {"forged": True}
+        client = FakeLLMClient(payload)
+
+        decision = decide_modeling_retry_action(
+            state,
+            failure_analysis=failure_analysis,
+            source_run_id="failed-run",
+            attempt_number=1,
+            max_attempts=2,
+            llm_client=client,
+            use_llm=True,
+        )
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(decision.agent_name, "modeler")
+        self.assertEqual(
+            decision.decision_id,
+            "run-modeler-retry-envelope-001:modeler_retry:001",
+        )
+        self.assertEqual(decision.source_run_id, "failed-run")
+        self.assertEqual(decision.attempt_number, 1)
+        self.assertEqual(decision.max_attempts, 2)
+        self.assertFalse(decision.should_retry)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+        self.assertIn("server-owned", client.messages[1].content)
 
     def test_retry_prompt_can_include_supervised_memory_context(self):
         state = validate_state(
@@ -1145,7 +1492,7 @@ class ModelerAgentTests(unittest.TestCase):
         )
 
         self.assertFalse(decision.should_retry)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertIn("Guardrail correction", decision.rationale)
 
     def test_retry_decision_rejects_noop_config_and_falls_back(self):
         state = validate_state(
@@ -1188,8 +1535,71 @@ class ModelerAgentTests(unittest.TestCase):
         )
 
         self.assertFalse(decision.should_retry)
-        self.assertLessEqual(decision.confidence, 0.7)
-        self.assertIn("Fallback after LLM failure", decision.rationale)
+        self.assertLessEqual(decision.confidence, 0.82)
+        self.assertIn("Guardrail correction", decision.rationale)
+        self.assertEqual(decision.generation_trace.origin, "guardrail_fallback")
+        self.assertEqual(decision.generation_trace.attempt_index, 3)
+        self.assertEqual(
+            decision.generation_trace.fallback_from_attempt_id,
+            "run-modeler-retry-002:modeler_retry:001:attempt:002",
+        )
+
+    def test_invalid_llm_retry_decision_is_repaired_before_fallback(self):
+        state = validate_state(
+            create_initial_cwru_state(
+                thread_id="cwru-modeler-retry-repair-test",
+                run_id="run-modeler-retry-repair-001",
+            )
+        )
+        state_payload = state.to_langgraph_state()
+        state_payload["modeling_config"] = {
+            "model_name": "isolation_forest",
+            "random_state": 42,
+            "hyperparameters": {"n_estimators": 200, "threshold_quantile": 0.99},
+        }
+        state = validate_state(state_payload)
+        invalid_payload = {
+            "agent_name": "modeler",
+            "decision_id": "run-modeler-retry-repair-001:modeler_retry:001",
+            "rationale": "Repeat the same configuration.",
+            "confidence": 0.86,
+            "source_run_id": "failed-run",
+            "attempt_number": 1,
+            "max_attempts": 2,
+            "should_retry": True,
+            "learning_summary": "No useful change.",
+            "retry_config": state_payload["modeling_config"],
+            "expected_effect": "None.",
+        }
+        repaired_payload = decide_modeling_retry_action(
+            state,
+            failure_analysis={"failure_modes": ["low_recall_many_missed_anomalies"]},
+            source_run_id="failed-run",
+            attempt_number=1,
+            max_attempts=2,
+            use_llm=False,
+        ).model_dump(mode="json")
+        repaired_payload["memory_record_uses_details"] = []
+        client = FakeLLMClient([invalid_payload, repaired_payload])
+
+        decision = decide_modeling_retry_action(
+            state,
+            failure_analysis={"failure_modes": ["low_recall_many_missed_anomalies"]},
+            source_run_id="failed-run",
+            attempt_number=1,
+            max_attempts=2,
+            llm_client=client,
+            use_llm=True,
+        )
+
+        self.assertEqual(client.calls, 2)
+        self.assertFalse(decision.should_retry)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 2)
+        self.assertEqual(decision.generation_trace.validation_status, "repaired")
+        repair_prompt = client.messages[-1].content
+        self.assertIn("retry_config must differ", repair_prompt)
+        self.assertIn("Declaracion de memoria segura", repair_prompt)
 
 
 def _memory_context_for_modeler_retry(run_id: str) -> RetrievedMemoryContext:
@@ -1364,7 +1774,55 @@ def _temporal_state(run_id: str):
         supervision_profile="run_to_failure_degradation",
         label_granularity="proxy_temporal",
         label_source="temporal_proxy",
+        data_provenance="synthetic",
     ).model_dump(mode="json")
+    return validate_state(state_dict)
+
+
+def _official_online_blind_state(
+    run_id: str,
+    *,
+    features_path: Path | None = None,
+):
+    state_dict = create_initial_cwru_state(
+        thread_id="nasa-modeler-online-blind-test",
+        run_id=run_id,
+    )
+    state_dict["project_context"] = ProjectContext(
+        dataset="nasa_ims_bearing",
+        machine_type="rotating_machinery",
+        signal_type="vibration",
+        objective="run_to_failure_degradation",
+        target_sample_rate_hz=20000,
+        main_channel="channel_1",
+        label_mode="degradation",
+        supervision_profile="run_to_failure_degradation",
+        label_granularity="event",
+        label_source="none",
+        data_provenance="official",
+        provenance_detection_method="official_dataset_provenance",
+    ).model_dump(mode="json")
+    state_dict["dataset_profile"] = DatasetProfileSummary(
+        dataset_name="NASA IMS Set 2",
+        n_files=984,
+        n_samples_total=20_152_320,
+        channels=["channel_1", "channel_2", "channel_3", "channel_4"],
+        sample_rates_hz=[20000],
+        label_counts={"SECRET_FAILURE_MODE": 984},
+        summary={
+            "failure_mode": "SECRET_FAILURE_MODE",
+            "final_event": "SECRET_FINAL_EVENT",
+        },
+    ).model_dump(mode="json")
+    if features_path is not None:
+        state_dict["artifacts"].append(
+            {
+                "name": "windows_features",
+                "artifact_type": "features",
+                "path": features_path.as_posix(),
+                "producer": "structuring_executor",
+            }
+        )
     return validate_state(state_dict)
 
 

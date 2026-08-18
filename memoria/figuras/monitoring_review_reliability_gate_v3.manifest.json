@@ -1,0 +1,326 @@
+{
+  "benchmark_scope": "closed_nasa_p3_monitoring_review",
+  "figure_id": "monitoring_review_reliability_gate_v3",
+  "inputs": [
+    {
+      "input_role": "published_current",
+      "media_type": "application/json",
+      "path": "/home/mzp2003/tfm_linux_v2/codigo/reports/validation/monitoring_review_reliability/current.json",
+      "sha256": "0a365df5474473f36c3de0d2b298caaeedbfbfba217138e0a361997d13a596d7",
+      "size_bytes": 1248
+    },
+    {
+      "input_role": "published_result",
+      "media_type": "application/json",
+      "path": "/home/mzp2003/tfm_linux_v2/codigo/reports/validation/monitoring_review_reliability/nasa-p3-monitoring-review-qwen35-v3/result.json",
+      "sha256": "5d0bafd20fbcb584a92b5e16597b75d47771b6a2eed3b29c31ecf1d2dce81b8c",
+      "size_bytes": 286410
+    }
+  ],
+  "interpretation_limit": "Gate cerrado sobre tres replays NASA P3: evalúa trazabilidad contractual, no la verdad física de las hipótesis ni un rendimiento industrial universal.",
+  "metrics": {
+    "blockers": [
+      "resolved_child_run_count:11!=12",
+      "fallback_count:2",
+      "llm_origin_rate:0.976190<1.000000"
+    ],
+    "child_run_count": 12,
+    "claims_scoped_count": 84,
+    "claims_scoped_rate": 1.0,
+    "coverages": [
+      {
+        "coverage_id": "hypothesis_structure",
+        "label": "Hipótesis estructurada",
+        "observation_count": 84,
+        "passed_count": 84,
+        "rate": 1.0
+      },
+      {
+        "coverage_id": "causal_grounding",
+        "label": "Evidencia causal",
+        "observation_count": 84,
+        "passed_count": 84,
+        "rate": 1.0
+      },
+      {
+        "coverage_id": "trace_binding",
+        "label": "Trigger → decisión → resultado",
+        "observation_count": 84,
+        "passed_count": 84,
+        "rate": 1.0
+      }
+    ],
+    "matrix": [
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 353,
+        "context_id": "state_transition_353",
+        "context_ordinal": 1,
+        "cutoff_cursor": 353,
+        "error_count": 0,
+        "fallback_count": 2,
+        "first_pass_count": 5,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 1,
+        "trigger_type": "state_transition"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 353,
+        "context_id": "state_transition_353",
+        "context_ordinal": 1,
+        "cutoff_cursor": 353,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 2,
+        "trigger_type": "state_transition"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 353,
+        "context_id": "state_transition_353",
+        "context_ordinal": 1,
+        "cutoff_cursor": 353,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 3,
+        "trigger_type": "state_transition"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 496,
+        "context_id": "persistent_alert_498_from_496",
+        "context_ordinal": 2,
+        "cutoff_cursor": 498,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 1,
+        "trigger_type": "persistent_alert"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 496,
+        "context_id": "persistent_alert_498_from_496",
+        "context_ordinal": 2,
+        "cutoff_cursor": 498,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 2,
+        "trigger_type": "persistent_alert"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 496,
+        "context_id": "persistent_alert_498_from_496",
+        "context_ordinal": 2,
+        "cutoff_cursor": 498,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 3,
+        "trigger_type": "persistent_alert"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 499,
+        "context_id": "state_transition_499",
+        "context_ordinal": 3,
+        "cutoff_cursor": 499,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 1,
+        "trigger_type": "state_transition"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 499,
+        "context_id": "state_transition_499",
+        "context_ordinal": 3,
+        "cutoff_cursor": 499,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 2,
+        "trigger_type": "state_transition"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 499,
+        "context_id": "state_transition_499",
+        "context_ordinal": 3,
+        "cutoff_cursor": 499,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 3,
+        "trigger_type": "state_transition"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 688,
+        "context_id": "session_close_688",
+        "context_ordinal": 4,
+        "cutoff_cursor": 688,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 1,
+        "trigger_type": "session_close"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 688,
+        "context_id": "session_close_688",
+        "context_ordinal": 4,
+        "cutoff_cursor": 688,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 2,
+        "trigger_type": "session_close"
+      },
+      {
+        "claims_scope_failure_count": 0,
+        "condition_start_cursor": 688,
+        "context_id": "session_close_688",
+        "context_ordinal": 4,
+        "cutoff_cursor": 688,
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 7,
+        "non_agentic_count": 0,
+        "observation_count": 7,
+        "repaired_count": 0,
+        "repetition": 3,
+        "trigger_type": "session_close"
+      }
+    ],
+    "model": "qwen3.5:4b",
+    "observation_count": 84,
+    "plan_id": "nasa-p3-monitoring-review-qwen35-v3",
+    "roles": [
+      {
+        "agent_name": "supervisor",
+        "error_count": 0,
+        "fallback_count": 1,
+        "first_pass_count": 11,
+        "non_agentic_count": 0,
+        "observation_count": 12,
+        "repaired_count": 0
+      },
+      {
+        "agent_name": "cleaner",
+        "error_count": 0,
+        "fallback_count": 1,
+        "first_pass_count": 11,
+        "non_agentic_count": 0,
+        "observation_count": 12,
+        "repaired_count": 0
+      },
+      {
+        "agent_name": "structurer",
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 12,
+        "non_agentic_count": 0,
+        "observation_count": 12,
+        "repaired_count": 0
+      },
+      {
+        "agent_name": "modeler",
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 12,
+        "non_agentic_count": 0,
+        "observation_count": 12,
+        "repaired_count": 0
+      },
+      {
+        "agent_name": "evaluator",
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 12,
+        "non_agentic_count": 0,
+        "observation_count": 12,
+        "repaired_count": 0
+      },
+      {
+        "agent_name": "report_writer",
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 12,
+        "non_agentic_count": 0,
+        "observation_count": 12,
+        "repaired_count": 0
+      },
+      {
+        "agent_name": "report_verifier",
+        "error_count": 0,
+        "fallback_count": 0,
+        "first_pass_count": 12,
+        "non_agentic_count": 0,
+        "observation_count": 12,
+        "repaired_count": 0
+      }
+    ],
+    "verdict": "blocked"
+  },
+  "outputs": [
+    {
+      "media_type": "application/pdf",
+      "output_format": "pdf",
+      "output_role": "vector_pdf",
+      "path": "codigo/reports/validation_figures/monitoring_review_reliability_gate_v3.pdf",
+      "sha256": "50700afb4360c8e5b5876580b0d2db2942f9d087b2bec490c71b188e3d6ba2f6",
+      "size_bytes": 31522
+    },
+    {
+      "media_type": "image/png",
+      "output_format": "png",
+      "output_role": "web_png",
+      "path": "codigo/reports/validation_figures/monitoring_review_reliability_gate_v3.png",
+      "sha256": "c3945320802808d01179d8c8e6adec8ad4c2a131a850babeeb9caf5aec779060",
+      "size_bytes": 226709
+    }
+  ],
+  "publication_root": "/home/mzp2003/tfm_linux_v2/codigo/reports/validation/monitoring_review_reliability",
+  "renderer_id": "monitoring_review_reliability_gate_v1",
+  "schema_version": "tfm.monitoring_review_reliability_figure_manifest.v1"
+}

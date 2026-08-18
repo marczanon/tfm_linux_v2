@@ -26,6 +26,9 @@ MetricFamily = Literal["binary_classification", "run_to_failure_degradation"]
 
 
 DEGRADATION_METRIC_NAMES = [
+    "degradation_persistent_alert_run_rate",
+    "degradation_mean_first_persistent_alert_time_to_trajectory_end",
+    "degradation_mean_pre_monitoring_alert_rate",
     "degradation_detected_before_failure_rate",
     "degradation_confirmed_degradation_before_failure_rate",
     "degradation_mean_lead_time_to_failure",
@@ -71,6 +74,9 @@ class RunComparisonRow(StrictBaseModel):
     degradation_alert_policy_id: str | None = None
     degradation_health_indicator_policy_id: str | None = None
     degradation_persistent_alert_min_windows: int | None = None
+    degradation_persistent_alert_run_rate: float | None = None
+    degradation_mean_first_persistent_alert_time_to_trajectory_end: float | None = None
+    degradation_mean_pre_monitoring_alert_rate: float | None = None
     degradation_detected_before_failure_rate: float | None = None
     degradation_confirmed_degradation_before_failure_rate: float | None = None
     degradation_mean_lead_time_to_failure: float | None = None
@@ -368,6 +374,28 @@ def _comparison_row(entry: RunIndexEntry, snapshot: RunSnapshot) -> RunCompariso
                 degradation.get("persistent_alert_min_windows"),
             )
         ),
+        degradation_persistent_alert_run_rate=_optional_float(
+            extra.get(
+                "degradation_persistent_alert_run_rate",
+                degradation.get("persistent_alert_run_rate"),
+            )
+        ),
+        degradation_mean_first_persistent_alert_time_to_trajectory_end=(
+            _optional_float(
+                extra.get(
+                    "degradation_mean_first_persistent_alert_time_to_trajectory_end",
+                    degradation.get(
+                        "mean_first_persistent_alert_time_to_trajectory_end"
+                    ),
+                )
+            )
+        ),
+        degradation_mean_pre_monitoring_alert_rate=_optional_float(
+            extra.get(
+                "degradation_mean_pre_monitoring_alert_rate",
+                degradation.get("mean_pre_monitoring_alert_rate"),
+            )
+        ),
         degradation_detected_before_failure_rate=_optional_float(
             extra.get(
                 "degradation_detected_before_failure_rate",
@@ -534,6 +562,9 @@ def _degradation_metric_comparisons(
     if not any(row.degradation_available is True for row in rows):
         return []
     higher_is_better = {
+        "degradation_persistent_alert_run_rate": True,
+        "degradation_mean_first_persistent_alert_time_to_trajectory_end": True,
+        "degradation_mean_pre_monitoring_alert_rate": False,
         "degradation_detected_before_failure_rate": True,
         "degradation_confirmed_degradation_before_failure_rate": True,
         "degradation_mean_lead_time_to_failure": True,

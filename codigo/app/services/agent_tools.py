@@ -13,6 +13,11 @@ from codigo.app.schemas.reasoning import (
     AgentToolSpec,
 )
 from codigo.app.schemas.state import TFMStateModel
+from codigo.app.services.online_blind import (
+    assert_online_blind_payload,
+    is_online_blind_decision_agent,
+    sanitize_online_blind_payload,
+)
 from codigo.app.services.run_visualization import build_temporal_series_from_predictions
 from codigo.app.services.temporal_model_readiness import (
     assess_temporal_model_readiness,
@@ -50,6 +55,12 @@ DEFAULT_EVIDENCE_LOOKUP_SECTIONS = [
 DEFAULT_THRESHOLD_QUANTILES = [0.90, 0.95, 0.975, 0.99, 1.0]
 DEFAULT_TEMPORAL_RUN_LIMIT = 5
 MAX_TEMPORAL_RUN_LIMIT = 20
+
+ONLINE_BLIND_EVIDENCE_LOOKUP_SECTIONS = (
+    "project_context",
+    "configs",
+    "policy",
+)
 
 DEGRADATION_METRIC_NAMES = [
     "degradation_available",
@@ -159,6 +170,9 @@ def run_agent_tool_request(
             request,
             "tool request run_id does not match current state",
         )
+    online_blind_block_reason = _online_blind_tool_block_reason(state, request)
+    if online_blind_block_reason is not None:
+        return _blocked_observation(request, online_blind_block_reason)
     if request.tool_name == EVIDENCE_LOOKUP_TOOL:
         try:
             return _run_evidence_lookup(state, request)
@@ -198,6 +212,7 @@ def build_state_evidence_catalog(state: TFMStateModel) -> dict[str, Any]:
         f"supervision_profile:{state.project_context.supervision_profile}",
         f"label_source:{state.project_context.label_source}",
         f"label_granularity:{state.project_context.label_granularity}",
+        f"data_provenance:{state.project_context.data_provenance}",
     ]
     details: dict[str, Any] = {
         "run_id": state.run_id,
@@ -410,7 +425,7 @@ def _run_evidence_lookup(
     state: TFMStateModel,
     request: AgentToolRequest,
 ) -> AgentToolObservation:
-    include = _requested_sections(request.arguments.get("include"))
+    include = _requested_sections_for_request(state, request)
     artifact_limit = _artifact_limit(request.arguments.get("artifact_limit"))
     catalog = build_state_evidence_catalog(state)
     payload = _selected_evidence_payload(
@@ -419,6 +434,21 @@ def _run_evidence_lookup(
         artifact_limit=artifact_limit,
     )
     evidence_refs = _selected_evidence_refs(catalog, include=include)
+    if is_online_blind_decision_agent(state, request.agent_name):
+        payload = _online_blind_evidence_payload(payload)
+        evidence_refs = [
+            ref
+            for ref in evidence_refs
+            if not any(
+                token in ref.lower()
+                for token in (
+                    "failure",
+                    "lead_time",
+                    "relative_life",
+                    "time_to_failure",
+                )
+            )
+        ]
     return AgentToolObservation(
         observation_id=f"{request.request_id}:observation:001",
         request_id=request.request_id,
@@ -668,6 +698,7 @@ def _selected_evidence_refs(
                 f"supervision_profile:{catalog['project_context'].get('supervision_profile')}",
                 f"label_source:{catalog['project_context'].get('label_source')}",
                 f"label_granularity:{catalog['project_context'].get('label_granularity')}",
+                f"data_provenance:{catalog['project_context'].get('data_provenance')}",
             ]
         )
     if "configs" in include:
@@ -747,6 +778,83 @@ def _selected_evidence_refs(
             if ref.startswith("policy:")
         )
     return sorted(refs)
+
+
+def _online_blind_tool_block_reason(
+    state: TFMStateModel,
+    request: AgentToolRequest,
+) -> str | None:
+    if not is_online_blind_decision_agent(state, request.agent_name):
+        return None
+    if request.tool_name == EVIDENCE_LOOKUP_TOOL:
+        raw_sections = request.arguments.get("include")
+        if raw_sections is None:
+            return None
+        try:
+            sections = _requested_sections(raw_sections)
+        except ValueError:
+            return None
+        forbidden = sorted(
+            set(sections) - set(ONLINE_BLIND_EVIDENCE_LOOKUP_SECTIONS)
+        )
+        if not forbidden:
+            return None
+        return (
+            "online_blind decision agents cannot inspect retrospective evidence "
+            "sections: "
+            + ", ".join(forbidden)
+        )
+    return (
+        f"{request.tool_name} is retrospective or reads held-out monitoring "
+        "evidence and is unavailable to online_blind decision agents"
+    )
+
+
+def _requested_sections_for_request(
+    state: TFMStateModel,
+    request: AgentToolRequest,
+) -> list[str]:
+    raw_sections = request.arguments.get("include")
+    if (
+        raw_sections is None
+        and is_online_blind_decision_agent(state, request.agent_name)
+    ):
+        return list(ONLINE_BLIND_EVIDENCE_LOOKUP_SECTIONS)
+    return _requested_sections(raw_sections)
+
+
+def _online_blind_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    project_context = payload.get("project_context")
+    if isinstance(project_context, dict):
+        allowed_context_fields = {
+            "dataset",
+            "machine_type",
+            "signal_type",
+            "objective",
+            "target_sample_rate_hz",
+            "main_channel",
+            "label_mode",
+            "supervision_profile",
+            "label_granularity",
+            "label_source",
+            "data_provenance",
+        }
+        payload["project_context"] = {
+            key: value
+            for key, value in project_context.items()
+            if key in allowed_context_fields
+        }
+    dataset_policy = payload.get("dataset_policy")
+    if isinstance(dataset_policy, dict):
+        payload["dataset_policy"] = {
+            key: value
+            for key, value in dataset_policy.items()
+            if key in {"dataset", "policy_ref", "summary"}
+        }
+    payload["evidence_view"] = "online_blind"
+    sanitized = sanitize_online_blind_payload(payload)
+    assert_online_blind_payload(sanitized)
+    return sanitized
 
 
 def _requested_sections(raw: object) -> list[str]:

@@ -9,6 +9,7 @@ from codigo.app.schemas.state import (
     ModelingConfig,
     StructuringConfig,
 )
+from codigo.tests.agent_hypothesis_fixtures import with_test_agent_hypothesis
 
 
 class FakeLLMClient:
@@ -22,8 +23,8 @@ class FakeLLMClient:
         self.json_schema = json_schema
         if isinstance(self.payload, list):
             index = min(self.calls - 1, len(self.payload) - 1)
-            return self.payload[index]
-        return self.payload
+            return with_test_agent_hypothesis(self.payload[index])
+        return with_test_agent_hypothesis(self.payload)
 
 
 class SupervisorAgentTests(unittest.TestCase):
@@ -43,6 +44,11 @@ class SupervisorAgentTests(unittest.TestCase):
         self.assertEqual(decision.next_node, "manifest_executor")
         self.assertFalse(decision.requires_human_review)
         self.assertIsNone(decision.stop_reason)
+        self.assertEqual(decision.generation_trace.origin, "deterministic")
+        self.assertEqual(decision.generation_trace.attempt_index, 1)
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+        self.assertEqual(decision.hypothesis.kind, "routing_readiness")
+        self.assertTrue(decision.hypothesis.falsification_criterion)
 
     def test_profiling_stage_requires_manifest_path(self):
         state_dict = create_initial_cwru_state(
@@ -334,6 +340,7 @@ class SupervisorAgentTests(unittest.TestCase):
                 "stop_reason": None,
                 "rationale": "The raw path is present, so the manifest can be generated.",
                 "confidence": 0.92,
+                "generation_trace": {"forged": True},
             }
         )
 
@@ -343,6 +350,13 @@ class SupervisorAgentTests(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.92)
         self.assertIn("raw path", decision.rationale)
         self.assertIn("SupervisorDecision", str(client.json_schema))
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 1)
+        self.assertEqual(decision.generation_trace.validation_status, "validated")
+        prompt = client.messages[1].content
+        self.assertIn('"next_stage": "dataset_manifest"', prompt)
+        self.assertIn('"next_node": "manifest_executor"', prompt)
+        self.assertNotIn("dataset_manifest | profiling", prompt)
 
     def test_invalid_llm_transition_falls_back_to_deterministic_policy(self):
         state = validate_state(
@@ -372,6 +386,13 @@ class SupervisorAgentTests(unittest.TestCase):
         self.assertEqual(decision.next_node, "manifest_executor")
         self.assertLessEqual(decision.confidence, 0.82)
         self.assertIn("Guardrail correction", decision.rationale)
+        self.assertEqual(decision.generation_trace.origin, "guardrail_fallback")
+        self.assertEqual(decision.generation_trace.attempt_index, 3)
+        self.assertEqual(
+            decision.generation_trace.fallback_from_attempt_id,
+            "run-supervisor-006:supervisor:001:attempt:002",
+        )
+        self.assertIn("ValueError", decision.generation_trace.fallback_cause)
 
     def test_invalid_llm_transition_can_be_repaired_before_fallback(self):
         state = validate_state(
@@ -415,6 +436,9 @@ class SupervisorAgentTests(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.87)
         self.assertNotIn("Fallback after LLM failure", decision.rationale)
         self.assertIn("Transicion obligatoria", client.messages[-1].content)
+        self.assertEqual(decision.generation_trace.origin, "llm")
+        self.assertEqual(decision.generation_trace.attempt_index, 2)
+        self.assertEqual(decision.generation_trace.validation_status, "repaired")
 
 
 if __name__ == "__main__":

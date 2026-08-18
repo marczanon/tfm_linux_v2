@@ -1,81 +1,353 @@
 \chapter{Estado del arte}
 
-\section{Mantenimiento predictivo y detección de anomalías}
+\section{Mantenimiento predictivo y escenarios \textit{run-to-failure}}
 
-Esta sección desarrollará el contexto de mantenimiento predictivo, monitorización
-de condición y detección de anomalías en maquinaria rotativa.
+La monitorización de condición persigue describir el estado de un activo a
+partir de observaciones obtenidas durante su funcionamiento. Se sitúa entre el
+mantenimiento preventivo, que programa intervenciones según tiempo o uso, y el
+mantenimiento predictivo, que intenta anticipar una pérdida de prestaciones a
+partir de la evolución observada. En este contexto, el término
+\textit{Prognostics and Health Management} (PHM) engloba la adquisición de
+señales, la detección de cambios, la interpretación del estado de salud y, cuando
+la evidencia lo permite, la estimación de su evolución futura
+~\cite{jardine2006_condition_based,lei2018_machinery_prognostics}.
 
-Aspectos a cubrir:
+Conviene distinguir cuatro tareas relacionadas. La \textbf{detección de
+anomalías} determina si una observación se aparta del comportamiento considerado
+normal. El \textbf{diagnóstico} intenta atribuir ese cambio a un modo de fallo.
+El \textbf{pronóstico} estima cómo evolucionará la degradación. Finalmente, la
+predicción de vida útil remanente trata de cuantificar el tiempo o uso hasta un
+criterio de fin de vida. Una puntuación de anomalía no resuelve por sí sola las
+tres tareas restantes: puede señalar un cambio sin identificar su causa ni
+proporcionar una estimación calibrada del tiempo hasta fallo.
 
-\begin{itemize}
-  \item diferencias entre mantenimiento correctivo, preventivo y predictivo;
-  \item papel de las señales de vibración en rodamientos y motores;
-  \item fallos comunes: pista interior, pista exterior, bola y desbalanceo;
-  \item diferencias entre detección de anomalías, diagnóstico y pronóstico.
-\end{itemize}
+Los experimentos \textit{run-to-failure} son especialmente útiles para estudiar
+esta diferencia. En ellos, un activo se observa repetidamente desde un estado
+inicial hasta el final registrado del ensayo. La unidad científica deja de ser
+una muestra aislada y pasa a ser una trayectoria ordenada. El interés no reside
+únicamente en separar observaciones normales y anómalas, sino también en saber
+cuándo aparece un cambio persistente, cuántas falsas alarmas se producen antes
+de él y con qué anticipación se detecta respecto al evento final.
 
-\section{Modelos de detección de anomalías}
+Esta estructura longitudinal impone cautelas metodológicas. Las observaciones
+próximas en el tiempo no son independientes; las ventanas extraídas de una misma
+adquisición comparten señal y condiciones de operación; y una partición aleatoria
+puede trasladar información futura al entrenamiento. Por ello, el orden temporal,
+la unidad de agregación y la separación entre ajuste, calibración y evaluación
+son componentes del problema, no meros detalles de implementación. La existencia
+de recursos específicos para evaluar sistemas pronósticos también refleja que
+las métricas de clasificación convencional no cubren por sí solas este escenario
+~\cite{saxena2008_prognostic_metrics,nasa_prognostics_metrics_library}.
 
-El MVP comparará primero modelos clásicos y reproducibles:
+\section{Señales de maquinaria rotativa e indicadores de salud}
 
-\begin{itemize}
-  \item Isolation Forest;
-  \item One-Class SVM;
-  \item Local Outlier Factor;
-  \item PCA con error de reconstrucción.
-\end{itemize}
+En rodamientos, motores y otros sistemas rotativos, la vibración ofrece una
+medida indirecta de impactos, resonancias, desbalanceo, desalineación y cambios
+en la transmisión mecánica. La señal cruda contiene información temporal y
+espectral, pero también ruido, transitorios y variaciones debidas al régimen de
+operación. El significado de una desviación depende, por tanto, del sensor, la
+frecuencia de muestreo, la carga, la velocidad y la posición del canal
+~\cite{qiu2006_bearing_prognostics,lei2018_machinery_prognostics}.
 
-Los autoencoders densos y modelos recurrentes se considerarán en fases
-posteriores, cuando el pipeline de tensores esté validado.
+El procesamiento suele dividir cada adquisición en ventanas y representar cada
+una mediante estadísticos o descriptores de frecuencia. Medidas como energía,
+valor cuadrático medio, curtosis, factor de cresta o contenido en bandas permiten
+reducir una señal extensa a variables comparables. Esta reducción facilita el
+uso de detectores tabulares, aunque puede ocultar patrones localizados. Los
+modelos que trabajan directamente con secuencias conservan más estructura, a
+cambio de requerir más datos, capacidad de cómputo y decisiones de diseño.
 
-En la extension run-to-failure, la lectura de estos modelos cambia. Un detector
-no se evalua solo por separar ventanas normales y anomalias, sino por producir
-una trayectoria de score que anticipe degradacion, mantenga falsas alarmas
-nominales controladas y permita construir un indicador de salud interpretable.
-Por ello, PCA con error de reconstruccion, Isolation Forest, One-Class SVM y
-autoencoders densos se tratan como familias comparables dentro de un mismo
-protocolo temporal, no como modelos aislados optimizados por F1.
+En un ensayo longitudinal es importante no confundir las ventanas internas con
+observaciones independientes del deterioro. Varias ventanas pertenecientes al
+mismo \textit{snapshot} describen una única captura temporal. Sus puntuaciones
+pueden resumirse mediante una medida central, percentiles y proporción de
+alertas, conservando así información sobre la distribución interna sin inflar
+artificialmente la duración de una racha.
 
-\section{Run-to-failure, indicadores de salud y modelos de reconstruccion}
+Un \textbf{indicador de salud} transforma la evidencia multivariable en una
+trayectoria interpretable. Un indicador útil debería permanecer estable durante
+el régimen nominal, reaccionar de forma consistente ante la degradación y evitar
+oscilaciones que generen alarmas espurias. Monotonicidad, fuerza de tendencia,
+robustez frente al ruido y diferencia entre los tramos inicial y final son
+propiedades complementarias; ninguna garantiza por separado que el indicador
+tenga valor pronóstico. Además, normalizar una curva conociendo su valor final
+puede ser legítimo para un análisis retrospectivo, pero no para una decisión en
+línea que solo debe utilizar información disponible hasta el instante actual.
 
-Los datasets run-to-failure representan una trayectoria historica de un activo
-hasta fallo. En este tipo de problema conviene distinguir cuatro conceptos:
-anomalia puntual, degradacion sostenida, indicador de salud y pronostico de
-vida util restante. Una alerta aislada puede deberse a ruido o transitorios; la
-degradacion defendible requiere persistencia temporal, tendencia del score y
-coherencia con el tramo nominal.
+La interpretación causal exige separar esas dos perspectivas. Una vista
+\textit{online} reproduce lo que habría conocido el sistema en cada instante. La
+vista retrospectiva incorpora el desenlace una vez cerrada la decisión y permite
+calcular anticipación u otras métricas referidas al final del ensayo. Mezclarlas
+favorece conclusiones optimistas y dificulta determinar qué información guio
+realmente al agente o al detector.
 
-Los Health Indicators son habituales en mantenimiento predictivo porque
-condensan la evolucion del activo en una curva de salud. En un sistema
-experimental local, este indicador debe declararse como evidencia auxiliar y no
-como prediccion industrial cerrada. Su calidad puede evaluarse mediante caida
-entre tramo inicial y final, monotonicidad, robustez frente al ruido, volatilidad
-nominal y fuerza de tendencia durante la degradacion.
+\section{Familias de detección de anomalías}
 
-Los autoencoders densos aportan una extension natural para este escenario,
-porque aprenden a reconstruir normalidad y convierten el error de
-reconstruccion en un score de anomalia. Sin embargo, su uso exige suficientes
-ventanas nominales de entrenamiento, control de fuga temporal, arquitectura
-cerrada, evaluacion comparable y guardarrailes que impidan presentar un modelo
-mas complejo como mejora automatica. En este TFM se incorporan como familia
-PyTorch reproducible sobre features tabulares, dejando los autoencoders
-recurrentes y el RUL completo como lineas futuras.
+Cuando las etiquetas de fallo son escasas o inexistentes, es habitual aprender
+una representación del comportamiento nominal y puntuar después su desviación.
+Las familias consideradas en este trabajo cubren supuestos diferentes y sirven
+como referencias comparables, no como una jerarquía universal de rendimiento.
 
-\section{Sistemas multiagente aplicados a pipelines de datos}
+\begin{table}[htbp]
+\centering
+\caption{Lectura comparada de familias de detección de anomalías.}\label{tab:familias_deteccion_estado_arte}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.19\textwidth}YY}
+\toprule
+Familia & Principio de puntuación & Cautela principal \\
+\midrule
+PCA por reconstrucción & Distancia entre una observación y su reconstrucción en
+un subespacio de menor dimensión & Puede representar mal relaciones no lineales
+y depende del escalado de las variables \\
+Isolation Forest & Facilidad con la que una observación queda aislada mediante
+particiones aleatorias & Su puntuación depende de la muestra de referencia y no
+explica por sí sola el origen físico de la desviación \\
+One-Class SVM & Separación del soporte nominal mediante una frontera en un
+espacio transformado & Es sensible al escalado y a hiperparámetros que controlan
+la forma de la frontera \\
+Local Outlier Factor & Diferencia entre la densidad local de una observación y
+la de su vecindad & La noción de vecindad puede degradarse con alta dimensión o
+cambios de régimen \\
+Autoencoder & Error entre la entrada y una reconstrucción aprendida por una red
+neuronal & Puede reconstruir también patrones no deseados y requiere mayor
+control de entrenamiento y capacidad \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
-Esta sección describirá el uso de arquitecturas multiagente para dividir
-responsabilidades entre nodos especializados. El enfoque del proyecto separa:
+PCA ofrece un baseline interpretable cuando la normalidad puede aproximarse por
+un subespacio lineal. Isolation Forest utiliza particiones aleatorias y resulta
+atractivo por su coste moderado y su capacidad para trabajar sin una densidad
+paramétrica explícita. One-Class SVM modela una frontera de soporte nominal y
+puede representar límites no lineales. Local Outlier Factor compara densidades
+locales y detecta observaciones extrañas respecto a su entorno. Los
+autoencoders, por su parte, aprenden una función de reconstrucción flexible y
+emplean el residuo como puntuación
+~\cite{liu2008_isolation_forest,scholkopf2001_support_estimation,breunig2000_lof}.
 
-\begin{itemize}
-  \item decisiones de alto nivel tomadas por agentes;
-  \item validación de contratos mediante esquemas estrictos;
-  \item ejecución determinista de transformaciones sobre datos;
-  \item auditoría de rutas, configuraciones, métricas y artefactos.
-\end{itemize}
+La comparación entre estas familias requiere algo más que aplicar sus valores
+por defecto. Debe fijar la misma evidencia nominal, impedir fuga temporal,
+calibrar los umbrales sin consultar el tramo evaluado y mantener constante la
+unidad de análisis. Un resultado por ventana puede ser útil para entrenar el
+detector, mientras que persistencia, inicio de degradación y anticipación deben
+calcularse sobre la secuencia agregada de adquisiciones.
+
+Tampoco existe equivalencia automática entre complejidad y calidad. Un modelo
+neuronal puede capturar relaciones que un baseline lineal no representa, pero
+introduce variabilidad de entrenamiento y más grados de libertad. En un estudio
+centrado en el comportamiento de agentes, disponer de alternativas cerradas y
+reproducibles es especialmente importante: permite atribuir al agente la
+selección y su justificación, sin confundirlas con cambios no controlados del
+procedimiento numérico.
+
+\section{Sistemas multiagente con modelos de lenguaje}
+
+Un sistema multiagente distribuye una tarea entre componentes con
+responsabilidades diferenciadas. En un pipeline de datos industriales, esta
+separación puede asignar a distintos agentes el análisis del perfil, la
+preparación temporal, la selección de modelo, la evaluación y la redacción. Un
+supervisor coordina el tránsito entre esas responsabilidades y conserva el
+estado compartido necesario para relacionar cada decisión con su evidencia.
+
+La incorporación de modelos de lenguaje aporta flexibilidad para formular
+hipótesis y relacionar evidencia heterogénea, pero no convierte sus respuestas
+en cálculos verificables. El texto libre puede contener campos ausentes,
+acciones no soportadas o justificaciones desconectadas de los datos. Por ello,
+una arquitectura auditable diferencia tres funciones. Esta combinación de
+razonamiento y acciones externas se relaciona con el patrón estudiado por
+ReAct, mientras que AgentBench muestra la necesidad de evaluar la actuación en
+entornos interactivos y no solo la respuesta final
+~\cite{yao2023_react,liu2024_agentbench}:
+
+\begin{enumerate}
+  \item el agente interpreta un expediente y propone una decisión;
+  \item un contrato estructurado comprueba que la propuesta sea completa y
+        pertenezca al espacio de acciones permitido;
+  \item una herramienta determinista ejecuta la transformación y calcula el
+        resultado que después podrá interpretar el agente.
+\end{enumerate}
+
+Esta separación limita la autonomía operativa, pero mejora la atribución. Si una
+transformación falla, puede determinarse si la causa fue una hipótesis
+inadecuada, una propuesta inválida, un guardarraíl o un error del ejecutor. Del
+mismo modo, una decisión sintácticamente válida no se considera necesariamente
+correcta: debe contrastarse con la evidencia disponible y con el resultado de
+la acción elegida.
+
+El uso de herramientas también cambia el objeto de evaluación. No basta con
+comprobar que el agente produzca una respuesta plausible. Interesa saber si
+seleccionó la herramienta adecuada, si sus argumentos coinciden con la entrada
+validada, si incorporó el resultado real y si revisó su hipótesis cuando la
+evidencia la contradijo. En entornos industriales, esta observabilidad es más
+defendible que conceder al modelo capacidad para generar y ejecutar código
+arbitrario.
+
+\section{Memoria RAG para episodios de decisión}
+
+La generación aumentada por recuperación, o RAG, añade al contexto del modelo
+fragmentos seleccionados desde una colección externa. En su aplicación más
+habitual, esos fragmentos proceden de documentos. En un sistema multiagente
+también pueden representar \textbf{episodios de decisión}: el contexto
+observado, la hipótesis, las alternativas, la acción elegida, la evidencia
+posterior y las condiciones bajo las cuales la experiencia podría reutilizarse
+~\cite{lewis2020_rag,shinn2023_reflexion}.
+
+Esta memoria externa no debe confundirse con el estado transitorio del grafo ni
+con el historial completo de una conversación. Su propósito es recuperar
+experiencia potencialmente pertinente entre ejecuciones. Para ello, el ciclo
+completo comprende al menos captura, validación, promoción, indexación,
+recuperación, uso y auditoría. La captura automática conserva trazabilidad, pero
+no debería otorgar por sí misma autoridad para reutilizar un episodio.
+
+La similitud semántica es solo una señal de relevancia. Dos recuerdos pueden
+usar vocabulario próximo y, sin embargo, corresponder a datasets, sensores,
+agentes, tareas o procedencias incompatibles. Los metadatos permiten aplicar
+restricciones previas por rol, dominio, fuente de datos, estado de revisión y
+condiciones de reutilización. Después de recuperar candidatos, un control de
+calidad puede excluir recuerdos demasiado genéricos, contradictorios o carentes
+de evidencia suficiente. La variación de resultados entre dominios observada
+en BEIR respalda el uso de baselines y juicios de relevancia específicos, en
+lugar de asumir un recuperador universalmente superior~\cite{thakur2021_beir}.
+
+Los principales riesgos no se limitan a una recuperación vacía:
+
+\begin{description}
+  \item[Irrelevancia.] Un recuerdo semánticamente próximo puede no ser
+        aplicable al contexto técnico presente.
+  \item[Contaminación.] Evidencia sintética, no verificada o perteneciente al
+        tramo de evaluación puede introducir información que el agente no
+        debería conocer.
+  \item[Obsolescencia.] Una experiencia útil bajo un contrato o una política
+        anterior puede dejar de ser compatible tras un cambio metodológico.
+  \item[Autorefuerzo.] Si los resúmenes del propio uso de memoria se convierten
+        de nuevo en recuerdos reutilizables, una afirmación puede adquirir
+        prominencia por repetición y no por nueva evidencia.
+  \item[Autoridad indebida.] La presencia de un fragmento recuperado puede hacer
+        que el agente lo siga aunque contradiga el expediente actual.
+\end{description}
+
+Por estas razones, el índice vectorial debe entenderse como una vista derivada y
+reconstruible, mientras que el episodio validado conserva el contenido y el
+gobierno canónicos. La elección entre una base vectorial especializada, una
+extensión vectorial de una base relacional o una búsqueda exacta afecta a la
+operación y a la escalabilidad, pero no resuelve por sí sola la relevancia ni la
+calidad del recuerdo. Presentar un backend concreto como universalmente superior
+confundiría una decisión de ingeniería con una conclusión científica.
+
+La evaluación de la memoria necesita, al menos, tres niveles. El primero mide
+si se recuperó evidencia compatible. El segundo comprueba si el agente la citó,
+adaptó o rechazó con fidelidad. El tercero observa si su presencia modificó la
+hipótesis, la configuración o la revisión posterior, y si ese cambio resultó
+beneficioso, neutro o perjudicial. Una mejora de similitud no implica
+necesariamente una mejora de decisión. RAGTruth aporta además evidencia de que
+disponer de contexto recuperado no elimina las respuestas no fieles, por lo que
+retrieval y anclaje deben medirse por separado~\cite{niu2024_ragtruth}.
+
+\section{Observabilidad y evaluación del comportamiento agéntico}
+
+El objetivo de observar agentes no exige almacenar razonamientos privados ni
+tratar una explicación extensa como verdad interna. Resulta más sólido registrar
+salidas conductuales verificables: el expediente recibido, la hipótesis
+declarada, las alternativas consideradas, la acción propuesta, las herramientas
+consultadas, las referencias utilizadas, la confianza expresada y el resultado
+determinista posterior.
+
+Esta traza permite separar varios conceptos que con frecuencia se agregan bajo
+la etiqueta de éxito. La \textbf{validez contractual} indica que la salida
+cumple el esquema. La \textbf{ejecutabilidad} confirma que la acción pertenece
+al repertorio disponible. El \textbf{anclaje en evidencia} comprueba que las
+afirmaciones y citas se corresponden con el expediente o los recuerdos. La
+\textbf{capacidad de revisión} observa si el agente modifica su postura ante un
+resultado contrario. Finalmente, la \textbf{utilidad operacional} se valora con
+las métricas reproducibles del problema industrial.
+
+Benchmarks de agentes y trabajos con memoria episódica refuerzan dos cautelas:
+la conducta debe evaluarse en interacción con el entorno y una reflexión
+textual solo adquiere valor cuando se vincula con feedback y desempeño
+posterior~\cite{liu2024_agentbench,shinn2023_reflexion}. En este TFM esa idea se
+traslada a herramientas deterministas y resultados industriales auditables.
+
+También deben distinguirse los fallos del agente de los del sistema que lo
+rodea. Una corrección automática de formato, un rechazo por guardarraíl, una
+indisponibilidad del proveedor y una decisión determinista de respaldo tienen
+significados diferentes. Si todos se registran como una respuesta válida del
+modelo, se sobreestima su participación real y se pierde la posibilidad de
+diagnosticar el proceso.
+
+Los estudios comparativos requieren condiciones controladas. Una ablación con
+y sin memoria mantiene constantes el expediente, las herramientas, el modelo y
+el presupuesto de generación. Una comparación entre modelos de lenguaje fija
+además los contratos, prompts y corpus recuperable. Las réplicas permiten
+observar variabilidad, mientras que una evaluación humana ciega puede valorar
+corrección, suficiencia, coherencia y seguridad sin conocer la condición
+experimental. Estas medidas no sustituyen las métricas del detector; responden
+a una pregunta diferente sobre cómo se produjo la decisión.
 
 \section{Datasets públicos de referencia}
 
-El dataset principal será CWRU Bearing Dataset
-\cite{cwru_bearing_data_center,cwru_normal_baseline,cwru_12k_drive_end}. NASA
-IMS Bearing Dataset se reserva como extensión para escenarios de degradación
-temporal \cite{nasa_pcoe_repository,nasa_ims_bearings_zip}.
+Los benchmarks públicos cumplen papeles distintos y no deben tratarse como
+evidencia intercambiable. CWRU Bearing Data Center reúne señales de referencia
+y fallos inducidos en rodamientos bajo condiciones documentadas
+~\cite{cwru_bearing_data_center,cwru_normal_baseline,cwru_12k_drive_end}. Su
+estructura etiquetada resulta apropiada para comprobar clasificación de fallos,
+compatibilidad del pipeline y comportamiento de modelos sobre clases conocidas.
+No representa, sin embargo, una trayectoria natural de degradación completa.
+
+NASA IMS Bearings proporciona secuencias de vibración adquiridas durante ensayos
+de rodamientos hasta el final registrado y constituye la referencia principal
+para el análisis longitudinal de este trabajo
+~\cite{qiu2006_bearing_prognostics,nasa_pcoe_repository,nasa_ims_bearings_zip,nasa_ims_datagov}. Su valor
+metodológico reside en el orden de los \textit{snapshots} y en la posibilidad de
+estudiar cambios sostenidos. La interpretación exige conservar activo, canal,
+marca temporal y ensayo, además de documentar cualquier etiqueta derivada que no
+forme parte de la fuente oficial.
+
+XJTU-SY y el reto pronóstico IEEE PHM 2012 constituyen referencias adicionales
+de datasets de degradación de rodamientos
+~\cite{xjtu_sy_bearing_dataset,ieee_phm_2012_pronostia_challenge}. Permiten situar
+NASA IMS dentro de una familia más amplia de ensayos \textit{run-to-failure},
+con condiciones y protocolos propios. Su existencia no autoriza a trasladar
+umbrales, etiquetas o conclusiones entre colecciones sin una validación
+específica.
+
+La procedencia es parte de la validez experimental. Una señal generada para
+probar la integración puede reproducir dimensiones o tendencias plausibles,
+pero no se convierte por ello en evidencia del dataset oficial. Del mismo modo,
+una etiqueta temporal construida por el investigador debe diferenciarse de un
+modo de fallo documentado por la fuente. Esta distinción afecta al entrenamiento,
+a la presentación de resultados y a los recuerdos que puedan promoverse para
+futuras decisiones.
+
+\section{Síntesis crítica y brecha de investigación}
+
+La literatura y los recursos revisados delimitan tres líneas que habitualmente
+se estudian por separado. PHM se centra en transformar señales en indicadores,
+alertas y pronósticos; los sistemas agénticos se ocupan de coordinar decisiones
+y herramientas; y RAG aporta contexto externo recuperable. La intersección de
+las tres plantea preguntas que no quedan resueltas al optimizar únicamente un
+detector o un índice vectorial.
+
+En particular, persiste la necesidad de estudiar si un agente formula hipótesis
+técnicamente defendibles, cómo reacciona a evidencia calculada por herramientas
+y cuándo una experiencia recuperada mejora o perjudica su decisión. En un
+escenario \textit{run-to-failure}, esta evaluación debe respetar causalidad,
+procedencia y dependencia temporal. De lo contrario, una memoria contaminada o
+una agregación incorrecta puede parecer una mejora del razonamiento cuando en
+realidad introduce información futura o pseudorreplicación.
+
+Este TFM se posiciona en esa intersección. Propone estudiar agentes especializados
+que deciden dentro de contratos, delegan el cálculo en ejecutores reproducibles
+y utilizan una memoria de episodios gobernada. El caso principal es el
+seguimiento longitudinal de maquinaria rotativa; el objeto de observación es
+tanto la calidad operacional del pipeline como la conducta verificable del
+agente ante evidencia, herramientas y recuerdos. Esta formulación define el
+problema de investigación, pero no anticipa resultados.
+
+La revisión reúne fuentes primarias y revisiones académicas para los tres
+bloques, además de las fuentes oficiales que sostienen la procedencia de los
+datasets. Aun así, la literatura localizada no proporciona un protocolo ya
+establecido para evaluar conjuntamente agentes locales, memoria episódica
+gobernada y una trayectoria industrial \textit{run-to-failure}. Esa ausencia
+justifica tratar la intersección como brecha de investigación, pero no permite
+presentar la arquitectura propuesta como superior antes de ejecutar sus
+ablaciones y contrastes.

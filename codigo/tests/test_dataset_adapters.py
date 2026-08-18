@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -69,6 +70,9 @@ class DatasetAdaptersTests(unittest.TestCase):
         self.assertEqual(descriptor.supervision_profile, "run_to_failure_degradation")
         self.assertEqual(descriptor.label_granularity, "event")
         self.assertEqual(descriptor.label_source, "none")
+        self.assertEqual(descriptor.data_provenance, "unknown")
+        self.assertEqual(descriptor.provenance_detection_method, "unverified")
+        self.assertIsNone(descriptor.provenance_evidence_path)
         self.assertEqual(
             descriptor.channel_names,
             ["channel_1", "channel_2", "channel_3", "channel_4"],
@@ -77,6 +81,73 @@ class DatasetAdaptersTests(unittest.TestCase):
         self.assertEqual(descriptor.metadata["candidate_file_count"], 1)
         self.assertEqual(descriptor.metadata["inferred_n_channels"], 4)
         self.assertFalse(descriptor.metadata["inconsistent_channel_counts"])
+
+    def test_nasa_descriptor_and_manifest_trace_synthetic_spec_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_root = Path(tmp) / "synthetic_nasa_ims"
+            raw_dir = raw_root / "2nd_test"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "2004.02.12.10.32.39").write_text(
+                "0.1\t0.2\t0.3\t0.4\n0.2\t0.3\t0.4\t0.5\n",
+                encoding="utf-8",
+            )
+            spec_path = raw_root / "synthetic_dataset_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "nasa_ims_bearing",
+                        "synthetic": True,
+                        "seed": 42,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            adapter = get_dataset_adapter("nasa_ims_bearing")
+            descriptor = adapter.describe(raw_root)
+            result = adapter.build_manifest(raw_root, Path(tmp) / "interim")
+            rows = _read_manifest_rows(Path(result.manifest_path))
+            metadata = _metadata(rows[0])
+
+        self.assertEqual(descriptor.data_provenance, "synthetic")
+        self.assertEqual(
+            descriptor.provenance_detection_method,
+            "synthetic_dataset_spec",
+        )
+        self.assertEqual(descriptor.provenance_evidence_path, spec_path.as_posix())
+        self.assertRegex(descriptor.provenance_evidence_sha256 or "", r"^[0-9a-f]{64}$")
+        self.assertTrue(any("no son mediciones oficiales" in note for note in descriptor.notes))
+        self.assertEqual(rows[0]["data_provenance"], "synthetic")
+        self.assertEqual(metadata["data_provenance"], "synthetic")
+        self.assertEqual(
+            metadata["provenance_detection_method"],
+            "synthetic_dataset_spec",
+        )
+        self.assertFalse(metadata["official_nasa_measurements"])
+        self.assertEqual(result.artifacts[0].metadata["data_provenance"], "synthetic")
+        self.assertEqual(result.state_updates["data_provenance"], "synthetic")
+
+    def test_nasa_rejects_inconsistent_synthetic_provenance_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_root = Path(tmp) / "synthetic_nasa_ims"
+            raw_dir = raw_root / "2nd_test"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "2004.02.12.10.32.39").write_text(
+                "0.1\t0.2\t0.3\t0.4\n",
+                encoding="utf-8",
+            )
+            (raw_root / "synthetic_dataset_spec.json").write_text(
+                json.dumps(
+                    {
+                        "dataset": "nasa_ims_bearing",
+                        "synthetic": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "synthetic=true"):
+                describe_dataset(raw_root, adapter_id="nasa_ims_bearing")
 
     def test_infers_nasa_adapter_from_timestamp_files_without_dataset_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,6 +219,8 @@ class DatasetAdaptersTests(unittest.TestCase):
             "2004-02-12T10:52:39",
         ])
         self.assertTrue(all(item["official_window_labels"] is False for item in metadata))
+        self.assertEqual({row["data_provenance"] for row in rows}, {"unknown"})
+        self.assertEqual({item["data_provenance"] for item in metadata}, {"unknown"})
         self.assertEqual({item["label_source"] for item in metadata}, {"none"})
         self.assertEqual({item["label_granularity"] for item in metadata}, {"event"})
         self.assertEqual(

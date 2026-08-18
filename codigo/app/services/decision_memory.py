@@ -15,10 +15,12 @@ from codigo.app.schemas.agent_decisions import (
     StructuringDecision,
 )
 from codigo.app.schemas.common import JsonScalar, StrictBaseModel
+from codigo.app.schemas.dataset import DataProvenance
 from codigo.app.schemas.reasoning import (
     AgentReasoningPostmortem,
     DecisionEpisode,
     DecisionOption,
+    MemoryApplicability,
     MemoryCandidate,
     ReasoningOutcome,
     RetrievedMemoryContext,
@@ -27,6 +29,7 @@ from codigo.app.schemas.state import (
     EvaluationResult,
     MetricsReport,
     ModelingConfig,
+    ProjectContext,
     StructuringConfig,
     TFMStateModel,
 )
@@ -57,6 +60,8 @@ def build_modeling_retry_decision_episode(
     after_metrics: MetricsReport | None,
     evaluation: EvaluationResult | None,
     memory_context: RetrievedMemoryContext | None = None,
+    data_provenance: DataProvenance = "unknown",
+    project_context: ProjectContext | None = None,
 ) -> DecisionEpisode:
     """Construye un episodio general a partir de un reintento del modelador."""
 
@@ -74,18 +79,43 @@ def build_modeling_retry_decision_episode(
         agent_name=decision.agent_name,
         target_agent="modeler",
         decision_type="modeling",
-        dataset="nasa_ims_bearing",
+        dataset=(
+            "nasa_ims_bearing"
+            if project_context is None
+            else project_context.dataset
+        ),
+        data_provenance=(
+            data_provenance
+            if project_context is None
+            else project_context.data_provenance
+        ),
+        applicability=(
+            None
+            if project_context is None
+            else project_context.to_memory_applicability()
+        ),
         context_summary=_context_summary(
             source_run_id=source_run_id,
             before=before,
             decision=decision,
             memory_context=memory_context,
         ),
+        hypothesis=decision.hypothesis,
         options_considered=_decision_options(decision),
         chosen_action=postmortem.action_taken,
         expected_effect=decision.expected_effect,
-        evidence_used=decision.evidence_used,
+        evidence_used=_evidence_with_declared_memory(
+            [*decision.evidence_used, *_hypothesis_evidence_refs(decision)],
+            used_memory_context=decision.used_memory_context,
+        ),
         retrieved_memory_record_ids=retrieved_memory_ids,
+        memory_context_id=decision.memory_context_id,
+        used_memory_context=decision.used_memory_context,
+        cited_memory_record_ids=decision.memory_record_ids,
+        memory_usage_summary=decision.memory_usage_summary,
+        memory_record_uses=[
+            item.model_dump(mode="json") for item in decision.memory_record_uses
+        ],
         execution_result_summary=(
             postmortem.automatic_critique
             if evaluation is None
@@ -124,7 +154,7 @@ def build_modeling_decision_episode(
     state: TFMStateModel,
     decision: ModelingDecision,
     execution_result_summary: str | None = None,
-    outcome: ReasoningOutcome = "supported",
+    outcome: ReasoningOutcome = "inconclusive",
     memory_context: RetrievedMemoryContext | None = None,
 ) -> DecisionEpisode:
     """Construye un episodio reutilizable a partir de una decision modeladora."""
@@ -138,12 +168,22 @@ def build_modeling_decision_episode(
         target_agent="modeler",
         decision_type="modeling",
         dataset=state.project_context.dataset,
+        data_provenance=state.project_context.data_provenance,
+        applicability=state.project_context.to_memory_applicability(),
         context_summary=_modeling_context_summary(state, decision),
+        hypothesis=decision.hypothesis,
         options_considered=_modeling_options(decision),
         chosen_action=_modeling_action(decision),
         expected_effect=_modeling_expected_effect(decision),
-        evidence_used=_modeling_evidence(decision, memory_context),
+        evidence_used=_modeling_evidence(decision),
         retrieved_memory_record_ids=retrieved_memory_ids,
+        memory_context_id=decision.memory_context_id,
+        used_memory_context=decision.used_memory_context,
+        cited_memory_record_ids=decision.memory_record_ids,
+        memory_usage_summary=decision.memory_usage_summary,
+        memory_record_uses=[
+            item.model_dump(mode="json") for item in decision.memory_record_uses
+        ],
         execution_result_summary=execution_result_summary,
         after_metrics=_metrics_dict(state.metrics),
         tradeoffs_observed=_modeling_tradeoffs(state, decision),
@@ -189,12 +229,22 @@ def build_structuring_decision_episode(
         target_agent="structurer",
         decision_type="structuring",
         dataset=state.project_context.dataset,
+        data_provenance=state.project_context.data_provenance,
+        applicability=state.project_context.to_memory_applicability(),
         context_summary=_structuring_context_summary(state, decision, memory_context),
+        hypothesis=decision.hypothesis,
         options_considered=_structuring_options(decision),
         chosen_action=_structuring_action(decision.structuring_config),
         expected_effect="Generar ventanas, features y splits reproducibles para modelado.",
-        evidence_used=_structuring_evidence(memory_context),
+        evidence_used=_structuring_evidence(decision),
         retrieved_memory_record_ids=retrieved_memory_ids,
+        memory_context_id=decision.memory_context_id,
+        used_memory_context=decision.used_memory_context,
+        cited_memory_record_ids=decision.memory_record_ids,
+        memory_usage_summary=decision.memory_usage_summary,
+        memory_record_uses=[
+            item.model_dump(mode="json") for item in decision.memory_record_uses
+        ],
         execution_result_summary=execution_result_summary,
         tradeoffs_observed=_structuring_tradeoffs(decision.structuring_config),
         failure_modes=_structuring_failure_modes(outcome),
@@ -241,15 +291,25 @@ def build_evaluation_decision_episode(
         target_agent="evaluator",
         decision_type="evaluation",
         dataset=state.project_context.dataset,
+        data_provenance=state.project_context.data_provenance,
+        applicability=state.project_context.to_memory_applicability(),
         context_summary=_evaluation_context_summary(state, decision),
+        hypothesis=decision.hypothesis,
         options_considered=_evaluation_options(decision),
         chosen_action=_evaluation_action(decision),
         expected_effect=(
             "Aceptar solo ejecuciones que cumplen el protocolo local o pedir "
             "nueva configuracion cuando las metricas no son suficientes."
         ),
-        evidence_used=_evaluation_evidence(decision, memory_context),
+        evidence_used=_evaluation_evidence(decision),
         retrieved_memory_record_ids=retrieved_memory_ids,
+        memory_context_id=decision.memory_context_id,
+        used_memory_context=decision.used_memory_context,
+        cited_memory_record_ids=decision.memory_record_ids,
+        memory_usage_summary=decision.memory_usage_summary,
+        memory_record_uses=[
+            item.model_dump(mode="json") for item in decision.memory_record_uses
+        ],
         execution_result_summary=decision.evaluation.summary,
         after_metrics=metrics,
         tradeoffs_observed=_evaluation_tradeoffs(state.metrics, decision),
@@ -453,11 +513,12 @@ def _modeling_context_summary(
     decision: ModelingDecision,
 ) -> str:
     strategy = decision.decision_strategy
+    hypothesis = _hypothesis_statement(decision, legacy=strategy.hypothesis)
     return (
         f"Decision del modelador para {state.project_context.dataset}. "
         f"Perfil={state.project_context.supervision_profile}. "
         f"Modelo={decision.modeling_config.model_name}. "
-        f"Estrategia={strategy.strategy_type}. Hipotesis: {strategy.hypothesis}"
+        f"Estrategia={strategy.strategy_type}. Hipotesis: {hypothesis}"
         + (
             ""
             if strategy.alert_policy is None
@@ -503,17 +564,16 @@ def _modeling_expected_effect(decision: ModelingDecision) -> str:
     return "Entrenar un detector reproducible y generar score de anomalia."
 
 
-def _modeling_evidence(
-    decision: ModelingDecision,
-    memory_context: RetrievedMemoryContext | None,
-) -> list[str]:
+def _modeling_evidence(decision: ModelingDecision) -> list[str]:
     evidence = ["features_artifact", "supported_model_families"]
     strategy = decision.decision_strategy
     evidence.extend(strategy.tool_names)
     evidence.extend(strategy.evidence_refs)
-    if memory_context is not None and memory_context.items:
-        evidence.append("retrieved_memory_context")
-    return list(dict.fromkeys(evidence))
+    evidence.extend(_hypothesis_evidence_refs(decision))
+    return _evidence_with_declared_memory(
+        evidence,
+        used_memory_context=decision.used_memory_context,
+    )
 
 
 def _modeling_tradeoffs(
@@ -557,10 +617,11 @@ def _modeling_lesson(
 ) -> str:
     profile = state.project_context.supervision_profile
     strategy = decision.decision_strategy
+    hypothesis = _hypothesis_statement(decision, legacy=strategy.hypothesis)
     return (
         f"El modelador eligio {decision.modeling_config.model_name} para "
         f"{profile} con estrategia {strategy.strategy_type}. "
-        f"Hipotesis: {strategy.hypothesis}"
+        f"Hipotesis: {hypothesis}"
     )
 
 
@@ -731,13 +792,13 @@ def _structuring_action(config: StructuringConfig) -> str:
     )
 
 
-def _structuring_evidence(
-    memory_context: RetrievedMemoryContext | None,
-) -> list[str]:
+def _structuring_evidence(decision: StructuringDecision) -> list[str]:
     evidence = ["project_context", "clean_signal_summary", "supported_structuring_bounds"]
-    if memory_context is not None and memory_context.items:
-        evidence.append("retrieved_memory_context")
-    return evidence
+    evidence.extend(_hypothesis_evidence_refs(decision))
+    return _evidence_with_declared_memory(
+        evidence,
+        used_memory_context=decision.used_memory_context,
+    )
 
 
 def _structuring_tradeoffs(config: StructuringConfig) -> list[str]:
@@ -848,16 +909,48 @@ def _evaluation_action(decision: EvaluationDecision) -> str:
     return f"{status}; next_action={decision.evaluation.next_action}"
 
 
-def _evaluation_evidence(
-    decision: EvaluationDecision,
-    memory_context: RetrievedMemoryContext | None,
-) -> list[str]:
+def _evaluation_evidence(decision: EvaluationDecision) -> list[str]:
     evidence = ["metrics_report", "evaluation_thresholds", "evaluation_protocol"]
     evidence.extend(decision.tool_names)
     evidence.extend(decision.evidence_refs)
-    if memory_context is not None and memory_context.items:
-        evidence.append("retrieved_memory_context")
-    return list(dict.fromkeys(evidence))
+    evidence.extend(_hypothesis_evidence_refs(decision))
+    return _evidence_with_declared_memory(
+        evidence,
+        used_memory_context=decision.used_memory_context,
+    )
+
+
+def _evidence_with_declared_memory(
+    evidence: list[str],
+    *,
+    used_memory_context: bool,
+) -> list[str]:
+    marker = "retrieved_memory_context"
+    normalized = [item for item in evidence if item != marker]
+    if used_memory_context:
+        normalized.append(marker)
+    return list(dict.fromkeys(normalized))
+
+
+def _hypothesis_evidence_refs(
+    decision: (
+        ModelingDecision
+        | ModelingRetryDecision
+        | StructuringDecision
+        | EvaluationDecision
+    ),
+) -> list[str]:
+    hypothesis = decision.hypothesis
+    return [] if hypothesis is None else list(hypothesis.evidence_refs)
+
+
+def _hypothesis_statement(
+    decision: ModelingDecision | ModelingRetryDecision,
+    *,
+    legacy: str,
+) -> str:
+    hypothesis = decision.hypothesis
+    return legacy if hypothesis is None else hypothesis.statement
 
 
 def _evaluation_tradeoffs(
@@ -1121,11 +1214,14 @@ def _episode_markdown(episode: DecisionEpisode) -> str:
         f"- Decision: `{episode.decision_id}`",
         f"- Resultado: `{episode.outcome}`",
         f"- Dataset: `{episode.dataset or 'n/a'}`",
+        f"- Procedencia de datos: `{episode.data_provenance}`",
+        *_applicability_markdown_lines(episode.applicability),
         "",
         "## Contexto",
         "",
         episode.context_summary,
         "",
+        *_hypothesis_markdown_lines(episode),
         "## Accion elegida",
         "",
         episode.chosen_action,
@@ -1156,6 +1252,28 @@ def _episode_markdown(episode: DecisionEpisode) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _hypothesis_markdown_lines(episode: DecisionEpisode) -> list[str]:
+    hypothesis = episode.hypothesis
+    if hypothesis is None:
+        return []
+    return [
+        "## Hipotesis ex ante",
+        "",
+        hypothesis.statement,
+        "",
+        f"- Tipo: `{hypothesis.kind}`",
+        f"- Alcance: {hypothesis.scope}",
+        f"- Corte de evidencia: {hypothesis.evidence_cutoff}",
+        f"- Observacion esperada: {hypothesis.expected_observation}",
+        f"- Criterio de refutacion: {hypothesis.falsification_criterion}",
+        "- Evidencias declaradas: " + "; ".join(hypothesis.evidence_refs),
+        "- Riesgos: " + "; ".join(hypothesis.risk_notes),
+        "- Contraste: no registrado en este episodio; el resultado del episodio "
+        "no confirma por si solo la hipotesis.",
+        "",
+    ]
+
+
 def _candidate_markdown(candidate: MemoryCandidate) -> str:
     lines = [
         f"# Candidato de memoria {candidate.candidate_id}",
@@ -1165,6 +1283,8 @@ def _candidate_markdown(candidate: MemoryCandidate) -> str:
         f"- Reutilizable: `{candidate.reusable_as_context}`",
         f"- Excluido: `{candidate.exclude_from_context}`",
         f"- Dataset: `{candidate.dataset or 'n/a'}`",
+        f"- Procedencia de datos: `{candidate.data_provenance}`",
+        *_applicability_markdown_lines(candidate.applicability),
         "",
         "## Resumen",
         "",
@@ -1181,6 +1301,31 @@ def _candidate_markdown(candidate: MemoryCandidate) -> str:
         f"- Riesgo: {candidate.risk_if_misused or 'n/a'}",
     ]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _applicability_markdown_lines(
+    applicability: MemoryApplicability | None,
+) -> list[str]:
+    if applicability is None:
+        return ["- Aplicabilidad tipada: `legacy/no declarada`"]
+    return [
+        f"- Perfil de supervision: `{applicability.supervision_profile}`",
+        f"- Fuente de etiquetas: `{applicability.label_source}`",
+        f"- Granularidad de etiquetas: `{applicability.label_granularity}`",
+        (
+            "- Frecuencia objetivo: `"
+            f"{applicability.target_sample_rate_hz or 'unknown'}` Hz"
+        ),
+        (
+            "- Grupo de trayectoria: `"
+            f"{applicability.trajectory_group_id or 'unknown'}`"
+        ),
+        (
+            "- Grupo de evaluacion: `"
+            f"{applicability.evaluation_group_id or 'unknown'}`"
+        ),
+        f"- Alcance de transferencia: `{applicability.transfer_scope}`",
+    ]
 
 
 def _metric(metrics: dict[str, float | None], name: str) -> float:

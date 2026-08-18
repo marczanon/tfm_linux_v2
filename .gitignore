@@ -40,3 +40,6 @@ memoria/*.synctex.gz
 codigo/frontend/node_modules/
 codigo/frontend/dist/
 codigo/frontend/.env
+codigo/frontend/playwright-report/
+codigo/frontend/test-results/
+codigo/frontend/blob-report/

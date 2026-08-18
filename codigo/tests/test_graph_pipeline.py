@@ -7,6 +7,7 @@ from codigo.app.graph.pipeline import (
     PipelineAgents,
     PipelineExecutors,
     PipelineMemoryConfig,
+    _quality_checked_memory_retrieval,
     run_and_persist_cwru_pipeline,
     run_cwru_pipeline,
 )
@@ -27,12 +28,90 @@ from codigo.app.schemas.reasoning import (
     RetrievedMemoryContext,
     RetrievedMemoryItem,
 )
-from codigo.app.schemas.state import ArtifactRef, PipelineError
+from codigo.app.schemas.state import ArtifactRef, PipelineError, ProjectContext
 from codigo.app.services.agent_runtime import AgentRuntimeRecorder
 from codigo.app.services.run_persistence import load_run_index
 
 
 class GraphPipelineTests(unittest.TestCase):
+    def test_memory_config_defaults_to_quality_gate_and_pending_candidates(self):
+        config = PipelineMemoryConfig()
+
+        self.assertTrue(config.quality_gate_enabled)
+        self.assertTrue(config.keep_caution_memory)
+        self.assertEqual(config.quality_gate_candidate_pool_size, 10)
+        self.assertFalse(config.reusable_as_context)
+
+    def test_online_blind_predecision_drops_caution_with_unknown_groups(self):
+        state_dict = create_initial_cwru_state(
+            thread_id="nasa-online-blind-memory-gate",
+            run_id="nasa-online-blind-memory-gate-001",
+        )
+        state_dict["project_context"] = ProjectContext(
+            dataset="nasa_ims_bearing",
+            machine_type="rotating_machinery",
+            signal_type="vibration",
+            objective="run_to_failure_degradation",
+            target_sample_rate_hz=20000,
+            main_channel="channel_1",
+            label_mode="degradation",
+            supervision_profile="run_to_failure_degradation",
+            label_granularity="event",
+            label_source="none",
+            data_provenance="official",
+            provenance_detection_method="official_dataset_provenance",
+        ).model_dump(mode="json")
+        state = validate_state(state_dict)
+        query = AgentMemoryQuery(
+            query_id="nasa:modeler:memory-query",
+            target_agent="modeler",
+            query_text="causal model choice",
+            dataset="nasa_ims_bearing",
+            data_provenance="official",
+            decision_context={
+                "supervision_profile": "run_to_failure_degradation",
+                "label_source": "none",
+            },
+        )
+        context = RetrievedMemoryContext(
+            context_id="nasa:modeler:memory-context",
+            query=query,
+            items=[
+                RetrievedMemoryItem(
+                    record=ReasoningMemoryRecord(
+                        memory_record_id="memory-groups-unknown",
+                        collection_name="modeler_memory",
+                        target_agent="modeler",
+                        source_type="methodology_note",
+                        dataset="nasa_ims_bearing",
+                        data_provenance="official",
+                        memory_role="methodology",
+                        reusable_as_context=True,
+                        summary="Causal methodology with unknown experimental groups.",
+                        content="Keep chronological partitions.",
+                        tags=["run_to_failure", "causal_partition"],
+                    ),
+                    similarity=0.9,
+                    retrieval_use="methodology_context",
+                    rank=1,
+                )
+            ],
+        )
+
+        retrieval = _quality_checked_memory_retrieval(
+            state,
+            context,
+            PipelineMemoryConfig(keep_caution_memory=True),
+            effective_top_k=3,
+        )
+
+        self.assertEqual(retrieval.quality_report.caution_count, 1)
+        self.assertEqual(retrieval.effective_context.items, [])
+        self.assertIn(
+            "evaluation_group_unknown",
+            retrieval.quality_report.items[0].reason_codes,
+        )
+
     def test_supervised_graph_runs_executors_in_order_and_updates_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -196,6 +275,14 @@ class GraphPipelineTests(unittest.TestCase):
             structurer_context_exists = Path(
                 artifacts_by_name["structurer_retrieved_memory_context"].path
             ).exists()
+            structurer_raw_context_path = Path(
+                artifacts_by_name["structurer_retrieved_memory_context_raw"].path
+            )
+            structurer_quality_gate_path = Path(
+                artifacts_by_name["structurer_memory_quality_gate"].path
+            )
+            structurer_raw_context_exists = structurer_raw_context_path.exists()
+            structurer_quality_gate_exists = structurer_quality_gate_path.exists()
             modeler_candidate_exists = Path(
                 artifacts_by_name["modeler_memory_candidate"].path
             ).exists()
@@ -219,6 +306,17 @@ class GraphPipelineTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
+            structurer_context = json.loads(
+                Path(
+                    artifacts_by_name["structurer_retrieved_memory_context"].path
+                ).read_text(encoding="utf-8")
+            )
+            structurer_raw_context = json.loads(
+                structurer_raw_context_path.read_text(encoding="utf-8")
+            )
+            structurer_quality_gate = json.loads(
+                structurer_quality_gate_path.read_text(encoding="utf-8")
+            )
 
         self.assertEqual(validated.current_stage, "completed")
         self.assertIn("structurer_memory_query", artifacts_by_name)
@@ -236,6 +334,8 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertTrue(structurer_candidate_exists)
         self.assertTrue(structurer_query_exists)
         self.assertTrue(structurer_context_exists)
+        self.assertTrue(structurer_raw_context_exists)
+        self.assertTrue(structurer_quality_gate_exists)
         self.assertTrue(modeler_candidate_exists)
         self.assertTrue(modeler_query_exists)
         self.assertTrue(modeler_context_exists)
@@ -243,7 +343,15 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertTrue(evaluator_context_exists)
         self.assertTrue(evaluator_candidate_exists)
         self.assertEqual(structurer_query["target_agent"], "structurer")
-        self.assertEqual(structurer_query["top_k"], 3)
+        self.assertEqual(structurer_query["top_k"], 10)
+        self.assertEqual(structurer_context["query"]["top_k"], 3)
+        self.assertEqual(len(structurer_raw_context["items"]), 2)
+        self.assertEqual(len(structurer_context["items"]), 1)
+        self.assertEqual(structurer_quality_gate["exclude_candidate_count"], 1)
+        self.assertIn(
+            "dataset_mismatch",
+            structurer_quality_gate["items"][1]["reason_codes"],
+        )
         retrieval_event_types = [
             event.payload.get("retrieval_event")
             for event in events
@@ -252,6 +360,22 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertIn("retrieval_requested", retrieval_event_types)
         self.assertIn("retrieval_returned", retrieval_event_types)
         self.assertIn("retrieval_used", retrieval_event_types)
+        structurer_returned = next(
+            event
+            for event in events
+            if event.kind == "memory_retrieval"
+            and event.agent_name == "structurer"
+            and event.payload.get("retrieval_event") == "retrieval_returned"
+        )
+        self.assertEqual(structurer_returned.payload["raw_count"], 2)
+        self.assertEqual(structurer_returned.payload["effective_count"], 1)
+        self.assertEqual(structurer_returned.payload["filtered_count"], 1)
+        self.assertEqual(
+            structurer_returned.payload["quality_gate"]["excluded"][0][
+                "memory_record_id"
+            ],
+            "memory-structurer-incompatible",
+        )
         modeler_retrieval_event_types = [
             event.payload.get("retrieval_event")
             for event in events
@@ -288,6 +412,53 @@ class GraphPipelineTests(unittest.TestCase):
             ["memory-evaluator-001"],
         )
 
+    def test_quality_gate_overfetch_replenishes_valid_lower_ranked_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            paths = _paths(base)
+            state = create_initial_cwru_state(
+                thread_id="cwru-overfetch-test",
+                run_id="run-overfetch-001",
+                raw_path=str(base / "raw"),
+            )
+            final_state = run_cwru_pipeline(
+                state,
+                executors=_successful_executors(paths, []),
+                agents=PipelineAgents(
+                    structurer=_memory_aware_structurer,
+                    evaluator=_memory_aware_evaluator,
+                ),
+                memory_config=PipelineMemoryConfig(
+                    memory_store=_OverfetchMemoryStore(),
+                    output_root=base / "reports",
+                    structurer_top_k=1,
+                    modeler_top_k=1,
+                    evaluator_top_k=1,
+                    quality_gate_candidate_pool_size=4,
+                ),
+            )
+            validated = validate_state(final_state)
+            artifacts = {artifact.name: artifact for artifact in validated.artifacts}
+            raw_context = json.loads(
+                Path(
+                    artifacts["structurer_retrieved_memory_context_raw"].path
+                ).read_text(encoding="utf-8")
+            )
+            effective_context = json.loads(
+                Path(
+                    artifacts["structurer_retrieved_memory_context"].path
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(raw_context["query"]["top_k"], 4)
+        self.assertEqual(len(raw_context["items"]), 4)
+        self.assertEqual(effective_context["query"]["top_k"], 1)
+        self.assertEqual(len(effective_context["items"]), 1)
+        self.assertEqual(
+            effective_context["items"][0]["record"]["memory_record_id"],
+            "memory-structurer-001",
+        )
+
     def test_runtime_recorder_receives_observable_agent_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -320,6 +491,19 @@ class GraphPipelineTests(unittest.TestCase):
             for event in events
             if event.kind == "agent_decision" and event.agent_name == "report_verifier"
         ]
+        executor_events = [event for event in events if event.kind == "executor_result"]
+        decision_sequences = {
+            event.decision_id: event.sequence
+            for event in events
+            if event.kind in {"agent_decision", "supervisor_decision"}
+            and event.decision_id is not None
+        }
+        linked_executor_events = [
+            event for event in executor_events if event.decision_id is not None
+        ]
+        unlinked_executor_events = [
+            event for event in executor_events if event.decision_id is None
+        ]
         self.assertEqual(validated.current_stage, "completed")
         self.assertEqual([event.sequence for event in events], list(range(1, len(events) + 1)))
         self.assertIn("supervisor_decision", kinds)
@@ -329,6 +513,25 @@ class GraphPipelineTests(unittest.TestCase):
         self.assertTrue(agent_events)
         self.assertIn("rationale", agent_events[0].payload["decision"])
         self.assertEqual(agent_events[0].payload["state"]["dataset"], "cwru_bearing")
+        self.assertEqual(
+            {event.node for event in linked_executor_events},
+            {"cleaning", "structuring", "modeling", "report_writer"},
+        )
+        self.assertEqual(
+            {event.node for event in unlinked_executor_events},
+            {"dataset_manifest", "data_profiler", "evaluation"},
+        )
+        for event in linked_executor_events:
+            self.assertEqual(
+                event.payload["source_decision_id"],
+                event.decision_id,
+            )
+            self.assertLess(
+                decision_sequences[event.decision_id],
+                event.sequence,
+            )
+        for event in unlinked_executor_events:
+            self.assertNotIn("source_decision_id", event.payload)
         self.assertTrue(verifier_events)
         self.assertEqual(
             verifier_events[-1].summary,
@@ -686,6 +889,13 @@ def _successful_executors(paths: dict[str, Path], calls: list[str]) -> PipelineE
 class _FakeMemoryStore:
     def query(self, query: AgentMemoryQuery) -> RetrievedMemoryContext:
         record = _memory_record(query)
+        incompatible_record = record.model_copy(
+            update={
+                "memory_record_id": f"memory-{query.target_agent}-incompatible",
+                "dataset": "incompatible_dataset",
+                "summary": "Memory from an incompatible dataset.",
+            }
+        )
         return RetrievedMemoryContext(
             context_id=f"{query.query_id}:retrieved_memory_context",
             query=query,
@@ -695,9 +905,49 @@ class _FakeMemoryStore:
                     similarity=0.91,
                     retrieval_use="evidence_context",
                     rank=1,
-                )
+                ),
+                RetrievedMemoryItem(
+                    record=incompatible_record,
+                    similarity=0.99,
+                    retrieval_use="evidence_context",
+                    rank=2,
+                ),
             ],
             retrieval_backend="fake_memory_store",
+            embedding_model="fake_embedding:v1",
+        )
+
+
+class _OverfetchMemoryStore:
+    def query(self, query: AgentMemoryQuery) -> RetrievedMemoryContext:
+        valid = _memory_record(query)
+        invalid = [
+            valid.model_copy(
+                update={
+                    "memory_record_id": (
+                        f"memory-{query.target_agent}-incompatible-{index}"
+                    ),
+                    "dataset": f"incompatible_dataset_{index}",
+                    "summary": "Higher-ranked but incompatible memory.",
+                }
+            )
+            for index in range(1, 4)
+        ]
+        records = [*invalid, valid]
+        items = [
+            RetrievedMemoryItem(
+                record=record,
+                similarity=0.99 - (rank - 1) * 0.02,
+                retrieval_use="evidence_context",
+                rank=rank,
+            )
+            for rank, record in enumerate(records[: query.top_k], start=1)
+        ]
+        return RetrievedMemoryContext(
+            context_id=f"{query.query_id}:retrieved_memory_context",
+            query=query,
+            items=items,
+            retrieval_backend="overfetch_test_store",
             embedding_model="fake_embedding:v1",
         )
 

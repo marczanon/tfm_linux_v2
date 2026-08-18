@@ -5,9 +5,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, PositiveInt, model_validator
 
 from codigo.app.schemas.common import JsonScalar, StrictBaseModel
+from codigo.app.schemas.dataset import (
+    DataProvenance,
+    LabelGranularity,
+    LabelSource,
+    SupervisionProfile,
+)
 
 ReasoningOutcome = Literal[
     "validated",
@@ -104,6 +110,14 @@ MemoryUsageAuditAssessment = Literal[
     "not_applicable",
 ]
 
+MemoryTransferScope = Literal[
+    "same_trajectory",
+    "same_dataset",
+    "same_supervision_profile",
+    "shared_methodology",
+    "unknown",
+]
+
 AgentToolName = Literal[
     "evidence_lookup",
     "temporal_health_lookup",
@@ -143,6 +157,17 @@ DecisionEpisodeType = Literal[
     "supervision",
     "memory_management",
     "methodology",
+]
+
+AgentHypothesisKind = Literal[
+    "routing_readiness",
+    "data_quality",
+    "temporal_representation",
+    "model_performance",
+    "operational_acceptance",
+    "report_grounding",
+    "report_fidelity",
+    "revision_effectiveness",
 ]
 
 ReportDebateStatus = Literal[
@@ -328,6 +353,63 @@ class DecisionOption(StrictBaseModel):
     selected: bool = False
 
 
+class AgentHypothesis(StrictBaseModel):
+    """Hipotesis operativa observable sin exponer razonamiento interno.
+
+    Vive junto a los contratos de razonamiento para que tanto las decisiones
+    como sus episodios de memoria reutilicen exactamente el mismo esquema.
+    """
+
+    kind: AgentHypothesisKind
+    statement: str = Field(min_length=1)
+    scope: str = Field(min_length=1)
+    evidence_cutoff: str = Field(min_length=1)
+    expected_observation: str = Field(min_length=1)
+    falsification_criterion: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+    risk_notes: list[str] = Field(min_length=1)
+    assumptions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_audit_lists(self) -> "AgentHypothesis":
+        for field_name, values in (
+            ("evidence_refs", self.evidence_refs),
+            ("risk_notes", self.risk_notes),
+            ("assumptions", self.assumptions),
+        ):
+            if any(not value for value in values):
+                raise ValueError(
+                    f"hypothesis {field_name} cannot contain empty strings"
+                )
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("hypothesis evidence_refs cannot contain duplicates")
+        if len(set(self.risk_notes)) != len(self.risk_notes):
+            raise ValueError("hypothesis risk_notes cannot contain duplicates")
+        if len(set(self.assumptions)) != len(self.assumptions):
+            raise ValueError("hypothesis assumptions cannot contain duplicates")
+        return self
+
+
+class MemoryApplicability(StrictBaseModel):
+    """Frontera experimental tipada en la que un recuerdo puede reutilizarse."""
+
+    supervision_profile: SupervisionProfile | Literal["unknown"] = "unknown"
+    label_source: LabelSource | Literal["unknown"] = "unknown"
+    label_granularity: LabelGranularity | Literal["unknown"] = "unknown"
+    target_sample_rate_hz: PositiveInt | None = None
+    trajectory_group_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=160,
+    )
+    evaluation_group_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=160,
+    )
+    transfer_scope: MemoryTransferScope = "unknown"
+
+
 class DecisionEpisode(StrictBaseModel):
     """Episodio general de decision agentica reutilizable como memoria."""
 
@@ -338,12 +420,22 @@ class DecisionEpisode(StrictBaseModel):
     target_agent: AgentMemoryTarget
     decision_type: DecisionEpisodeType
     dataset: str | None = Field(default=None, min_length=1)
+    data_provenance: DataProvenance = "unknown"
+    applicability: MemoryApplicability | None = None
     context_summary: str = Field(min_length=1)
+    # Optional para conservar episodios historicos. No representa una
+    # evaluacion: el contraste de la hipotesis debe registrarse por separado.
+    hypothesis: AgentHypothesis | None = None
     options_considered: list[DecisionOption] = Field(default_factory=list)
     chosen_action: str = Field(min_length=1)
     expected_effect: str | None = Field(default=None, min_length=1)
     evidence_used: list[str] = Field(default_factory=list)
     retrieved_memory_record_ids: list[str] = Field(default_factory=list)
+    memory_context_id: str | None = Field(default=None, min_length=1)
+    used_memory_context: bool = False
+    cited_memory_record_ids: list[str] = Field(default_factory=list)
+    memory_usage_summary: str | None = Field(default=None, min_length=1)
+    memory_record_uses: list[dict[str, JsonScalar]] = Field(default_factory=list)
     execution_result_summary: str | None = Field(default=None, min_length=1)
     before_metrics: dict[str, float | None] = Field(default_factory=dict)
     after_metrics: dict[str, float | None] = Field(default_factory=dict)
@@ -384,6 +476,8 @@ class MemoryCandidate(StrictBaseModel):
     run_id: str | None = Field(default=None, min_length=1)
     decision_id: str | None = Field(default=None, min_length=1)
     dataset: str | None = Field(default=None, min_length=1)
+    data_provenance: DataProvenance = "unknown"
+    applicability: MemoryApplicability | None = None
     source_agent_name: str | None = Field(default=None, min_length=1)
     outcome: ReasoningOutcome | None = None
     human_verdict: HumanReasoningVerdict | None = None
@@ -495,10 +589,18 @@ class ReasoningMemoryRecord(StrictBaseModel):
     source_type: MemorySourceType
     source_path: str | None = Field(default=None, min_length=1)
     source_hash: str | None = Field(default=None, min_length=1)
+    promotion_source_hash: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     run_id: str | None = Field(default=None, min_length=1)
     postmortem_id: str | None = Field(default=None, min_length=1)
     decision_id: str | None = Field(default=None, min_length=1)
     dataset: str | None = Field(default=None, min_length=1)
+    data_provenance: DataProvenance = "unknown"
+    applicability: MemoryApplicability | None = None
     source_agent_name: str | None = Field(default=None, min_length=1)
     outcome: ReasoningOutcome | None = None
     human_verdict: HumanReasoningVerdict | None = None
@@ -548,6 +650,7 @@ class AgentMemoryQuery(StrictBaseModel):
     target_agent: AgentMemoryTarget
     query_text: str = Field(min_length=1)
     dataset: str | None = Field(default=None, min_length=1)
+    data_provenance: DataProvenance = "unknown"
     run_id: str | None = Field(default=None, min_length=1)
     decision_id: str | None = Field(default=None, min_length=1)
     decision_context: dict[str, str | int | float | bool | None] = Field(

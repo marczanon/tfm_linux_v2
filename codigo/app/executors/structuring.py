@@ -64,6 +64,7 @@ METADATA_FIELDS = [
     "time_since_start_seconds",
     "time_to_failure_seconds",
     "relative_life",
+    "temporal_partition",
     "split",
     "label",
     "target",
@@ -79,6 +80,7 @@ def build_structuring_decision_summary(
     dataset: str = "unknown",
     target_sample_rate_hz: int | None = None,
     main_channel: str | None = None,
+    allowed_split_hints: set[str] | None = None,
 ) -> dict[str, Any]:
     """Resume senales limpias y propone configuraciones temporales soportadas."""
 
@@ -87,6 +89,12 @@ def build_structuring_decision_summary(
         _load_clean_file_metadata(path)
         for path in sorted(clean_path.glob("*.npz"), key=_path_key)
     ]
+    if allowed_split_hints is not None:
+        files = [
+            item
+            for item in files
+            if item.get("split_hint") in allowed_split_hints
+        ]
     if not files:
         return {
             "available": False,
@@ -128,7 +136,10 @@ def build_structuring_decision_summary(
             else None
         ),
         "supported_feature_sets": _supported_feature_sets(),
-        "unsupported_capabilities": _unsupported_structuring_capabilities(dataset),
+        "unsupported_capabilities": _unsupported_structuring_capabilities(
+            dataset,
+            has_temporal_split=bool(summary.get("split_hint_counts")),
+        ),
         "blocking_warnings": blocking_warnings,
         "non_blocking_warnings": non_blocking_warnings,
         "agent_guidance": (
@@ -501,7 +512,11 @@ def _supported_feature_sets() -> list[dict[str, Any]]:
     ]
 
 
-def _unsupported_structuring_capabilities(dataset: str) -> list[dict[str, str]]:
+def _unsupported_structuring_capabilities(
+    dataset: str,
+    *,
+    has_temporal_split: bool = False,
+) -> list[dict[str, str]]:
     capabilities = [
         {
             "capability": "frequency_domain_features",
@@ -509,7 +524,7 @@ def _unsupported_structuring_capabilities(dataset: str) -> list[dict[str, str]]:
             "next_action": "implement_feature_executor",
         }
     ]
-    if dataset == "nasa_ims_bearing":
+    if dataset == "nasa_ims_bearing" and not has_temporal_split:
         capabilities.append(
             {
                 "capability": "run_to_failure_temporal_split",
@@ -626,7 +641,13 @@ def _metadata_row(
     temporal_context: dict[str, dict[str, datetime | None]],
 ) -> dict[str, Any]:
     file_id = item["file_id"]
-    target = 0 if item["label"] == "normal" else 1
+    target: int | str
+    if item["label"] == "normal":
+        target = 0
+    elif item["label"] in {"anomaly", "degradation", "fault"}:
+        target = 1
+    else:
+        target = ""
     if config.label_mode == "fault_type":
         target = item["fault_type"] or "normal"
     window_start = _window_timestamp(item.get("timestamp_start"), start, item["sample_rate_hz"])
@@ -656,6 +677,10 @@ def _metadata_row(
         "time_since_start_seconds": temporal["time_since_start_seconds"],
         "time_to_failure_seconds": temporal["time_to_failure_seconds"],
         "relative_life": temporal["relative_life"],
+        "temporal_partition": item.get("metadata_json", {}).get(
+            "temporal_partition",
+            "",
+        ),
         "split": split,
         "label": item["label"],
         "target": target,
@@ -797,6 +822,9 @@ def _write_tensors(path: Path, rows: list[dict[str, Any]], windows: list[np.ndar
         windows=np.asarray(windows, dtype=np.float32),
         window_ids=np.asarray([row["window_id"] for row in rows]),
         file_ids=np.asarray([row["file_id"] for row in rows]),
+        temporal_partitions=np.asarray(
+            [row["temporal_partition"] for row in rows]
+        ),
         splits=np.asarray([row["split"] for row in rows]),
         labels=np.asarray([row["label"] for row in rows]),
         targets=np.asarray([row["target"] for row in rows]),
@@ -822,6 +850,13 @@ def _split_summary(
             for split in ["train", "validation", "test"]
         },
         "window_counts": dict(Counter(row["split"] for row in rows)),
+        "temporal_partition_counts": dict(
+            Counter(
+                str(row["temporal_partition"])
+                for row in rows
+                if row.get("temporal_partition")
+            )
+        ),
         "label_counts_by_split": {
             split: dict(counter) for split, counter in labels_by_split.items()
         },
