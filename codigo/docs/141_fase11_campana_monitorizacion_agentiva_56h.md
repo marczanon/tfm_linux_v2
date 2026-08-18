@@ -348,8 +348,11 @@ En este cierre:
   empíricas atribuibles a este hito;
 - no se ha publicado V4 ni se ha modificado el resultado V3 o su `current.json`.
 
-El siguiente paso es ejecutar una vez la campaña completa ya prerregistrada.
-El resultado se conservará tanto si pasa como si queda bloqueado.
+La hoja
+`142_fase11_cinematica_monitorizacion_y_export_evidencia.md` cierra primero el
+gate visual y el plan de captura post-hoc. Después se ejecutará una vez la
+campaña completa ya prerregistrada. El resultado se conservará tanto si pasa
+como si queda bloqueado.
 
 ## 11. Claims permitidos
 

@@ -19,14 +19,17 @@ import type {
 } from "../../../src/types";
 import {
   EXACT_SEVEN_AGENTS_SCENARIO,
+  MONITORING_RECORD_CATALOG_SCENARIO,
   type AgentRunScenario,
 } from "./agentRuns";
 
 export interface MonitoringReplayScenario {
   campaign?: MonitoringEvidenceCampaignView;
+  campaignUpdates?: MonitoringEvidenceCampaignView[];
   campaignFailure?: {
     afterRequestCount: number;
     status: number;
+    untilRequestCount?: number;
   };
   childJob?: ApiRunJobStatus;
   childRunScenario?: AgentRunScenario;
@@ -68,6 +71,8 @@ export const MONITORING_GATE_SCENARIO: MonitoringReplayScenario =
   buildGateScenario();
 export const MONITORING_CAMPAIGN_SCENARIO: MonitoringReplayScenario =
   buildCampaignScenario();
+export const MONITORING_CAMPAIGN_RESOLVED_SCENARIO: MonitoringReplayScenario =
+  buildCampaignResolvedScenario();
 
 export const MONITORING_REVIEW_GATE_FIXTURE: MonitoringReviewGateView =
   buildReviewGateFixture();
@@ -207,6 +212,115 @@ function buildCampaignScenario(): MonitoringReplayScenario {
       state: firstStep.state,
       ticks: [firstStep.tick],
       triggers: firstStep.triggers,
+    },
+  };
+}
+
+function buildCampaignResolvedScenario(): MonitoringReplayScenario {
+  const scenario = buildCampaignScenario();
+  const childRunScenario = MONITORING_RECORD_CATALOG_SCENARIO;
+  const childRunId = childRunScenario.run.run_id;
+  const currentTick = campaignTick(353, "2004-02-16T22:32:39", {
+    healthIndex: 28,
+    healthState: "warning",
+    riskIndex: 72,
+    score: 1.35,
+    threshold: 1,
+  });
+  const emitted = stateTransitionTrigger(currentTick, {
+    eventId: "evt-campaign-state-transition-emitted",
+    lifecycleRevision: 1,
+    lifecycleStatus: "emitted",
+    sequence: 1,
+  });
+  const resolved: MonitoringTriggerEvent = {
+    ...emitted,
+    child_run_id: childRunId,
+    event_id: "evt-campaign-state-transition-resolved",
+    lifecycle_revision: 4,
+    lifecycle_status: "resolved",
+    previous_event_id: emitted.event_id,
+    recorded_at: "2026-08-18T10:04:00Z",
+    sequence: 4,
+  };
+  const attempt: MonitoringChildRunAttempt = {
+    attempt_no: 1,
+    causal_view_ref: "artifact:e2e:campaign-causal-view",
+    causal_view_sha256: "6".repeat(64),
+    child_revision: 1,
+    child_run_id: childRunId,
+    completed_at: "2026-08-18T10:04:00Z",
+    dispatched_at: "2026-08-18T10:02:00Z",
+    error: null,
+    job_id: childRunId,
+    lifecycle_status: "resolved",
+    request_ref: "artifact:e2e:campaign-review-request",
+    request_sha256: "5".repeat(64),
+    result_ref: "artifact:e2e:campaign-review-result",
+    result_sha256: "7".repeat(64),
+    run_id: childRunId,
+    schema_version: "monitoring_child_run_attempt_v1",
+    session_id: SESSION_ID,
+    started_at: "2026-08-18T10:02:01Z",
+    trigger_event_id: emitted.event_id,
+    trigger_id: emitted.trigger_id,
+    updated_at: "2026-08-18T10:04:00Z",
+  };
+  const state = {
+    ...sessionState(354, currentTick, emitted.trigger_id, 5, 1),
+    child_run_ids: [childRunId],
+    status: "paused" as const,
+    updated_at: "2026-08-18T10:04:00Z",
+  };
+  const campaign = structuredClone(scenario.campaign!);
+  campaign.current_revision = 354;
+  campaign.execution_cursor = 353;
+  campaign.phase = "agentic_window";
+  campaign.progress_ratio = 354 / 689;
+  campaign.observed_trigger_count = 1;
+  campaign.terminal_child_run_count = 1;
+  campaign.resolved_child_run_count = 1;
+  campaign.observed_decision_count = 7;
+  campaign.physical_attempt_count = 7;
+  campaign.llm_origin_decision_count = 7;
+  campaign.policy_proposal_count = 1;
+  campaign.runtime_elapsed_seconds = 240;
+  campaign.updated_at = "2026-08-18T10:04:00Z";
+  campaign.reviews[0] = {
+    ...campaign.reviews[0],
+    child_run_id: childRunId,
+    decision_count: 7,
+    lifecycle: "resolved",
+    llm_origin_count: 7,
+    proposal_application_status: "not_applied",
+    proposal_status: "advisory_not_applied",
+    trigger_id: emitted.trigger_id,
+  };
+  return {
+    ...scenario,
+    campaign,
+    childJob: {
+      created_at: attempt.dispatched_at,
+      detail: "campaign review fixture completed",
+      events: childRunScenario.events,
+      finished_at: attempt.completed_at,
+      job_id: childRunId,
+      run_id: childRunId,
+      snapshot: childRunScenario.snapshot,
+      started_at: attempt.started_at,
+      status: "completed",
+    },
+    childRunScenario,
+    initialSession: {
+      ...scenario.initialSession,
+      active_child_run_id: null,
+      child_revision: 1,
+      child_runs: [attempt],
+      state,
+      ticks: [scenario.initialSession.ticks[0], currentTick].filter(
+        (item): item is ReplayTick => item !== undefined,
+      ),
+      triggers: [emitted, resolved],
     },
   };
 }
@@ -654,6 +768,37 @@ function tick(
     schema_version: "monitoring_replay_tick_v1",
     sequence: cursor + 1,
     session_id: SESSION_ID,
+    snapshot_id: snapshotId,
+    source_time: sourceTime,
+    tick_id: tickId,
+  };
+}
+
+function campaignTick(
+  cursor: number,
+  sourceTime: string,
+  modeled: {
+    healthIndex: number;
+    healthState: ModeledMonitoringFrame["health_state"];
+    riskIndex: number;
+    score: number;
+    threshold: number;
+  },
+): ReplayTick {
+  const base = tick(0, modeled);
+  const tickId = `${SESSION_ID}:tick:${String(cursor).padStart(6, "0")}`;
+  const snapshotId = sourceTime.replace(/[-:T]/g, ".");
+  return {
+    ...base,
+    cursor,
+    frames: base.frames.map((frame) => ({
+      ...frame,
+      evidence_refs: frame.evidence_refs.map(() => `evidence:fixture:${snapshotId}`),
+      frame_id: `${tickId}:${frame.asset_id}:${frame.channel_id}`,
+      tick_id: tickId,
+    })),
+    input_record_hash: "9".repeat(64),
+    sequence: cursor + 1,
     snapshot_id: snapshotId,
     source_time: sourceTime,
     tick_id: tickId,

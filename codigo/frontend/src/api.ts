@@ -30,6 +30,7 @@ import type {
   MonitoringSessionView,
   MonitoringStepRequest,
   MonitoringStepResponse,
+  MonitoringTickListResponse,
   ReasoningMemoryRecord,
 } from "./types";
 
@@ -134,6 +135,16 @@ export async function getMonitoringSession(
 ): Promise<MonitoringSessionView> {
   return apiRequest<MonitoringSessionView>(
     `/monitoring/sessions/${encodeURIComponent(sessionId)}`,
+  );
+}
+
+export async function getMonitoringTicks(
+  sessionId: string,
+  afterSequence = 0,
+): Promise<MonitoringTickListResponse> {
+  const query = new URLSearchParams({ after_sequence: String(afterSequence) });
+  return apiRequest<MonitoringTickListResponse>(
+    `/monitoring/sessions/${encodeURIComponent(sessionId)}/ticks?${query.toString()}`,
   );
 }
 

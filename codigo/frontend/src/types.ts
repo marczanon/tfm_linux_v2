@@ -453,6 +453,13 @@ export interface MonitoringSessionView {
   active_child_run_id: string | null;
 }
 
+export interface MonitoringTickListResponse {
+  session_id: string;
+  after_sequence: number;
+  ticks: ReplayTick[];
+  triggers: MonitoringTriggerEvent[];
+}
+
 export interface MonitoringStepResponse {
   receipt: ReplayStepReceipt;
   state: ReplaySessionState;

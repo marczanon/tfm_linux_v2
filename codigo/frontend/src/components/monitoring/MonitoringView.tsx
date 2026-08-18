@@ -26,12 +26,16 @@ import {
   dispatchMonitoringReview,
   getCurrentMonitoringEvidenceCampaign,
   getCurrentMonitoringReviewGate,
+  getMonitoringTicks,
   getMonitoringSession,
+  getRunEvents,
+  getRunJobEvents,
   listMonitoringSources,
   stepMonitoringSession,
 } from "../../api";
 import type {
   AgentActivationPolicyKind,
+  AgentRuntimeEvent,
   MonitoringEvidenceCampaignView,
   MonitoringFrame,
   MonitoringChildRunAttempt,
@@ -57,6 +61,7 @@ import {
   triggerLifecycleLabel,
   triggerTypeLabel,
 } from "./MonitoringReplayChart";
+import { MonitoringCinematicView } from "./MonitoringCinematicView";
 
 type MonitoringTab = MonitoringReturnTab;
 type EvidenceCampaignLoadState =
@@ -112,11 +117,15 @@ export function MonitoringView({
   const [openingCampaignSession, setOpeningCampaignSession] = useState(false);
   const [observerCampaignSessionId, setObserverCampaignSessionId] =
     useState<string | null>(null);
+  const [campaignRunEvents, setCampaignRunEvents] =
+    useState<Record<string, AgentRuntimeEvent[]>>({});
   const [pendingRestoreFocus, setPendingRestoreFocus] =
     useState<{ tab: MonitoringTab; triggerId: string } | null>(null);
   const restoredBridgeRef = useRef<string | null>(null);
   const dispatchCommandIdsRef = useRef(new Map<string, string>());
   const dispatchInFlightRef = useRef(new Set<string>());
+  const campaignRunEventsRef = useRef(new Map<string, AgentRuntimeEvent[]>());
+  const terminalCampaignRunsLoadedRef = useRef(new Set<string>());
 
   const loadSources = useCallback(async () => {
     setLoadingSources(true);
@@ -353,41 +362,194 @@ export function MonitoringView({
   }, [managedCampaignSession]);
 
   useEffect(() => {
+    campaignRunEventsRef.current = new Map();
+    terminalCampaignRunsLoadedRef.current = new Set();
+    setCampaignRunEvents({});
+  }, [evidenceCampaign?.campaign_id]);
+
+  useEffect(() => {
     if (
       evidenceCampaign === null ||
       ["completed", "failed", "interrupted"].includes(evidenceCampaign.status)
     ) {
       return;
     }
+    const currentCampaign = evidenceCampaign;
     let cancelled = false;
-    const timeoutId = window.setTimeout(async () => {
-      const refreshedCampaign = await loadEvidenceCampaign(true);
-      if (
-        cancelled ||
-        refreshedCampaign === null ||
-        session?.config.session_id !== refreshedCampaign.session_id ||
-        refreshedCampaign.updated_at === evidenceCampaign.updated_at
-      ) {
+    let loading = false;
+
+    async function refreshCampaign() {
+      if (cancelled || loading) return;
+      loading = true;
+      let refreshedCampaign: MonitoringEvidenceCampaignView;
+      try {
+        refreshedCampaign = await getCurrentMonitoringEvidenceCampaign();
+      } catch (caught) {
+        if (cancelled) return;
+        setEvidenceCampaignState(
+          caught instanceof ApiClientError && caught.status === 404
+            ? "absent"
+            : caught instanceof ApiClientError && caught.status === 409
+              ? "integrity_error"
+              : "error",
+        );
+        setEvidenceCampaignError(errorText(caught));
+        loading = false;
+        return;
+      }
+      if (cancelled) {
+        loading = false;
         return;
       }
       try {
-        const refreshedSession = await getMonitoringSession(refreshedCampaign.session_id);
-        if (cancelled) return;
-        setInspectionCursor((current) =>
-          current === null || current === session.state.execution_cursor
-            ? refreshedSession.state.execution_cursor
-            : current,
-        );
-        setSession(refreshedSession);
+        const campaignChanged = refreshedCampaign.updated_at !== currentCampaign.updated_at;
+        if (
+          campaignChanged &&
+          session?.config.session_id === refreshedCampaign.session_id
+        ) {
+          const lifecycleChanged = campaignReviewProjectionKey(refreshedCampaign)
+            !== campaignReviewProjectionKey(currentCampaign);
+          const campaignClosed = ["completed", "failed", "interrupted"].includes(
+            refreshedCampaign.status,
+          );
+          if (lifecycleChanged || campaignClosed) {
+            const refreshedSession = await getMonitoringSession(refreshedCampaign.session_id);
+            if (cancelled) return;
+            setInspectionCursor((current) =>
+              current === null || current === session.state.execution_cursor
+                ? refreshedSession.state.execution_cursor
+                : current,
+            );
+            setSession(refreshedSession);
+          } else if (refreshedCampaign.execution_cursor !== session.state.execution_cursor) {
+            const afterSequence = session.ticks.reduce(
+              (latest, tick) => Math.max(latest, tick.sequence),
+              0,
+            );
+            const delta = await getMonitoringTicks(
+              refreshedCampaign.session_id,
+              afterSequence,
+            );
+            if (cancelled) return;
+            const latestTick = delta.ticks.length > 0
+              ? delta.ticks[delta.ticks.length - 1]
+              : null;
+            setInspectionCursor((current) =>
+              current === null || current === session.state.execution_cursor
+                ? refreshedCampaign.execution_cursor
+                : current,
+            );
+            setSession((current) => {
+              if (current?.config.session_id !== refreshedCampaign.session_id) return current;
+              return {
+                ...current,
+                state: {
+                  ...current.state,
+                  execution_cursor: refreshedCampaign.execution_cursor,
+                  revision: refreshedCampaign.current_revision,
+                  sequence: latestTick?.sequence ?? current.state.sequence,
+                  last_committed_tick_id: latestTick?.tick_id
+                    ?? current.state.last_committed_tick_id,
+                  active_policy_refs: latestTick?.active_policy_refs
+                    ?? current.state.active_policy_refs,
+                  status: campaignSessionStatus(refreshedCampaign, current.state.status),
+                  updated_at: refreshedCampaign.updated_at,
+                },
+                ticks: mergeTickBatch(current.ticks, delta.ticks),
+                triggers: mergeTriggers(current.triggers, delta.triggers),
+              };
+            });
+          }
+        }
+        if (!cancelled) {
+          setEvidenceCampaign(refreshedCampaign);
+          setEvidenceCampaignState("published");
+          setEvidenceCampaignError(null);
+        }
       } catch (caught) {
         if (!cancelled) setEvidenceCampaignError(errorText(caught));
+      } finally {
+        loading = false;
       }
-    }, 4_000);
+    }
+
+    const intervalId = window.setInterval(() => void refreshCampaign(), 4_000);
     return () => {
       cancelled = true;
-      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
     };
-  }, [evidenceCampaign, loadEvidenceCampaign, session]);
+  }, [evidenceCampaign, session]);
+
+  useEffect(() => {
+    if (evidenceCampaign === null || !managedCampaignSession) return;
+    let cancelled = false;
+    let loading = false;
+
+    async function loadCampaignRunEvents() {
+      if (loading) return;
+      loading = true;
+      let changed = false;
+      const next = new Map(campaignRunEventsRef.current);
+      try {
+        for (const review of evidenceCampaign!.reviews) {
+          const childRunId = review.child_run_id;
+          if (!childRunId) continue;
+          const current = next.get(childRunId) ?? [];
+          try {
+            if (review.lifecycle === "running") {
+              const afterSequence = current.reduce(
+                (latest, event) => Math.max(latest, event.sequence),
+                0,
+              );
+              const incoming = await getRunJobEvents(
+                childRunId,
+                afterSequence > 0 ? afterSequence : null,
+              );
+              const merged = mergeRuntimeEvents(current, incoming);
+              if (merged.length !== current.length) {
+                next.set(childRunId, merged);
+                changed = true;
+              }
+            } else if (
+              ["resolved", "failed", "interrupted"].includes(review.lifecycle) &&
+              !terminalCampaignRunsLoadedRef.current.has(childRunId)
+            ) {
+              const persisted = await getRunEvents(childRunId);
+              next.set(childRunId, persisted);
+              terminalCampaignRunsLoadedRef.current.add(childRunId);
+              changed = true;
+            }
+          } catch (caught) {
+            // El job activo vive en el proceso de campaña y puede no estar visible
+            // desde la API observadora. La traza sellada se recupera al resolver.
+            if (
+              !(caught instanceof ApiClientError && caught.status === 404) &&
+              !cancelled
+            ) {
+              setEvidenceCampaignError(errorText(caught));
+            }
+          }
+        }
+        if (cancelled || !changed) return;
+        campaignRunEventsRef.current = next;
+        setCampaignRunEvents(Object.fromEntries(next));
+      } finally {
+        loading = false;
+      }
+    }
+
+    void loadCampaignRunEvents();
+    const hasActiveReview = evidenceCampaign.reviews.some(
+      (review) => review.lifecycle === "running" && review.child_run_id !== null,
+    );
+    const intervalId = hasActiveReview
+      ? window.setInterval(() => void loadCampaignRunEvents(), 2_000)
+      : null;
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) window.clearInterval(intervalId);
+    };
+  }, [evidenceCampaign?.updated_at, managedCampaignSession]);
 
   async function openEvidenceCampaignSession() {
     if (evidenceCampaign === null || evidenceCampaign.status === "planned") return;
@@ -407,7 +569,7 @@ export function MonitoringView({
       setSelectedAssetKey(primaryAsset ? assetKey(primaryAsset) : null);
       setSelectedTriggerId(null);
       setInspectionCursor(restored.state.execution_cursor);
-      setActiveTab("replay");
+      setActiveTab("cinematic");
       setNotice("Campaña abierta en modo observador; el navegador no avanza el replay.");
     } catch (caught) {
       setError(errorText(caught));
@@ -933,6 +1095,7 @@ export function MonitoringView({
             role="tablist"
           >
             <MonitoringTabButton activeTab={activeTab} id="status" onSelect={setActiveTab}>Estado</MonitoringTabButton>
+            <MonitoringTabButton activeTab={activeTab} id="cinematic" onSelect={setActiveTab}>Cinemática</MonitoringTabButton>
             <MonitoringTabButton activeTab={activeTab} id="replay" onSelect={setActiveTab}>Replay 2D</MonitoringTabButton>
             <MonitoringTabButton activeTab={activeTab} id="events" onSelect={setActiveTab}>Eventos</MonitoringTabButton>
           </div>
@@ -954,6 +1117,21 @@ export function MonitoringView({
                 onOpenEvents={() => setActiveTab("events")}
                 onOpenAgentRun={openAgentRun}
                 onDispatchReview={dispatchTrigger}
+              />
+            </div>
+          ) : null}
+          {activeTab === "cinematic" ? (
+            <div aria-labelledby="monitoring-tab-cinematic" id="monitoring-panel-cinematic" role="tabpanel" tabIndex={0}>
+              <MonitoringCinematicView
+                assetSpecs={session.config.asset_specs}
+                campaign={evidenceCampaign}
+                executionCursor={session.state.execution_cursor}
+                inspectionCursor={inspectedCursor}
+                onInspect={inspectCursor}
+                onSelectTrigger={selectTrigger}
+                runEventsByChildId={campaignRunEvents}
+                ticks={sortedTicks}
+                triggers={latestTriggers}
               />
             </div>
           ) : null}
@@ -1900,7 +2078,7 @@ function MonitoringTabButton({
   onSelect: (tab: MonitoringTab) => void;
 }) {
   const selected = activeTab === id;
-  const tabOrder: MonitoringTab[] = ["status", "replay", "events"];
+  const tabOrder: MonitoringTab[] = ["status", "cinematic", "replay", "events"];
   function moveFocus(event: React.KeyboardEvent<HTMLButtonElement>) {
     const currentIndex = tabOrder.indexOf(id);
     let nextIndex: number | null = null;
@@ -1947,6 +2125,42 @@ function mergeTicks(ticks: ReplayTick[], tick: ReplayTick | null): ReplayTick[] 
   return [...ticks.filter((candidate) => candidate.tick_id !== tick.tick_id), tick].sort(
     (left, right) => left.cursor - right.cursor,
   );
+}
+
+function mergeTickBatch(ticks: ReplayTick[], incoming: ReplayTick[]): ReplayTick[] {
+  const merged = new Map(ticks.map((tick) => [tick.tick_id, tick]));
+  for (const tick of incoming) merged.set(tick.tick_id, tick);
+  return [...merged.values()].sort((left, right) => left.cursor - right.cursor);
+}
+
+function mergeRuntimeEvents(
+  current: AgentRuntimeEvent[],
+  incoming: AgentRuntimeEvent[],
+): AgentRuntimeEvent[] {
+  const merged = new Map(current.map((event) => [event.event_id, event]));
+  for (const event of incoming) merged.set(event.event_id, event);
+  return [...merged.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function campaignReviewProjectionKey(campaign: MonitoringEvidenceCampaignView): string {
+  return campaign.reviews.map((review) => [
+    review.context_id,
+    review.lifecycle,
+    review.trigger_id ?? "",
+    review.child_run_id ?? "",
+    review.decision_count,
+    review.proposal_status ?? "",
+  ].join(":")).join("|");
+}
+
+function campaignSessionStatus(
+  campaign: MonitoringEvidenceCampaignView,
+  current: MonitoringSessionView["state"]["status"],
+): MonitoringSessionView["state"]["status"] {
+  if (campaign.status === "completed") return "completed";
+  if (campaign.status === "failed" || campaign.status === "interrupted") return "failed";
+  if (campaign.status === "running") return "running";
+  return current;
 }
 
 function mergeTriggers(

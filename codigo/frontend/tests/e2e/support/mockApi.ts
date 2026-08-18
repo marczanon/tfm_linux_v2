@@ -36,7 +36,9 @@ export interface MonitoringMockApiController extends MockApiController {
   readonly campaignRequests: number;
   readonly dispatchRequests: MonitoringReviewDispatchRequest[];
   readonly sessionRequests: MonitoringSessionCreateRequest[];
+  readonly sessionGetRequests: number;
   readonly stepRequests: MonitoringStepRequest[];
+  readonly tickListAfterSequences: number[];
   releaseDispatchResponse(): void;
 }
 
@@ -268,6 +270,9 @@ export async function installMonitoringMockApi(
   const stepRequests: MonitoringStepRequest[] = [];
   const dispatchRequests: MonitoringReviewDispatchRequest[] = [];
   let campaignRequests = 0;
+  let latestCampaign = scenario.campaign ?? scenario.campaignUpdates?.[0] ?? null;
+  let sessionGetRequests = 0;
+  const tickListAfterSequences: number[] = [];
   let currentSession: MonitoringSessionView = structuredClone(scenario.initialSession);
   let nextStepIndex = 0;
   let releaseDispatchGate: () => void = () => undefined;
@@ -302,7 +307,11 @@ export async function installMonitoringMockApi(
       campaignRequests += 1;
       if (
         scenario.campaignFailure &&
-        campaignRequests > scenario.campaignFailure.afterRequestCount
+        campaignRequests > scenario.campaignFailure.afterRequestCount &&
+        (
+          scenario.campaignFailure.untilRequestCount === undefined ||
+          campaignRequests <= scenario.campaignFailure.untilRequestCount
+        )
       ) {
         return json(
           route,
@@ -310,8 +319,12 @@ export async function installMonitoringMockApi(
           scenario.campaignFailure.status,
         );
       }
-      return scenario.campaign
-        ? json(route, scenario.campaign)
+      const updates = scenario.campaignUpdates;
+      latestCampaign = updates?.length
+        ? updates[Math.min(campaignRequests - 1, updates.length - 1)]
+        : scenario.campaign ?? null;
+      return latestCampaign
+        ? json(route, latestCampaign)
         : notFound(route, "Campaña de evidencia no publicada en esta fixture.");
     }
     if (
@@ -320,6 +333,17 @@ export async function installMonitoringMockApi(
       path === `/api/run-jobs/${encodeURIComponent(scenario.childJob.job_id)}`
     ) {
       return json(route, scenario.childJob);
+    }
+    if (
+      method === "GET" &&
+      scenario.childJob &&
+      path === `/api/run-jobs/${encodeURIComponent(scenario.childJob.job_id)}/events`
+    ) {
+      const afterSequence = Number(url.searchParams.get("after_sequence") ?? 0);
+      return json(
+        route,
+        scenario.childJob.events.filter((event) => event.sequence > afterSequence),
+      );
     }
     if (method === "GET" && path === "/api/memory/status") {
       return json(route, FIXTURE_MEMORY_STATUS);
@@ -365,7 +389,45 @@ export async function installMonitoringMockApi(
 
     const sessionPath = `/api/monitoring/sessions/${encodeURIComponent(currentSession.config.session_id)}`;
     if (method === "GET" && path === sessionPath) {
+      sessionGetRequests += 1;
       return json(route, currentSession);
+    }
+    if (method === "GET" && path === `${sessionPath}/ticks`) {
+      const afterSequence = Number(url.searchParams.get("after_sequence") ?? 0);
+      tickListAfterSequences.push(afterSequence);
+      const publishedCursor = latestCampaign?.execution_cursor
+        ?? currentSession.state.execution_cursor
+        ?? -1;
+      const tickCandidates = [
+        ...currentSession.ticks,
+        ...scenario.steps.flatMap((step) => step.tick ? [step.tick] : []),
+      ];
+      const uniqueTicks = [...new Map(
+        tickCandidates.map((tick) => [tick.tick_id, tick]),
+      ).values()];
+      const ticks = uniqueTicks.filter(
+        (tick) => tick.cursor <= publishedCursor && tick.sequence > afterSequence,
+      );
+      const tickIds = new Set(ticks.map((tick) => tick.tick_id));
+      const triggerCandidates = [
+        ...currentSession.triggers,
+        ...scenario.steps.flatMap((step) => step.triggers),
+      ];
+      return json(route, {
+        after_sequence: afterSequence,
+        session_id: currentSession.config.session_id,
+        ticks,
+        triggers: triggerCandidates.filter(
+          (trigger) => trigger.origin_tick_id !== null && tickIds.has(trigger.origin_tick_id),
+        ),
+      });
+    }
+    if (method === "GET" && path === `${sessionPath}/child-runs`) {
+      return json(route, {
+        child_revision: currentSession.child_revision,
+        child_runs: currentSession.child_runs,
+        session_id: currentSession.config.session_id,
+      });
     }
     if (
       method === "POST" &&
@@ -427,6 +489,9 @@ export async function installMonitoringMockApi(
     get campaignRequests() {
       return campaignRequests;
     },
+    get sessionGetRequests() {
+      return sessionGetRequests;
+    },
     releaseDispatchResponse() {
       releaseDispatchGate();
     },
@@ -435,6 +500,7 @@ export async function installMonitoringMockApi(
     },
     sessionRequests,
     stepRequests,
+    tickListAfterSequences,
     unhandledApiRequests,
   };
 }

@@ -295,6 +295,27 @@ completar siete roles, resolver claves del catálogo por registro, persistir la
 propuesta consultiva y mantener memoria OFF y política no aplicada antes de
 invertir el tiempo de la ejecución larga.
 
+\subsection{Protocolo de observación y exportación visual}
+
+La receta de captura se prerregistra de forma independiente y no altera las
+fuentes selladas de la campaña. Fija resolución 1920 por 1080, locale español,
+movimiento reducido, orden de los 726 beats y fotogramas clave en inicio, final
+del pre-roll, cursores 353, 496, 498, 499 y 688, además del veredicto. La captura
+solo puede ejecutarse sobre una campaña terminal con resultado verificable.
+El plan quedó sellado antes de iniciar la campaña con SHA-256
+\texttt{cbe43602...07ba52}; su registro independiente tiene SHA-256
+\texttt{832ed4ef...836115}.
+
+El gate previo comprueba que el futuro no aparezca al retroceder, que
+\texttt{bearing\_2..4} nunca reciban estado de salud, que la matriz
+$4\times7$ conserve roles y contextos, que E01--EN permanezca ligada a su catálogo
+y que no exista ninguna petición de mutación desde el capturador. Las pruebas
+visuales usan una fixture explícitamente rotulada; no aportan resultados NASA.
+El gate focal previo reunió 11 pruebas Python correctas, 16 recorridos
+Playwright correctos en escritorio y móvil y una captura explícita correcta;
+las dos pruebas que escriben PNG se omiten deliberadamente en la regresión
+normal.
+
 \subsection{Integración de agentes y memoria RAG}
 
 Las pruebas técnicas de memoria han recorrido el ciclo desde un episodio de

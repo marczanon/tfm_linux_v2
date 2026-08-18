@@ -1095,6 +1095,53 @@ fallback, con selección del catálogo causal y una propuesta no aplicada. No se
 ha lanzado todavía la campaña oficial; su plan se ha materializado y publicado
 en estado \texttt{planned}, revisión cero y sin crear la sesión.
 
+\subsubsection{Cinemática y captura post-hoc}
+
+Antes de ejecutar la campaña se añadió una proyección visual 2D construida
+exclusivamente desde el prefijo causal confirmado. La vista no introduce otra
+fuente de verdad: combina telemetría RMS y pico de los cuatro rodamientos, ratio
+entre score y umbral en escala logarítmica, Health Index, riesgo, estados,
+triggers y expedientes agentivos. Solo el primer rodamiento recibe salidas del
+detector y estado algorítmico; los otros tres se mantienen como \emph{solo
+telemetría}.
+
+La historia agentiva se divide en cuatro actos y siete roles. Cada decisión
+puede mostrar hipótesis, observación esperada, criterio de refutación, acción,
+confianza declarada y handles E01--EN. La propuesta se rotula siempre como
+consultiva y no aplicada. El reloj de fuente NASA y el runtime de la revisión se
+presentan por separado para no atribuir las decisiones al timestamp del sensor.
+
+La observación viva usa el endpoint incremental existente con
+\texttt{after\_sequence}. Los ticks se fusionan por identidad y una lectura de
+sesión completa queda reservada para apertura, transición de lifecycle o cierre.
+Los eventos de una hija activa se solicitan incrementalmente cuando son visibles
+en el mismo proceso. En la campaña oficial, el driver y la API observadora usan
+procesos distintos, de modo que el job en memoria puede no ser consultable: la
+vista muestra entonces ``revisión en análisis'' hasta leer el expediente
+persistido al terminar. No se presenta esa espera como actividad interna del
+modelo. Los ticks sí mantienen polling incremental y evitan descargar
+repetidamente todo el ledger creciente.
+
+La captura audiovisual se define como un proceso posterior. Un plan separado
+enlaza el SHA del plan oficial con 689 escenas de tick, cuatro de trigger, 28 de
+decisión, cuatro de propuesta y un veredicto: 726 beats semánticos. El timeline
+JSONL encadenado por SHA es la evidencia autoritativa; PNG y WebM son
+representaciones derivadas. Esto permite reconstruir el vídeo después del
+cierre sin mantener un grabador durante las dos horas de campaña.
+
+La Figura~\ref{fig:preflight_cinematica_monitorizacion} muestra la composición
+16:9 ejercitada antes del lanzamiento. Es una fixture de interfaz, no un
+resultado de la campaña: su función es comprobar jerarquía visual, legibilidad,
+los cuatro canales, el rail causal y la separación entre hipótesis y diagnóstico.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figuras/captura_web_cinematica_monitorizacion_preflight.png}
+  \caption{Preflight visual de la cinemática 2D con datos de fixture, marcado
+  explícitamente y sin valor como resultado NASA.}
+  \label{fig:preflight_cinematica_monitorizacion}
+\end{figure}
+
 \subsection{Interfaz de usuario}
 
 La interfaz web permite configurar una ejecución, realizar la verificación previa,

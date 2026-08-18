@@ -10,7 +10,7 @@ export type AppView =
   | "agents"
   | "visualization";
 
-export type MonitoringReturnTab = "status" | "replay" | "events";
+export type MonitoringReturnTab = "status" | "cinematic" | "replay" | "events";
 
 export interface MonitoringAgentBridgeContext {
   sessionId: string;

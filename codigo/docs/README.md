@@ -525,3 +525,8 @@ Documentos iniciales:
   consultivas esperadas; añade pacing, heartbeat, prerregistro, publicación y
   veredictos operativo/agentivo separados. La campaña oficial sigue pendiente;
   solo se ha cerrado un smoke diagnóstico separado sobre el primer trigger.
+- `142_fase11_cinematica_monitorizacion_y_export_evidencia.md`: cierra una
+  lectura 2D causal para no especialistas, polling incremental, storyboard de
+  cuatro actos por siete roles y un exportador post-hoc de timeline, PNG y
+  WebM; deja prerregistrada la receta visual sin modificar las fuentes selladas
+  ni ejecutar la campaña.
