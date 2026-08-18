@@ -519,3 +519,9 @@ Documentos iniciales:
   desacuerdo e invalidez y declara siempre `not_applied`; no ejecuta Qwen, no
   inventa parametros ni implementa validacion, aprobacion o aplicacion de
   politicas.
+- `141_fase11_campana_monitorizacion_agentiva_56h.md`: prepara una campaña P3
+  histórica acelerada con pre-roll `0..352` y ventana agentiva `353..688`
+  (55 h 50 min de tiempo NASA), cuatro hijas, 28 decisiones y cuatro propuestas
+  consultivas esperadas; añade pacing, heartbeat, prerregistro, publicación y
+  veredictos operativo/agentivo separados. La campaña oficial sigue pendiente;
+  solo se ha cerrado un smoke diagnóstico separado sobre el primer trigger.

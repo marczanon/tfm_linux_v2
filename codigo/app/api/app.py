@@ -23,6 +23,9 @@ from codigo.app.services.monitoring_review_store import MonitoringReviewStore
 from codigo.app.services.monitoring_review_reliability import (
     DEFAULT_MONITORING_REVIEW_RELIABILITY_OUTPUT_DIR,
 )
+from codigo.app.services.monitoring_evidence_campaign import (
+    DEFAULT_MONITORING_EVIDENCE_CAMPAIGN_OUTPUT_DIR,
+)
 from codigo.app.services.llm import (
     JSONLLMClient,
     OllamaJSONClient,
@@ -60,6 +63,9 @@ def create_app(
     monitoring_review_use_llm: bool = True,
     monitoring_review_reliability_output_dir: Path | str = (
         DEFAULT_MONITORING_REVIEW_RELIABILITY_OUTPUT_DIR
+    ),
+    monitoring_evidence_campaign_output_dir: Path | str = (
+        DEFAULT_MONITORING_EVIDENCE_CAMPAIGN_OUTPUT_DIR
     ),
 ) -> FastAPI:
     """Crea la API configurando el directorio local de ejecuciones."""
@@ -114,6 +120,9 @@ def create_app(
     application.state.monitoring_review_use_llm = monitoring_review_use_llm
     application.state.monitoring_review_reliability_output_dir = Path(
         monitoring_review_reliability_output_dir
+    )
+    application.state.monitoring_evidence_campaign_output_dir = Path(
+        monitoring_evidence_campaign_output_dir
     )
     application.include_router(router)
     return application

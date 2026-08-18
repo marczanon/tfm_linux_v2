@@ -12,6 +12,7 @@ Documento de referencia principal:
 - `codigo/docs/133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`
 - `codigo/docs/139_fase11_catalogo_evidencia_causal_por_registro.md`
 - `codigo/docs/140_fase11_policy_proposal_consultiva.md`
+- `codigo/docs/141_fase11_campana_monitorizacion_agentiva_56h.md`
 - `codigo/docs/135_fase11_motor_triggers_p3_determinista.md`
 - `codigo/docs/131_fase10_sala_control_agentica_historia_visual.md`
 - `codigo/docs/95_cierre_fase9_run_to_failure_maximo_nivel.md`
@@ -27,7 +28,7 @@ Documento de referencia principal:
 cierres operativos de Fases 6, 9 y 10, la guia inmediata para nuevas sesiones
 es `codigo/docs/133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`, con el
 cierre implementado mas reciente en
-`codigo/docs/140_fase11_policy_proposal_consultiva.md`. La hoja
+`codigo/docs/141_fase11_campana_monitorizacion_agentiva_56h.md`. La hoja
 `128_fase11_hoja_ruta_industrializacion_agentica_event_driven.md` se conserva
 como propuesta historica amplia; colas, workers, nuevos datasets y despliegue
 industrial quedan diferidos. Fases 2--6 permanecen como contexto historico.
@@ -43,6 +44,7 @@ La arquitectura objetivo usa LangGraph con patron de supervisor jerarquico. Los 
 - La memoria debe actualizarse en paralelo al desarrollo.
 - Antes de implementar una nueva mejora, revisar
   `codigo/docs/133_fase11_reenfoque_hibrido_nasa_replay_agentico.md`,
+  `codigo/docs/141_fase11_campana_monitorizacion_agentiva_56h.md`,
   `codigo/docs/140_fase11_policy_proposal_consultiva.md`,
   `codigo/docs/139_fase11_catalogo_evidencia_causal_por_registro.md`,
   `codigo/docs/135_fase11_motor_triggers_p3_determinista.md`,

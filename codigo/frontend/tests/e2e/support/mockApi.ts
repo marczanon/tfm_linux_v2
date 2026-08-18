@@ -33,6 +33,7 @@ export interface MockApiController {
 }
 
 export interface MonitoringMockApiController extends MockApiController {
+  readonly campaignRequests: number;
   readonly dispatchRequests: MonitoringReviewDispatchRequest[];
   readonly sessionRequests: MonitoringSessionCreateRequest[];
   readonly stepRequests: MonitoringStepRequest[];
@@ -266,6 +267,7 @@ export async function installMonitoringMockApi(
   const sessionRequests: MonitoringSessionCreateRequest[] = [];
   const stepRequests: MonitoringStepRequest[] = [];
   const dispatchRequests: MonitoringReviewDispatchRequest[] = [];
+  let campaignRequests = 0;
   let currentSession: MonitoringSessionView = structuredClone(scenario.initialSession);
   let nextStepIndex = 0;
   let releaseDispatchGate: () => void = () => undefined;
@@ -295,6 +297,22 @@ export async function installMonitoringMockApi(
     }
     if (method === "GET" && path === "/api/monitoring/review-gates/current") {
       return json(route, MONITORING_REVIEW_GATE_FIXTURE);
+    }
+    if (method === "GET" && path === "/api/monitoring/evidence-campaigns/current") {
+      campaignRequests += 1;
+      if (
+        scenario.campaignFailure &&
+        campaignRequests > scenario.campaignFailure.afterRequestCount
+      ) {
+        return json(
+          route,
+          { detail: "Fallo de campaña inyectado por la fixture." },
+          scenario.campaignFailure.status,
+        );
+      }
+      return scenario.campaign
+        ? json(route, scenario.campaign)
+        : notFound(route, "Campaña de evidencia no publicada en esta fixture.");
     }
     if (
       method === "GET" &&
@@ -406,6 +424,9 @@ export async function installMonitoringMockApi(
       }
     },
     dispatchRequests,
+    get campaignRequests() {
+      return campaignRequests;
+    },
     releaseDispatchResponse() {
       releaseDispatchGate();
     },

@@ -28,6 +28,8 @@ from codigo.app.schemas.api_memory import (
 from codigo.app.schemas.api_llm import LLMStatusResponse
 from codigo.app.schemas.api_monitoring import (
     MonitoringChildRunListResponse,
+    MonitoringEvidenceCampaignReviewView,
+    MonitoringEvidenceCampaignView,
     MonitoringReplaySourceSummary,
     MonitoringReviewGateCase,
     MonitoringReviewGateCoverage,
@@ -103,6 +105,11 @@ from codigo.app.services.monitoring_review_reliability import (
     MonitoringReviewReliabilityResult,
     load_published_monitoring_review_reliability,
 )
+from codigo.app.services.monitoring_evidence_campaign import (
+    DEFAULT_MONITORING_EVIDENCE_CAMPAIGN_OUTPUT_DIR,
+    MonitoringEvidenceCampaignPublished,
+    load_published_monitoring_evidence_campaign,
+)
 from codigo.app.services.run_persistence import (
     RunIndexEntry,
     RunSnapshot,
@@ -175,6 +182,36 @@ async def read_current_monitoring_review_gate(
         raise HTTPException(
             status_code=409,
             detail="published monitoring review gate failed integrity verification",
+        ) from exc
+
+
+@router.get(
+    "/monitoring/evidence-campaigns/current",
+    response_model=MonitoringEvidenceCampaignView,
+)
+async def read_current_monitoring_evidence_campaign(
+    request: Request,
+) -> MonitoringEvidenceCampaignView:
+    """Sirve la campaña publicada sin ofrecer controles para ejecutarla."""
+
+    output_root = _monitoring_evidence_campaign_output_dir(request)
+    if not (output_root / "current.json").is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="published monitoring evidence campaign not found",
+        )
+    try:
+        published = load_published_monitoring_evidence_campaign(
+            output_root=output_root,
+        )
+        return _monitoring_evidence_campaign_view(published)
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "published monitoring evidence campaign failed integrity "
+                "verification"
+            ),
         ) from exc
 
 
@@ -932,6 +969,106 @@ def _monitoring_review_reliability_output_dir(request: Request) -> Path:
             "monitoring_review_reliability_output_dir",
             DEFAULT_MONITORING_REVIEW_RELIABILITY_OUTPUT_DIR,
         )
+    )
+
+
+def _monitoring_evidence_campaign_output_dir(request: Request) -> Path:
+    return Path(
+        getattr(
+            request.app.state,
+            "monitoring_evidence_campaign_output_dir",
+            DEFAULT_MONITORING_EVIDENCE_CAMPAIGN_OUTPUT_DIR,
+        )
+    )
+
+
+def _monitoring_evidence_campaign_view(
+    published: MonitoringEvidenceCampaignPublished,
+) -> MonitoringEvidenceCampaignView:
+    """Reduce la publicación sellada a identidad, progreso y recuentos."""
+
+    plan = published.plan
+    state = published.state
+    return MonitoringEvidenceCampaignView(
+        publication_sha256=published.publication.publication_sha256,
+        published_at=published.publication.published_at,
+        registration_sha256=published.preregistration.registration_sha256,
+        registered_at=published.preregistration.registered_at,
+        plan_sha256=published.plan.plan_sha256,
+        state_sha256=published.state.state_sha256,
+        result_sha256=(
+            published.result.result_sha256
+            if published.result is not None
+            else None
+        ),
+        campaign_id=state.campaign_id,
+        session_id=state.session_id,
+        status=state.status,
+        phase=state.phase,
+        evidence_verdict=state.evidence_verdict,
+        operational_verdict=state.operational_verdict,
+        agentic_verdict=state.agentic_verdict,
+        current_revision=state.current_revision,
+        execution_cursor=state.execution_cursor,
+        progress_ratio=state.progress_ratio,
+        reviews=tuple(
+            MonitoringEvidenceCampaignReviewView(
+                context_id=item.context_id,
+                ordinal=item.ordinal,
+                trigger_type=item.trigger_type,
+                reason_code=item.reason_code,
+                condition_start_cursor=item.condition_start_cursor,
+                cutoff_cursor=item.cutoff_cursor,
+                source_time=item.source_time,
+                lifecycle=item.lifecycle,
+                trigger_id=item.trigger_id,
+                child_run_id=item.child_run_id,
+                decision_count=item.decision_count,
+                llm_origin_count=item.llm_origin_count,
+                repaired_count=item.repaired_count,
+                fallback_count=item.fallback_count,
+                proposal_status=item.proposal_status,
+                proposal_application_status=(
+                    item.proposal_application_status
+                ),
+                error=item.error,
+            )
+            for item in state.reviews
+        ),
+        observed_trigger_count=state.observed_trigger_count,
+        terminal_child_run_count=state.terminal_child_run_count,
+        resolved_child_run_count=state.resolved_child_run_count,
+        observed_decision_count=state.observed_decision_count,
+        physical_attempt_count=state.physical_attempt_count,
+        llm_origin_decision_count=state.llm_origin_decision_count,
+        repaired_decision_count=state.repaired_decision_count,
+        fallback_count=state.fallback_count,
+        policy_proposal_count=state.policy_proposal_count,
+        blockers=state.blockers,
+        started_at=state.started_at,
+        updated_at=state.updated_at,
+        completed_at=state.completed_at,
+        runtime_elapsed_seconds=state.runtime_elapsed_seconds,
+        execution_mode=plan.execution_mode,
+        experiment_mode=plan.experiment_mode,
+        memory_mode=plan.memory_mode,
+        policy_application_status=plan.policy_application_status,
+        expected_total_monitoring_ticks=plan.expected_total_monitoring_ticks,
+        pre_roll_start_cursor=plan.pre_roll_start_cursor,
+        pre_roll_end_cursor=plan.pre_roll_end_cursor,
+        agentic_window_start_cursor=plan.agentic_window_start_cursor,
+        agentic_window_end_cursor=plan.agentic_window_end_cursor,
+        agentic_window_source_start=plan.agentic_window_source_start,
+        agentic_window_source_end=plan.agentic_window_source_end,
+        agentic_window_source_duration_seconds=(
+            plan.agentic_window_source_duration_seconds
+        ),
+        source_timezone_status=plan.source_timezone_status,
+        speed_multiplier=plan.speed_multiplier,
+        expected_trigger_count=plan.expected_trigger_count,
+        expected_child_run_count=plan.expected_child_run_count,
+        expected_decision_count=plan.expected_decision_count,
+        expected_policy_proposal_count=plan.expected_policy_proposal_count,
     )
 
 

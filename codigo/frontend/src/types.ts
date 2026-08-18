@@ -555,6 +555,100 @@ export interface MonitoringReviewGateView {
   coverage: MonitoringReviewGateCoverage[];
 }
 
+export type MonitoringEvidenceCampaignStatus =
+  | "planned"
+  | "running"
+  | "completed"
+  | "interrupted"
+  | "failed";
+export type MonitoringEvidenceCampaignPhase =
+  | "planned"
+  | "pre_roll"
+  | "agentic_window"
+  | "completed";
+export type MonitoringEvidenceCampaignVerdict = "pending" | "passed" | "blocked";
+export type MonitoringEvidenceCampaignReviewLifecycle =
+  | "pending"
+  | "running"
+  | "resolved"
+  | "failed"
+  | "interrupted";
+
+export interface MonitoringEvidenceCampaignReviewView {
+  context_id: string;
+  ordinal: number;
+  trigger_type: MonitoringTriggerType;
+  reason_code: MonitoringTriggerReasonCode;
+  condition_start_cursor: number;
+  cutoff_cursor: number;
+  source_time: string;
+  lifecycle: MonitoringEvidenceCampaignReviewLifecycle;
+  trigger_id: string | null;
+  child_run_id: string | null;
+  decision_count: number;
+  llm_origin_count: number;
+  repaired_count: number;
+  fallback_count: number;
+  proposal_status: string | null;
+  proposal_application_status: string | null;
+  error: string | null;
+}
+
+export interface MonitoringEvidenceCampaignView {
+  schema_version: "monitoring_evidence_campaign_view_v1";
+  publication_status: "published";
+  publication_sha256: string;
+  published_at: string;
+  registration_sha256: string;
+  registered_at: string;
+  plan_sha256: string;
+  state_sha256: string;
+  result_sha256: string | null;
+  campaign_id: string;
+  session_id: string;
+  status: MonitoringEvidenceCampaignStatus;
+  phase: MonitoringEvidenceCampaignPhase;
+  evidence_verdict: MonitoringEvidenceCampaignVerdict;
+  operational_verdict: MonitoringEvidenceCampaignVerdict;
+  agentic_verdict: MonitoringEvidenceCampaignVerdict;
+  current_revision: number;
+  execution_cursor: number | null;
+  progress_ratio: number;
+  reviews: MonitoringEvidenceCampaignReviewView[];
+  observed_trigger_count: number;
+  terminal_child_run_count: number;
+  resolved_child_run_count: number;
+  observed_decision_count: number;
+  physical_attempt_count: number;
+  llm_origin_decision_count: number;
+  repaired_decision_count: number;
+  fallback_count: number;
+  policy_proposal_count: number;
+  blockers: string[];
+  started_at: string | null;
+  updated_at: string;
+  completed_at: string | null;
+  runtime_elapsed_seconds: number;
+  execution_mode: "historical_replay_accelerated";
+  experiment_mode: "frozen_benchmark";
+  memory_mode: "off";
+  policy_application_status: "not_applied";
+  expected_total_monitoring_ticks: 689;
+  pre_roll_start_cursor: 0;
+  pre_roll_end_cursor: 352;
+  agentic_window_start_cursor: 353;
+  agentic_window_end_cursor: 688;
+  agentic_window_source_start: "2004-02-16T22:32:39";
+  agentic_window_source_end: "2004-02-19T06:22:39";
+  agentic_window_source_duration_seconds: 201000;
+  source_timezone_status: "not_declared";
+  speed_multiplier: number;
+  expected_trigger_count: 4;
+  expected_child_run_count: 4;
+  expected_decision_count: 28;
+  expected_policy_proposal_count: 4;
+}
+
 export interface RunFilters {
   dataset: string | null;
   current_stage: string | null;

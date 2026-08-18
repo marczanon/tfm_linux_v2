@@ -1009,11 +1009,20 @@ incrementales:
 - `140_fase11_policy_proposal_consultiva.md` implementa una primera rebanada
   del Bloque G: sintetiza las siete recomendaciones bajo autoridad del servidor
   y las muestra como consultivas y no aplicadas, sin inventar parametros.
+- `141_fase11_campana_monitorizacion_agentiva_56h.md` prepara el cierre
+  experimental inmediato: reutiliza P3 y el bridge actual para una campaña
+  histórica acelerada con pre-roll `0..352`, ventana agentiva `353..688`,
+  pacing y heartbeat configurables, cuatro hijas y veredictos operativo y
+  agentivo separados. La implementación está verificada de forma focal, pero
+  todavía no se ha ejecutado la campaña oficial; un smoke diagnóstico separado
+  completó únicamente el primer trigger con siete roles LLM y cero fallback.
 
 Los apartados de validacion de eficacia, aprobacion humana, politica adaptativa,
-aplicacion hacia delante, nuevo gate de Qwen y ablacion RAG continuan como
-trabajo pendiente. Las afirmaciones de la seccion de demo y los claims sobre
-propuestas aplicadas describen el objetivo de la hoja, no capacidades
-demostradas por estos cierres. La `MonitoringPolicyProposal` de la hoja 140 es
-una sintesis determinista del servidor: no constituye una nueva decision de
-Qwen, una politica candidata ni un cambio ejecutable.
+aplicacion hacia delante y ablacion RAG continuan como trabajo pendiente. La
+campaña de la hoja 141 será el siguiente contraste prospectivo del contrato
+actual, no una adaptación de políticas ni una repetición selectiva de V3. Las
+afirmaciones de la seccion de demo y los claims sobre propuestas aplicadas
+describen el objetivo de la hoja, no capacidades demostradas por estos cierres.
+La `MonitoringPolicyProposal` de la hoja 140 es una sintesis determinista del
+servidor: no constituye una nueva decision de Qwen, una politica candidata ni
+un cambio ejecutable.

@@ -212,8 +212,15 @@ Este incremento no permite afirmar:
 
 ## 11. Trabajo pendiente
 
-Antes de una politica aplicable se necesitan hitos separados: un gate
-prospectivo completo del contrato generativo con catalogo por registro,
+El siguiente cierre está preparado en
+`141_fase11_campana_monitorizacion_agentiva_56h.md`: una única campaña P3
+histórica acelerada, prerregistrada y con cuatro revisiones sobre la ventana
+`353..688`. Mantiene este mismo contrato, memoria OFF y propuestas no aplicadas,
+y separa el veredicto operativo del agentivo. En el cierre descrito por la hoja
+141 la campaña todavía no se ha ejecutado; solo existe un smoke diagnóstico
+separado del primer trigger, que no constituye el resultado de campaña.
+
+Antes de una politica aplicable siguen siendo necesarios hitos separados:
 evaluacion independiente de soporte y utilidad, un contrato que permita
 proponer valores dentro de rangos predeclarados, `ValidationRecord`, Human
 Review real y `ApplicationRecord` exclusivamente hacia delante. Solo entonces

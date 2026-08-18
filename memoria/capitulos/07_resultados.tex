@@ -751,6 +751,30 @@ no verdad física de las hipótesis.
   \label{fig:gate_repetido_monitoring_review}
 \end{figure}
 
+\subsection{Estado de la campaña agentiva acelerada}
+
+Se ha implementado el protocolo que recorrerá una sesión P3 con pre-roll
+\texttt{0..352} y ventana agentiva \texttt{353..688}. La ventana representa
+55~h~50~min de tiempo NASA y contiene los cuatro cutoffs primarios. El plan fija
+cuatro hijas, 28 decisiones y cuatro
+\texttt{MonitoringPolicyProposal}, con memoria desactivada y estado
+\texttt{not\_applied}. La configuración por defecto usa aceleración
+$60\times$, 10 segundos entre steps y heartbeat de 5 segundos.
+El plan oficial ya está publicado en estado \texttt{planned} y revisión cero,
+sin sesión de replay ni llamadas de campaña.
+
+Las verificaciones disponibles son todavía focales y sintéticas: comprueban
+contratos, pacing, publicación monotónica, exclusión single-flight, matriz
+$4\times7$, ledger físico, rechazo de manipulación y cálculo separado de los
+veredictos operativo y agentivo. No se ha ejecutado la campaña oficial ni se
+ha obtenido su dictamen. Un smoke diagnóstico separado sí alcanzó el primer
+trigger: produjo siete decisiones con origen LLM, validación contractual en el
+primer intento y cero fallback; los roles seleccionaron subconjuntos de un
+catálogo de 12 registros y la propuesta resultante conservó el desacuerdo y
+\texttt{not\_applied}. En consecuencia, no existen nuevos
+resultados 4/4, 28/28 o 4/4 que añadir a la Tabla~\ref{tab:gate_repetido_p3};
+tampoco se modifica el puntero V3, cuyo dictamen continúa bloqueado.
+
 \subsection{Estado de H4}
 
 H4 queda \textbf{parcialmente respaldada por el mecanismo y por un estudio de

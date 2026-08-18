@@ -247,6 +247,54 @@ consulta Qwen, no ejecuta un replay NASA, no evalúa la verdad de una
 recomendación y no crea, valida o aplica una política. Los recuentos de tests no
 se incorporan a las 84 decisiones de V2/V3 ni modifican el gate publicado.
 
+\subsection{Protocolo de campaña agentiva acelerada}
+
+El siguiente contraste se ha preparado como una campaña única, no como una
+tercera batería de tres repeticiones. Su unidad sigue siendo la sesión NASA P3.
+El plan incorpora un pre-roll causal de 353 snapshots, cursores
+\texttt{0..352}, y una ventana agentiva de 336 snapshots,
+\texttt{353..688}. Esta última cubre 201.000 segundos de tiempo fuente
+(55~h~50~min) y contiene los cuatro contextos primarios ya declarados. Se
+esperan cuatro runs hijas, siete roles por hija, 28 decisiones y cuatro
+propuestas consultivas.
+
+La aceleración por defecto es $60\times$: la cadencia nominal de 600 segundos se
+proyecta a un intervalo de 10 segundos por step, con heartbeat cada 5 segundos.
+Ambos valores pertenecen al pacing del replay y no sustituyen
+\texttt{source\_time}. El runtime observado incluirá además el tiempo de las
+revisiones guiadas, por lo que no se fija una duración de pared a partir de la
+ventana fuente.
+
+El prerregistro congela modelo, configuración, fingerprints y fuentes antes de
+abrir la sesión. El modo plan-only no consulta Ollama. El modo execute verifica
+digest y hashes, recorre los 689 ticks y publica progreso incremental. Al cerrar
+se calculan por separado: (a) un veredicto operativo sobre completitud temporal
+y los cuatro expedientes, y (b) un veredicto agentivo sobre las 28 observaciones,
+origen, trazas, binding, grounding, alcance, fallbacks y cuatro propuestas no
+aplicadas. El dictamen conjunto exige que ambos pasen.
+
+Las pruebas focales usan clientes y reloj inyectables para comprobar pacing,
+heartbeat, lifecycle, hashing, manipulación y separación de veredictos sin
+esperar la duración configurada. También verifican que plan-only no cree la
+aplicación ni consulte el modelo. Se añaden casos adversos para impedir el
+retroceso de una publicación, la reutilización de una sesión, dos ejecuciones
+simultáneas, una matriz distinta de $4\times7$ o un ledger físico vacío,
+duplicado o desligado de las observaciones. En el momento de redactar este apartado la
+campaña real no se ha ejecutado; por tanto, los valores 4/4, 28/28 y 4/4 son
+expectativas prerregistrables, no resultados observados.
+
+Tras estabilizar las fuentes se materializó el prerregistro oficial con la
+identidad \texttt{nasa-p3-agentic-window-56h-v1}. Su publicación permanece en
+\texttt{planned}, revisión cero, y todavía no existe el directorio de sesión;
+por tanto, el prerregistro no debe confundirse con inicio ni resultado.
+
+Como preflight mecánico se ejecutó además una sesión diagnóstica nueva, sin
+pacing y detenida tras el trigger del cursor 353. Este smoke no pertenece a la
+unidad experimental de campaña: solo comprueba que el contrato vigente puede
+completar siete roles, resolver claves del catálogo por registro, persistir la
+propuesta consultiva y mantener memoria OFF y política no aplicada antes de
+invertir el tiempo de la ejecución larga.
+
 \subsection{Integración de agentes y memoria RAG}
 
 Las pruebas técnicas de memoria han recorrido el ciclo desde un episodio de

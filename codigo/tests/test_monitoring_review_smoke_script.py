@@ -130,17 +130,40 @@ class _FullCycleClient:
         raise AssertionError(f"unexpected POST {path}")
 
 
+class _FakePacingClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 def _trigger(
     trigger_id: str,
     sequence: int,
     trigger_type: str,
     cutoff_cursor: int,
 ) -> dict:
+    reason_code = {
+        "persistent_alert": "persistent_confirmation",
+        "session_close": "session_completed",
+    }.get(trigger_type, "health_state_escalation")
     return {
         "event_id": f"{trigger_id}:event:1",
         "trigger_id": trigger_id,
         "sequence": sequence,
         "trigger_type": trigger_type,
+        "reason_code": reason_code,
+        "condition_start_cursor": (
+            max(cutoff_cursor - 2, 0)
+            if trigger_type == "persistent_alert"
+            else cutoff_cursor
+        ),
         "lifecycle_status": "emitted",
         "cutoff_cursor": cutoff_cursor,
     }
@@ -192,6 +215,80 @@ class FullMonitoringReviewCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(item.get("child_run_id") for item in progress)
         )
+        self.assertEqual(result["step_interval_seconds"], 0.0)
+        self.assertEqual(result["heartbeat_interval_seconds"], 0.0)
+        self.assertEqual(result["pacing_wait_count"], 0)
+        self.assertEqual(result["pacing_elapsed_seconds"], 0.0)
+        self.assertEqual(result["heartbeat_count"], 0)
+
+    async def test_paces_only_between_steps_and_emits_chunked_heartbeats(self) -> None:
+        client = _FullCycleClient()
+        progress: list[dict[str, object]] = []
+        clock = _FakePacingClock()
+
+        result = await run_full_session_review_cycle(
+            session_id="full-cycle-test",
+            timeout_seconds=1.0,
+            use_llm=True,
+            client=client,
+            progress_callback=progress.append,
+            poll_interval_seconds=0.0,
+            step_interval_seconds=5.0,
+            heartbeat_interval_seconds=2.0,
+            monotonic_clock=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+        self.assertEqual(clock.sleeps, [2.0, 2.0, 1.0, 2.0, 2.0, 1.0])
+        self.assertTrue(all(item <= 2.0 for item in clock.sleeps))
+        self.assertEqual(result["runtime_elapsed_seconds"], 10.0)
+        self.assertEqual(result["step_interval_seconds"], 5.0)
+        self.assertEqual(result["heartbeat_interval_seconds"], 2.0)
+        self.assertEqual(result["pacing_wait_count"], 2)
+        self.assertEqual(result["pacing_elapsed_seconds"], 10.0)
+        self.assertEqual(result["heartbeat_count"], 6)
+
+        kinds = [item["kind"] for item in progress]
+        self.assertEqual(kinds.count("pacing_wait_started"), 2)
+        self.assertEqual(kinds.count("campaign_heartbeat"), 6)
+        self.assertLess(
+            kinds.index("review_dispatching"),
+            kinds.index("pacing_wait_started"),
+        )
+        heartbeat_events = [
+            item for item in progress if item["kind"] == "campaign_heartbeat"
+        ]
+        self.assertEqual(
+            [item["wait_remaining_seconds"] for item in heartbeat_events],
+            [3.0, 1.0, 0.0, 3.0, 1.0, 0.0],
+        )
+
+    async def test_rejects_negative_pacing_intervals(self) -> None:
+        client = _FullCycleClient()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "step_interval_seconds cannot be negative",
+        ):
+            await run_full_session_review_cycle(
+                session_id="full-cycle-test",
+                timeout_seconds=1.0,
+                use_llm=True,
+                client=client,
+                step_interval_seconds=-1.0,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "heartbeat_interval_seconds cannot be negative",
+        ):
+            await run_full_session_review_cycle(
+                session_id="full-cycle-test",
+                timeout_seconds=1.0,
+                use_llm=True,
+                client=client,
+                heartbeat_interval_seconds=-1.0,
+            )
 
 
 if __name__ == "__main__":

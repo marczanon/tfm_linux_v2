@@ -22,6 +22,7 @@ import type {
   MemoryRecordSummary,
   MemoryRole,
   MonitoringReplaySourceSummary,
+  MonitoringEvidenceCampaignView,
   MonitoringReviewGateView,
   MonitoringReviewDispatchRequest,
   MonitoringReviewDispatchResponse,
@@ -111,6 +112,12 @@ export async function listMonitoringSources(): Promise<MonitoringReplaySourceSum
 
 export async function getCurrentMonitoringReviewGate(): Promise<MonitoringReviewGateView> {
   return apiRequest<MonitoringReviewGateView>("/monitoring/review-gates/current");
+}
+
+export async function getCurrentMonitoringEvidenceCampaign(): Promise<MonitoringEvidenceCampaignView> {
+  return apiRequest<MonitoringEvidenceCampaignView>(
+    "/monitoring/evidence-campaigns/current",
+  );
 }
 
 export async function createMonitoringSession(

@@ -24,6 +24,7 @@ import {
   ApiClientError,
   createMonitoringSession,
   dispatchMonitoringReview,
+  getCurrentMonitoringEvidenceCampaign,
   getCurrentMonitoringReviewGate,
   getMonitoringSession,
   listMonitoringSources,
@@ -31,6 +32,7 @@ import {
 } from "../../api";
 import type {
   AgentActivationPolicyKind,
+  MonitoringEvidenceCampaignView,
   MonitoringFrame,
   MonitoringChildRunAttempt,
   MonitoringReviewGateCase,
@@ -57,6 +59,12 @@ import {
 } from "./MonitoringReplayChart";
 
 type MonitoringTab = MonitoringReturnTab;
+type EvidenceCampaignLoadState =
+  | "loading"
+  | "published"
+  | "absent"
+  | "integrity_error"
+  | "error";
 
 const PLAYBACK_RATES = [
   { value: 1, label: "x1", delayMs: 1400 },
@@ -96,6 +104,14 @@ export function MonitoringView({
   >("loading");
   const [reviewGateError, setReviewGateError] = useState<string | null>(null);
   const [reviewGateExpanded, setReviewGateExpanded] = useState(false);
+  const [evidenceCampaign, setEvidenceCampaign] =
+    useState<MonitoringEvidenceCampaignView | null>(null);
+  const [evidenceCampaignState, setEvidenceCampaignState] =
+    useState<EvidenceCampaignLoadState>("loading");
+  const [evidenceCampaignError, setEvidenceCampaignError] = useState<string | null>(null);
+  const [openingCampaignSession, setOpeningCampaignSession] = useState(false);
+  const [observerCampaignSessionId, setObserverCampaignSessionId] =
+    useState<string | null>(null);
   const [pendingRestoreFocus, setPendingRestoreFocus] =
     useState<{ tab: MonitoringTab; triggerId: string } | null>(null);
   const restoredBridgeRef = useRef<string | null>(null);
@@ -139,10 +155,34 @@ export function MonitoringView({
     }
   }, []);
 
+  const loadEvidenceCampaign = useCallback(async (quiet = false) => {
+    if (!quiet) setEvidenceCampaignState("loading");
+    setEvidenceCampaignError(null);
+    try {
+      const payload = await getCurrentMonitoringEvidenceCampaign();
+      setEvidenceCampaign(payload);
+      setEvidenceCampaignState("published");
+      return payload;
+    } catch (caught) {
+      if (caught instanceof ApiClientError && caught.status === 404) {
+        setEvidenceCampaignState("absent");
+        return null;
+      }
+      setEvidenceCampaignState(
+        caught instanceof ApiClientError && caught.status === 409
+          ? "integrity_error"
+          : "error",
+      );
+      setEvidenceCampaignError(errorText(caught));
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     void loadSources();
     void loadReviewGate();
-  }, [loadReviewGate, loadSources]);
+    void loadEvidenceCampaign();
+  }, [loadEvidenceCampaign, loadReviewGate, loadSources]);
 
   useEffect(() => {
     if (bridgeContext === null) {
@@ -292,9 +332,98 @@ export function MonitoringView({
     session !== null &&
     (inspectionCursor === null || inspectionCursor === session.state.execution_cursor);
   const playbackConfig = PLAYBACK_RATES.find((rate) => rate.value === playbackRate) ?? PLAYBACK_RATES[0];
+  const activeSessionId = session?.config.session_id ?? null;
+  const publishedCampaignSessionId = evidenceCampaign?.session_id ?? null;
+  const managedCampaignSession = activeSessionId !== null && (
+    activeSessionId === observerCampaignSessionId ||
+    activeSessionId === publishedCampaignSessionId
+  );
+
+  useEffect(() => {
+    if (
+      activeSessionId !== null &&
+      activeSessionId === publishedCampaignSessionId
+    ) {
+      setObserverCampaignSessionId(activeSessionId);
+    }
+  }, [activeSessionId, publishedCampaignSessionId]);
+
+  useEffect(() => {
+    if (managedCampaignSession) setPlaying(false);
+  }, [managedCampaignSession]);
+
+  useEffect(() => {
+    if (
+      evidenceCampaign === null ||
+      ["completed", "failed", "interrupted"].includes(evidenceCampaign.status)
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const timeoutId = window.setTimeout(async () => {
+      const refreshedCampaign = await loadEvidenceCampaign(true);
+      if (
+        cancelled ||
+        refreshedCampaign === null ||
+        session?.config.session_id !== refreshedCampaign.session_id ||
+        refreshedCampaign.updated_at === evidenceCampaign.updated_at
+      ) {
+        return;
+      }
+      try {
+        const refreshedSession = await getMonitoringSession(refreshedCampaign.session_id);
+        if (cancelled) return;
+        setInspectionCursor((current) =>
+          current === null || current === session.state.execution_cursor
+            ? refreshedSession.state.execution_cursor
+            : current,
+        );
+        setSession(refreshedSession);
+      } catch (caught) {
+        if (!cancelled) setEvidenceCampaignError(errorText(caught));
+      }
+    }, 4_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [evidenceCampaign, loadEvidenceCampaign, session]);
+
+  async function openEvidenceCampaignSession() {
+    if (evidenceCampaign === null || evidenceCampaign.status === "planned") return;
+    setOpeningCampaignSession(true);
+    setPlaying(false);
+    setError(null);
+    try {
+      const restored = await getMonitoringSession(evidenceCampaign.session_id);
+      const primaryAsset =
+        restored.config.asset_specs.find((asset) => asset.analysis_status === "modeled") ??
+        restored.config.asset_specs[0] ??
+        null;
+      setSession(restored);
+      setObserverCampaignSessionId(evidenceCampaign.session_id);
+      setSelectedScenarioId(restored.source.scenario_id);
+      setActivationPolicyKind(restored.config.activation_policy_kind);
+      setSelectedAssetKey(primaryAsset ? assetKey(primaryAsset) : null);
+      setSelectedTriggerId(null);
+      setInspectionCursor(restored.state.execution_cursor);
+      setActiveTab("replay");
+      setNotice("Campaña abierta en modo observador; el navegador no avanza el replay.");
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setOpeningCampaignSession(false);
+    }
+  }
 
   const advanceSession = useCallback(async () => {
-    if (!session || stepping || session.state.status === "completed" || session.state.status === "failed") {
+    if (
+      !session ||
+      managedCampaignSession ||
+      stepping ||
+      session.state.status === "completed" ||
+      session.state.status === "failed"
+    ) {
       return;
     }
     const currentSession = session;
@@ -353,7 +482,14 @@ export function MonitoringView({
     } finally {
       setStepping(false);
     }
-  }, [inspectionCursor, playing, selectedAsset?.asset_id, session, stepping]);
+  }, [
+    inspectionCursor,
+    managedCampaignSession,
+    playing,
+    selectedAsset?.asset_id,
+    session,
+    stepping,
+  ]);
 
   useEffect(() => {
     if (!playing || stepping || !session) {
@@ -483,7 +619,7 @@ export function MonitoringView({
   }
 
   async function dispatchTrigger(trigger: MonitoringTriggerEvent) {
-    if (!session || dispatchInFlightRef.current.size > 0) {
+    if (!session || managedCampaignSession || dispatchInFlightRef.current.size > 0) {
       return;
     }
     const history = triggerHistories.find(
@@ -555,6 +691,7 @@ export function MonitoringView({
   );
   const canStep =
     session !== null &&
+    !managedCampaignSession &&
     !stepping &&
     session.state.status !== "completed" &&
     session.state.status !== "failed";
@@ -597,6 +734,16 @@ export function MonitoringView({
         </div>
         <span className="monitoring-mode-badge"><Clock3 size={14} />Histórico</span>
       </header>
+
+      <MonitoringEvidenceCampaignPanel
+        campaign={evidenceCampaign}
+        loadState={evidenceCampaignState}
+        loadError={evidenceCampaignError}
+        observing={managedCampaignSession}
+        opening={openingCampaignSession}
+        onOpenSession={() => void openEvidenceCampaignSession()}
+        onRetry={() => void loadEvidenceCampaign()}
+      />
 
       <MonitoringReviewGatePanel
         expanded={reviewGateExpanded}
@@ -715,19 +862,26 @@ export function MonitoringView({
                 type="button"
               ><StepForward size={16} />{stepping ? "Aplicando…" : "Ejecutar un paso"}</button>
             </div>
-            <label className="monitoring-rate-field">
-              <span>Ritmo visual</span>
-              <select
-                aria-label="Ritmo visual de reproducción"
-                disabled={stepping}
-                onChange={(event) => setPlaybackRate(Number(event.target.value))}
-                value={playbackRate}
-              >
-                {PLAYBACK_RATES.map((rate) => (
-                  <option key={rate.value} value={rate.value}>{rate.label}</option>
-                ))}
-              </select>
-            </label>
+            {managedCampaignSession ? (
+              <div className="monitoring-managed-rate">
+                <span>Ritmo campaña</span>
+                <strong>{formatNumber(evidenceCampaign?.speed_multiplier ?? 1, 0)}×</strong>
+              </div>
+            ) : (
+              <label className="monitoring-rate-field">
+                <span>Ritmo visual</span>
+                <select
+                  aria-label="Ritmo visual de reproducción"
+                  disabled={stepping}
+                  onChange={(event) => setPlaybackRate(Number(event.target.value))}
+                  value={playbackRate}
+                >
+                  {PLAYBACK_RATES.map((rate) => (
+                    <option key={rate.value} value={rate.value}>{rate.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <button
               className="monitoring-follow-button"
               disabled={followsExecution || session.state.execution_cursor === null}
@@ -787,6 +941,7 @@ export function MonitoringView({
             <div aria-labelledby="monitoring-tab-status" id="monitoring-panel-status" role="tabpanel" tabIndex={0}>
               <StatusPanel
                 canDispatchReview={selectedTrigger !== null &&
+                  !managedCampaignSession &&
                   (dispatchingTriggerId === null || dispatchingTriggerId === selectedTrigger.trigger_id) &&
                   isDispatchableTrigger(selectedTrigger, selectedTriggerRunId, session)}
                 dispatching={selectedTrigger?.trigger_id === dispatchingTriggerId}
@@ -830,6 +985,7 @@ export function MonitoringView({
               }}
                 onOpenAgentRun={openAgentRun}
                 onDispatchReview={dispatchTrigger}
+                allowDispatch={!managedCampaignSession}
                 session={session}
               />
             </div>
@@ -844,6 +1000,191 @@ export function MonitoringView({
           </div>
         </section>
       )}
+    </section>
+  );
+}
+
+function MonitoringEvidenceCampaignPanel({
+  campaign,
+  loadState,
+  loadError,
+  observing,
+  opening,
+  onOpenSession,
+  onRetry,
+}: {
+  campaign: MonitoringEvidenceCampaignView | null;
+  loadState: EvidenceCampaignLoadState;
+  loadError: string | null;
+  observing: boolean;
+  opening: boolean;
+  onOpenSession: () => void;
+  onRetry: () => void;
+}) {
+  if (loadState === "loading" || loadState === "absent") return null;
+  if (
+    loadState === "integrity_error" ||
+    loadState === "error" ||
+    campaign === null
+  ) {
+    const integrityFailure = loadState === "integrity_error";
+    return (
+      <section
+        aria-labelledby="monitoring-evidence-campaign-title"
+        className="monitoring-review-gate monitoring-evidence-campaign tone-error"
+      >
+        <header className="monitoring-review-gate-band">
+          <span className="monitoring-review-gate-icon" aria-hidden="true">
+            <AlertTriangle size={20} />
+          </span>
+          <div className="monitoring-review-gate-heading">
+            <span className="eyebrow">Campaña de evidencia · replay histórico</span>
+            <h3 id="monitoring-evidence-campaign-title">
+              {integrityFailure
+                ? "Publicación no verificable"
+                : "No se pudo consultar la campaña"}
+            </h3>
+          </div>
+          <p className="monitoring-campaign-integrity-error">
+            {integrityFailure
+              ? "La publicación existe, pero no supera la verificación de integridad."
+              : "No se pudo comprobar la publicación; una sesión ya abierta conserva el modo observador."}
+            {loadError ? <span className="sr-only"> {loadError}</span> : null}
+          </p>
+          <button className="secondary-button" onClick={onRetry} type="button">
+            <RefreshCw size={15} />Verificar de nuevo
+          </button>
+        </header>
+      </section>
+    );
+  }
+
+  const tone = campaign.status === "failed" || campaign.status === "interrupted" ||
+    campaign.evidence_verdict === "blocked"
+    ? "blocked"
+    : campaign.status === "completed"
+      ? "passed"
+      : campaign.status === "running"
+        ? "running"
+        : "planned";
+  const progressPercent = Math.round(campaign.progress_ratio * 100);
+  const cannotOpen = campaign.status === "planned" || opening;
+  return (
+    <section
+      aria-labelledby="monitoring-evidence-campaign-title"
+      className={`monitoring-review-gate monitoring-evidence-campaign tone-${tone}`}
+    >
+      <header className="monitoring-review-gate-band monitoring-campaign-band">
+        <span className="monitoring-review-gate-icon" aria-hidden="true">
+          <Activity size={20} />
+        </span>
+        <div className="monitoring-review-gate-heading">
+          <span className="eyebrow">Campaña de evidencia · tiempo NASA</span>
+          <h3 id="monitoring-evidence-campaign-title">{campaignStatusLabel(campaign)}</h3>
+        </div>
+        <div className="monitoring-review-gate-facts monitoring-campaign-facts">
+          <span>
+            <strong>{sourceDurationLabel(campaign.agentic_window_source_duration_seconds)}</strong>
+            <small>ventana agentiva</small>
+          </span>
+          <span>
+            <strong>{progressPercent}%</strong>
+            <small>{campaign.current_revision}/{campaign.expected_total_monitoring_ticks} ticks</small>
+          </span>
+          <span>
+            <strong>{campaign.observed_trigger_count}/{campaign.expected_trigger_count}</strong>
+            <small>triggers primarios</small>
+          </span>
+          <span>
+            <strong>{campaign.observed_decision_count}/{campaign.expected_decision_count}</strong>
+            <small>{campaign.physical_attempt_count} llamadas · {campaign.fallback_count} fallback</small>
+          </span>
+          <span>
+            <strong>{campaign.policy_proposal_count}/{campaign.expected_policy_proposal_count}</strong>
+            <small>propuestas no aplicadas</small>
+          </span>
+        </div>
+        <button
+          className="secondary-button monitoring-campaign-open"
+          disabled={cannotOpen}
+          onClick={onOpenSession}
+          type="button"
+        >
+          {opening ? <RefreshCw className="spin" size={15} /> : <Radar size={15} />}
+          {opening ? "Abriendo…" : observing ? "Actualizar sesión" : "Abrir sesión"}
+        </button>
+      </header>
+
+      <div className="monitoring-campaign-body">
+        <div className="monitoring-campaign-progress-copy">
+          <span>{campaignPhaseLabel(campaign.phase)}</span>
+          <strong>{campaignEvidenceLabel(campaign.evidence_verdict)}</strong>
+          <small>
+            Motor {campaignVerdictShortLabel(campaign.operational_verdict)} · Agentes {campaignVerdictShortLabel(campaign.agentic_verdict)} · Histórico acelerado · dataset sin zona · Memoria OFF · política no aplicada
+          </small>
+        </div>
+        <div
+          aria-label={`Progreso de la campaña: ${progressPercent}%`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={progressPercent}
+          className="monitoring-campaign-progress"
+          role="progressbar"
+        >
+          <i style={{ width: `${progressPercent}%` }} />
+        </div>
+        <div
+          aria-label="Cuatro revisiones primarias de la campaña"
+          className="monitoring-campaign-reviews"
+          role="list"
+        >
+          {campaign.reviews.map((review) => (
+            <span className={`lifecycle-${review.lifecycle}`} key={review.context_id} role="listitem">
+              <i aria-hidden="true">{campaignReviewGlyph(review.lifecycle)}</i>
+              <span>
+                <strong>{triggerTypeLabel(review.trigger_type)}</strong>
+                <small>cursor {review.cutoff_cursor} · {review.decision_count}/7 decisiones</small>
+              </span>
+              <em>{campaignReviewLifecycleLabel(review.lifecycle)}</em>
+            </span>
+          ))}
+        </div>
+        <details className="monitoring-disclosure monitoring-campaign-seals">
+          <summary>Sellos de prerregistro y publicación</summary>
+          <dl>
+            <div>
+              <dt>Prerregistro</dt>
+              <dd title={campaign.registration_sha256}>
+                {shortAuditHash(campaign.registration_sha256)} · {auditTimestampLabel(campaign.registered_at)}
+              </dd>
+            </div>
+            <div>
+              <dt>Plan / estado</dt>
+              <dd title={`${campaign.plan_sha256} / ${campaign.state_sha256}`}>
+                {shortAuditHash(campaign.plan_sha256)} / {shortAuditHash(campaign.state_sha256)}
+              </dd>
+            </div>
+            <div>
+              <dt>Publicación</dt>
+              <dd title={campaign.publication_sha256}>
+                {shortAuditHash(campaign.publication_sha256)} · {auditTimestampLabel(campaign.published_at)}
+              </dd>
+            </div>
+            {campaign.result_sha256 ? (
+              <div>
+                <dt>Resultado</dt>
+                <dd title={campaign.result_sha256}>{shortAuditHash(campaign.result_sha256)}</dd>
+              </div>
+            ) : null}
+          </dl>
+        </details>
+        {campaign.blockers.length > 0 ? (
+          <details className="monitoring-disclosure monitoring-campaign-blockers">
+            <summary>Condiciones bloqueantes · {campaign.blockers.length}</summary>
+            <ul>{campaign.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>
+          </details>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -1390,6 +1731,7 @@ function StatusPanel({
 }
 
 function EventsPanel({
+  allowDispatch,
   childRuns,
   dispatchingTriggerId,
   events,
@@ -1399,6 +1741,7 @@ function EventsPanel({
   onDispatchReview,
   session,
 }: {
+  allowDispatch: boolean;
   childRuns: MonitoringChildRunAttempt[];
   dispatchingTriggerId: string | null;
   events: MonitoringTriggerEvent[];
@@ -1441,6 +1784,7 @@ function EventsPanel({
               isAgentRunLifecycle(event.lifecycle_status);
             const dispatching = dispatchingTriggerId === event.trigger_id;
             const canDispatchReview =
+              allowDispatch &&
               (dispatchingTriggerId === null || dispatching) &&
               isDispatchableTrigger(event, linkedRunId, session);
             return (
@@ -1854,6 +2198,90 @@ function formatIntervalSeconds(seconds: number): string {
     return `${formatInteger(seconds / 60)} min`;
   }
   return `${formatNumber(seconds, 0)} s`;
+}
+
+function campaignStatusLabel(campaign: MonitoringEvidenceCampaignView): string {
+  if (campaign.status === "planned") return "Campaña preparada";
+  if (campaign.status === "running") {
+    return campaign.phase === "pre_roll"
+      ? "Pre-roll causal en curso"
+      : "Ventana agentiva en curso";
+  }
+  if (campaign.status === "interrupted") return "Campaña interrumpida";
+  if (campaign.status === "failed") return "Campaña fallida";
+  return campaign.evidence_verdict === "passed"
+    ? "Campaña completada"
+    : "Campaña completada con bloqueos";
+}
+
+function campaignPhaseLabel(phase: MonitoringEvidenceCampaignView["phase"]): string {
+  return {
+    planned: "Pendiente de ejecución",
+    pre_roll: "Pre-roll causal 0–352",
+    agentic_window: "Ventana agentiva 353–688",
+    completed: "Recorrido cerrado",
+  }[phase];
+}
+
+function campaignEvidenceLabel(
+  verdict: MonitoringEvidenceCampaignView["evidence_verdict"],
+): string {
+  return {
+    pending: "Evidencia en curso",
+    passed: "Evidencia completa",
+    blocked: "Evidencia bloqueada",
+  }[verdict];
+}
+
+function campaignVerdictShortLabel(
+  verdict: MonitoringEvidenceCampaignView["evidence_verdict"],
+): string {
+  return {
+    pending: "pendiente",
+    passed: "correcto",
+    blocked: "bloqueado",
+  }[verdict];
+}
+
+function campaignReviewLifecycleLabel(
+  lifecycle: MonitoringEvidenceCampaignView["reviews"][number]["lifecycle"],
+): string {
+  return {
+    pending: "Pendiente",
+    running: "En análisis",
+    resolved: "Resuelta",
+    failed: "Fallida",
+    interrupted: "Interrumpida",
+  }[lifecycle];
+}
+
+function campaignReviewGlyph(
+  lifecycle: MonitoringEvidenceCampaignView["reviews"][number]["lifecycle"],
+): string {
+  return {
+    pending: "○",
+    running: "●",
+    resolved: "✓",
+    failed: "×",
+    interrupted: "!",
+  }[lifecycle];
+}
+
+function sourceDurationLabel(seconds: number): string {
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  return `${hours} h ${String(minutes).padStart(2, "0")} min`;
+}
+
+function shortAuditHash(value: string): string {
+  return `${value.slice(0, 12)}…`;
+}
+
+function auditTimestampLabel(value: string): string {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.valueOf())
+    ? value
+    : timestamp.toISOString().replace(".000Z", "Z");
 }
 
 function monitoringAnnouncement(

@@ -52,6 +52,18 @@ las siete decisiones no produce este objeto. En estos refuerzos no se ejecutó
 Qwen, no se repitió NASA y no se publicó un gate nuevo, por lo que no aportan
 evidencia empírica de mejora agentiva.
 
+El cierre siguiente deja preparada una campaña histórica acelerada que reutiliza
+ese 90~\% funcional sin cambiar los contratos agentivos. Incluye un pre-roll
+causal \texttt{0..352} y una ventana \texttt{353..688} de 55~h~50~min de tiempo
+NASA, con cuatro hijas, 28 decisiones y cuatro propuestas esperadas. El protocolo
+separa veredicto operativo y agentivo, mantiene memoria desactivada y no aplica
+políticas. Solo se han completado pruebas focales de la infraestructura; la
+campaña oficial y sus cuatro revisiones siguen pendientes. Un smoke separado
+del primer trigger completó siete roles LLM sin fallback y confirmó el camino
+mecánico del catálogo y la propuesta no aplicada, pero no sustituye el
+contraste cuyo plan oficial ya permanece prerregistrado en estado
+\texttt{planned}.
+
 Por tanto, la conclusión global debe formularse en dos niveles. Como resultado
 de ingeniería, existe un instrumento experimental funcional, reproducible y
 auditable, aplicado ya de extremo a extremo al caso oficial. Como resultado
@@ -307,6 +319,13 @@ aprobación o aplicación; el OR de revisión humana solo conserva que algún ro
 la recomienda. Evaluar utilidad requerirá una propuesta paramétrica explícita,
 un juez independiente y una intervención exclusivamente hacia delante.
 
+La campaña preparada tampoco elimina esa limitación. Su ventana temporal y sus
+recuentos son valores del plan, no evidencia observada mientras no se ejecute
+\texttt{--execute}. El pacing acelerado no equivale a operación de planta ni
+demuestra disponibilidad industrial. Si el motor completase los 689 ticks pero
+algún rol terminase en fallback, el veredicto operativo podría pasar y el
+agentivo quedaría bloqueado; esta separación es deliberada.
+
 Finalmente, el trabajo no compara de forma experimental backends vectoriales,
 familias avanzadas de modelos PHM ni infraestructura de producción. Tampoco
 realiza una validación industrial externa. Estos límites son coherentes con la
@@ -322,11 +341,11 @@ científica antes de ampliar la plataforma:
   \item ampliar la fiabilidad con escenarios holdout, un tercer formato genérico
         y una batería determinista de perturbaciones antes de estimar tasas
         generales;
-  \item prerregistrar un gate prospectivo completo del catálogo sellado por
-        registro ya implementado, con plan y sesiones nuevos; medir primera
-        respuesta, fallback y pertenencia exacta sin sustituir selectivamente
-        la hija adversa de V3, y añadir una rúbrica independiente si se desea
-        evaluar soporte semántico;
+  \item materializar y ejecutar una sola vez la campaña prospectiva ya
+        implementada sobre el catálogo sellado por registro; publicar tanto el
+        veredicto operativo como el agentivo, sin sustituir selectivamente una
+        hija adversa, y añadir una rúbrica independiente si se desea evaluar
+        soporte semántico;
   \item ampliar después la síntesis consultiva con un contrato agentivo que
         proponga valores dentro de rangos predeclarados, una validación
         determinista separada, revisión humana real y un

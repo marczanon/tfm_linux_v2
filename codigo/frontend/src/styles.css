@@ -8601,6 +8601,16 @@ body {
   border-left-color: #0f766e;
 }
 
+.monitoring-review-gate.tone-running {
+  border-color: rgba(37, 99, 235, 0.3);
+  border-left-color: #2563eb;
+}
+
+.monitoring-review-gate.tone-planned {
+  border-color: rgba(100, 116, 139, 0.32);
+  border-left-color: #64748b;
+}
+
 .monitoring-review-gate.tone-blocked,
 .monitoring-review-gate.tone-error {
   border-color: rgba(220, 38, 38, 0.3);
@@ -8632,6 +8642,16 @@ body {
 .tone-error .monitoring-review-gate-icon {
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.tone-running .monitoring-review-gate-icon {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.tone-planned .monitoring-review-gate-icon {
+  background: #f1f5f9;
+  color: #475569;
 }
 
 .monitoring-review-gate-heading h3,
@@ -8704,6 +8724,181 @@ body {
   border-top: 1px solid #dbe3ea;
   padding: 14px 16px 16px;
   background: #f7f9fb;
+}
+
+.monitoring-campaign-integrity-error {
+  margin: 0;
+  color: #991b1b;
+  font-size: 0.76rem;
+}
+
+.monitoring-campaign-body {
+  display: grid;
+  gap: 9px;
+  border-top: 1px solid #dbe3ea;
+  padding: 11px 16px 13px;
+  background: #f8fafc;
+}
+
+.monitoring-campaign-progress-copy {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.monitoring-campaign-progress-copy > span,
+.monitoring-campaign-progress-copy > strong {
+  border-right: 1px solid #dbe3ea;
+  padding-right: 10px;
+}
+
+.monitoring-campaign-progress-copy > strong {
+  color: var(--text-main);
+}
+
+.monitoring-campaign-progress-copy > small {
+  justify-self: end;
+  text-align: right;
+}
+
+.monitoring-campaign-progress {
+  overflow: hidden;
+  height: 7px;
+  border-radius: 999px;
+  background: #dbe3ea;
+}
+
+.monitoring-campaign-progress > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #0f766e);
+  transition: width 240ms ease;
+}
+
+.monitoring-campaign-reviews {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.monitoring-campaign-reviews > span {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid #dbe3ea;
+  border-radius: 9px;
+  padding: 7px 8px;
+  background: #ffffff;
+}
+
+.monitoring-campaign-reviews > span > i {
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.monitoring-campaign-reviews > span > span,
+.monitoring-campaign-reviews > span > span strong,
+.monitoring-campaign-reviews > span > span small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitoring-campaign-reviews > span > span strong {
+  color: var(--text-main);
+  font-size: 0.72rem;
+}
+
+.monitoring-campaign-reviews > span > span small,
+.monitoring-campaign-reviews > span > em {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+}
+
+.monitoring-campaign-reviews > span > em {
+  font-style: normal;
+  font-weight: 800;
+}
+
+.monitoring-campaign-reviews > span.lifecycle-running > i {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.monitoring-campaign-reviews > span.lifecycle-resolved > i {
+  background: #dcfce7;
+  color: #047857;
+}
+
+.monitoring-campaign-reviews > span.lifecycle-failed > i,
+.monitoring-campaign-reviews > span.lifecycle-interrupted > i {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.monitoring-campaign-blockers {
+  margin: 0;
+}
+
+.monitoring-campaign-seals {
+  margin: 0;
+}
+
+.monitoring-campaign-seals dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin: 8px 0 0;
+}
+
+.monitoring-campaign-seals dl > div {
+  min-width: 0;
+  border: 1px solid #dbe3ea;
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: #ffffff;
+}
+
+.monitoring-campaign-seals dt,
+.monitoring-campaign-seals dd {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitoring-campaign-seals dt {
+  color: var(--text-muted);
+  font-size: 0.61rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.monitoring-campaign-seals dd {
+  margin-top: 3px;
+  color: var(--text-main);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+}
+
+.monitoring-campaign-blockers ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
 }
 
 .monitoring-gate-role-chart,
@@ -9007,6 +9202,30 @@ body {
   display: grid;
   gap: 5px;
   min-width: 0;
+}
+
+.monitoring-managed-rate {
+  display: grid;
+  gap: 3px;
+  min-height: 40px;
+  align-content: center;
+  border: 1px solid rgba(37, 99, 235, 0.26);
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  background: #eff6ff;
+}
+
+.monitoring-managed-rate span {
+  color: #475569;
+  font-size: 0.62rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.monitoring-managed-rate strong {
+  color: #1d4ed8;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
 }
 
 .monitoring-field span,
@@ -10239,7 +10458,8 @@ body {
     grid-template-columns: auto minmax(180px, 0.65fr) minmax(300px, 1fr);
   }
 
-  .monitoring-review-gate-toggle {
+  .monitoring-review-gate-toggle,
+  .monitoring-campaign-open {
     grid-column: 2 / -1;
     justify-self: end;
   }
@@ -10273,12 +10493,22 @@ body {
   }
 
   .monitoring-review-gate-facts,
-  .monitoring-review-gate-toggle {
+  .monitoring-review-gate-toggle,
+  .monitoring-campaign-open {
     grid-column: 2;
   }
 
-  .monitoring-review-gate-toggle {
+  .monitoring-review-gate-toggle,
+  .monitoring-campaign-open {
     justify-self: start;
+  }
+
+  .monitoring-campaign-reviews {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .monitoring-campaign-seals dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .monitoring-source-panel .primary-button,
@@ -10311,6 +10541,21 @@ body {
 
   .monitoring-review-gate-facts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .monitoring-campaign-progress-copy {
+    grid-template-columns: 1fr;
+  }
+
+  .monitoring-campaign-progress-copy > span,
+  .monitoring-campaign-progress-copy > strong {
+    border-right: 0;
+    padding-right: 0;
+  }
+
+  .monitoring-campaign-progress-copy > small {
+    justify-self: start;
+    text-align: left;
   }
 
   .monitoring-gate-subheading {
@@ -10376,7 +10621,8 @@ body {
     padding: 14px;
   }
 
-  .monitoring-review-gate-body {
+  .monitoring-review-gate-body,
+  .monitoring-campaign-body {
     padding: 11px;
   }
 
@@ -10387,12 +10633,21 @@ body {
   .monitoring-review-gate-icon,
   .monitoring-review-gate-heading,
   .monitoring-review-gate-facts,
-  .monitoring-review-gate-toggle {
+  .monitoring-review-gate-toggle,
+  .monitoring-campaign-open {
     grid-column: 1;
   }
 
   .monitoring-review-gate-facts {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .monitoring-campaign-reviews {
+    grid-template-columns: 1fr;
+  }
+
+  .monitoring-campaign-seals dl {
+    grid-template-columns: 1fr;
   }
 
   .monitoring-gate-role-row {

@@ -43,6 +43,27 @@ MonitoringReviewGateCoverageKind = Literal[
     "causal_grounding",
     "trigger_decision_result_binding",
 ]
+MonitoringEvidenceCampaignStatus = Literal[
+    "planned",
+    "running",
+    "completed",
+    "interrupted",
+    "failed",
+]
+MonitoringEvidenceCampaignPhase = Literal[
+    "planned",
+    "pre_roll",
+    "agentic_window",
+    "completed",
+]
+MonitoringEvidenceCampaignVerdict = Literal["pending", "passed", "blocked"]
+MonitoringEvidenceCampaignReviewLifecycle = Literal[
+    "pending",
+    "running",
+    "resolved",
+    "failed",
+    "interrupted",
+]
 
 
 class MonitoringReviewGateOutcomeCounts(StrictBaseModel):
@@ -190,6 +211,111 @@ class MonitoringReviewGateView(StrictBaseModel):
             self.expected_repetition_count * self.expected_context_count
         ):
             raise ValueError("gate cases must project every planned matrix cell")
+        return self
+
+
+class MonitoringEvidenceCampaignReviewView(StrictBaseModel):
+    """Un trigger primario y su expediente hijo dentro de la campaña."""
+
+    context_id: str = Field(min_length=1)
+    ordinal: int = Field(ge=1, le=4)
+    trigger_type: MonitoringTriggerType
+    reason_code: MonitoringTriggerReasonCode
+    condition_start_cursor: NonNegativeInt
+    cutoff_cursor: NonNegativeInt
+    source_time: str = Field(min_length=1)
+    lifecycle: MonitoringEvidenceCampaignReviewLifecycle
+    trigger_id: str | None = None
+    child_run_id: str | None = None
+    decision_count: int = Field(ge=0, le=7)
+    llm_origin_count: int = Field(ge=0, le=7)
+    repaired_count: int = Field(ge=0, le=7)
+    fallback_count: int = Field(ge=0, le=7)
+    proposal_status: str | None = None
+    proposal_application_status: str | None = None
+    error: str | None = None
+
+
+class MonitoringEvidenceCampaignView(StrictBaseModel):
+    """Proyección visual estrecha de la campaña publicada y verificada."""
+
+    schema_version: Literal["monitoring_evidence_campaign_view_v1"] = (
+        "monitoring_evidence_campaign_view_v1"
+    )
+    publication_status: Literal["published"] = "published"
+    publication_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    published_at: datetime
+    registration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    registered_at: datetime
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    campaign_id: str = Field(min_length=1, max_length=140)
+    session_id: str = Field(min_length=1, max_length=160)
+    status: MonitoringEvidenceCampaignStatus
+    phase: MonitoringEvidenceCampaignPhase
+    evidence_verdict: MonitoringEvidenceCampaignVerdict
+    operational_verdict: MonitoringEvidenceCampaignVerdict
+    agentic_verdict: MonitoringEvidenceCampaignVerdict
+    current_revision: NonNegativeInt
+    execution_cursor: NonNegativeInt | None = None
+    progress_ratio: float = Field(ge=0.0, le=1.0)
+    reviews: tuple[MonitoringEvidenceCampaignReviewView, ...] = Field(
+        min_length=4,
+        max_length=4,
+    )
+    observed_trigger_count: NonNegativeInt
+    terminal_child_run_count: NonNegativeInt
+    resolved_child_run_count: NonNegativeInt
+    observed_decision_count: NonNegativeInt
+    physical_attempt_count: NonNegativeInt
+    llm_origin_decision_count: NonNegativeInt
+    repaired_decision_count: NonNegativeInt
+    fallback_count: NonNegativeInt
+    policy_proposal_count: NonNegativeInt
+    blockers: tuple[str, ...] = ()
+    started_at: datetime | None = None
+    updated_at: datetime
+    completed_at: datetime | None = None
+    runtime_elapsed_seconds: float = Field(ge=0.0)
+    execution_mode: Literal["historical_replay_accelerated"]
+    experiment_mode: Literal["frozen_benchmark"]
+    memory_mode: Literal["off"]
+    policy_application_status: Literal["not_applied"]
+    expected_total_monitoring_ticks: Literal[689]
+    pre_roll_start_cursor: Literal[0]
+    pre_roll_end_cursor: Literal[352]
+    agentic_window_start_cursor: Literal[353]
+    agentic_window_end_cursor: Literal[688]
+    agentic_window_source_start: Literal["2004-02-16T22:32:39"]
+    agentic_window_source_end: Literal["2004-02-19T06:22:39"]
+    agentic_window_source_duration_seconds: Literal[201000]
+    source_timezone_status: Literal["not_declared"]
+    speed_multiplier: float = Field(gt=0.0)
+    expected_trigger_count: Literal[4]
+    expected_child_run_count: Literal[4]
+    expected_decision_count: Literal[28]
+    expected_policy_proposal_count: Literal[4]
+
+    @model_validator(mode="after")
+    def validate_campaign_projection(self) -> "MonitoringEvidenceCampaignView":
+        if tuple(item.ordinal for item in self.reviews) != (1, 2, 3, 4):
+            raise ValueError("campaign reviews must use canonical ordinal order")
+        bounded_counts = (
+            (self.observed_trigger_count, self.expected_trigger_count),
+            (self.terminal_child_run_count, self.expected_child_run_count),
+            (self.resolved_child_run_count, self.expected_child_run_count),
+            (self.observed_decision_count, self.expected_decision_count),
+            (self.llm_origin_decision_count, self.expected_decision_count),
+            (self.repaired_decision_count, self.expected_decision_count),
+            (self.fallback_count, self.expected_decision_count),
+            (
+                self.policy_proposal_count,
+                self.expected_policy_proposal_count,
+            ),
+        )
+        if any(observed > expected for observed, expected in bounded_counts):
+            raise ValueError("campaign observed counts cannot exceed the plan")
         return self
 
 

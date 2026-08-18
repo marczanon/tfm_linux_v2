@@ -3,6 +3,7 @@ import type {
   ApiRunJobStatus,
   ModeledMonitoringFrame,
   MonitoringChildRunAttempt,
+  MonitoringEvidenceCampaignView,
   MonitoringReplaySourceSummary,
   MonitoringReviewGateView,
   MonitoringReviewDispatchResponse,
@@ -22,6 +23,11 @@ import {
 } from "./agentRuns";
 
 export interface MonitoringReplayScenario {
+  campaign?: MonitoringEvidenceCampaignView;
+  campaignFailure?: {
+    afterRequestCount: number;
+    status: number;
+  };
   childJob?: ApiRunJobStatus;
   childRunScenario?: AgentRunScenario;
   dispatch?: {
@@ -60,6 +66,8 @@ export const MONITORING_DISPATCH_SCENARIO: MonitoringReplayScenario =
   buildDispatchScenario();
 export const MONITORING_GATE_SCENARIO: MonitoringReplayScenario =
   buildGateScenario();
+export const MONITORING_CAMPAIGN_SCENARIO: MonitoringReplayScenario =
+  buildCampaignScenario();
 
 export const MONITORING_REVIEW_GATE_FIXTURE: MonitoringReviewGateView =
   buildReviewGateFixture();
@@ -184,6 +192,103 @@ function buildGateScenario(): MonitoringReplayScenario {
       status: "completed",
     },
     childRunScenario,
+  };
+}
+
+function buildCampaignScenario(): MonitoringReplayScenario {
+  const scenario = buildScenario();
+  const firstStep = scenario.steps[0];
+  if (!firstStep.tick) throw new Error("La fixture de campaña necesita un tick causal.");
+  return {
+    ...scenario,
+    campaign: buildEvidenceCampaignFixture(),
+    initialSession: {
+      ...scenario.initialSession,
+      state: firstStep.state,
+      ticks: [firstStep.tick],
+      triggers: firstStep.triggers,
+    },
+  };
+}
+
+function buildEvidenceCampaignFixture(): MonitoringEvidenceCampaignView {
+  const contexts = [
+    { id: "state_transition_353", ordinal: 1, type: "state_transition" as const, reason: "health_state_escalation" as const, start: 353, cutoff: 353, source: "2004-02-16T22:32:39" },
+    { id: "persistent_alert_498_from_496", ordinal: 2, type: "persistent_alert" as const, reason: "persistent_confirmation" as const, start: 496, cutoff: 498, source: "2004-02-17T22:42:39" },
+    { id: "state_transition_499", ordinal: 3, type: "state_transition" as const, reason: "health_state_escalation" as const, start: 499, cutoff: 499, source: "2004-02-17T22:52:39" },
+    { id: "session_close_688", ordinal: 4, type: "session_close" as const, reason: "session_completed" as const, start: 688, cutoff: 688, source: "2004-02-19T06:22:39" },
+  ];
+  return {
+    agentic_verdict: "pending",
+    agentic_window_end_cursor: 688,
+    agentic_window_source_duration_seconds: 201000,
+    agentic_window_source_end: "2004-02-19T06:22:39",
+    agentic_window_source_start: "2004-02-16T22:32:39",
+    agentic_window_start_cursor: 353,
+    blockers: [],
+    campaign_id: "e2e-monitoring-evidence-campaign",
+    completed_at: null,
+    current_revision: 1,
+    evidence_verdict: "pending",
+    execution_cursor: 0,
+    execution_mode: "historical_replay_accelerated",
+    expected_child_run_count: 4,
+    expected_decision_count: 28,
+    expected_policy_proposal_count: 4,
+    expected_total_monitoring_ticks: 689,
+    expected_trigger_count: 4,
+    experiment_mode: "frozen_benchmark",
+    fallback_count: 0,
+    llm_origin_decision_count: 0,
+    memory_mode: "off",
+    observed_decision_count: 0,
+    physical_attempt_count: 0,
+    observed_trigger_count: 0,
+    operational_verdict: "pending",
+    phase: "pre_roll",
+    policy_application_status: "not_applied",
+    policy_proposal_count: 0,
+    pre_roll_end_cursor: 352,
+    pre_roll_start_cursor: 0,
+    progress_ratio: 1 / 689,
+    plan_sha256: "b".repeat(64),
+    publication_sha256: "e".repeat(64),
+    publication_status: "published",
+    published_at: "2026-08-18T10:00:13Z",
+    registered_at: "2026-08-18T09:59:58Z",
+    registration_sha256: "a".repeat(64),
+    repaired_decision_count: 0,
+    result_sha256: null,
+    resolved_child_run_count: 0,
+    reviews: contexts.map((context) => ({
+      child_run_id: null,
+      condition_start_cursor: context.start,
+      context_id: context.id,
+      cutoff_cursor: context.cutoff,
+      decision_count: 0,
+      error: null,
+      fallback_count: 0,
+      lifecycle: "pending" as const,
+      llm_origin_count: 0,
+      ordinal: context.ordinal,
+      proposal_application_status: null,
+      proposal_status: null,
+      reason_code: context.reason,
+      repaired_count: 0,
+      source_time: context.source,
+      trigger_id: null,
+      trigger_type: context.type,
+    })),
+    runtime_elapsed_seconds: 12,
+    schema_version: "monitoring_evidence_campaign_view_v1",
+    session_id: SESSION_ID,
+    source_timezone_status: "not_declared",
+    speed_multiplier: 60,
+    state_sha256: "c".repeat(64),
+    started_at: "2026-08-18T10:00:00Z",
+    status: "running",
+    terminal_child_run_count: 0,
+    updated_at: "2026-08-18T10:00:12Z",
   };
 }
 

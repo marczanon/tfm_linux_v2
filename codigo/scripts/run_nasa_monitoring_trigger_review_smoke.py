@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import inspect
 import json
 import time
@@ -36,6 +36,10 @@ async def run_full_session_review_cycle(
     client: Any | None = None,
     progress_callback: Callable[[dict[str, object]], object] | None = None,
     poll_interval_seconds: float = 0.25,
+    step_interval_seconds: float = 0.0,
+    heartbeat_interval_seconds: float = 0.0,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> dict[str, object]:
     """Recorre una sesion P3 completa y revisa una vez cada trigger emitido.
 
@@ -52,6 +56,10 @@ async def run_full_session_review_cycle(
         raise ValueError("timeout_seconds must be positive")
     if poll_interval_seconds < 0:
         raise ValueError("poll_interval_seconds cannot be negative")
+    if step_interval_seconds < 0:
+        raise ValueError("step_interval_seconds cannot be negative")
+    if heartbeat_interval_seconds < 0:
+        raise ValueError("heartbeat_interval_seconds cannot be negative")
     if client is not None and app is not None:
         raise ValueError("inject either app or client, not both")
 
@@ -62,6 +70,10 @@ async def run_full_session_review_cycle(
             timeout_seconds=timeout_seconds,
             progress_callback=progress_callback,
             poll_interval_seconds=poll_interval_seconds,
+            step_interval_seconds=step_interval_seconds,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            monotonic_clock=monotonic_clock,
+            sleep=sleep,
         )
 
     owned_app = app or create_app(monitoring_review_use_llm=use_llm)
@@ -78,6 +90,10 @@ async def run_full_session_review_cycle(
                 timeout_seconds=timeout_seconds,
                 progress_callback=progress_callback,
                 poll_interval_seconds=poll_interval_seconds,
+                step_interval_seconds=step_interval_seconds,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                monotonic_clock=monotonic_clock,
+                sleep=sleep,
             )
 
 
@@ -88,7 +104,12 @@ async def _run_full_session_review_cycle_with_client(
     timeout_seconds: float,
     progress_callback: Callable[[dict[str, object]], object] | None,
     poll_interval_seconds: float,
+    step_interval_seconds: float,
+    heartbeat_interval_seconds: float,
+    monotonic_clock: Callable[[], float],
+    sleep: Callable[[float], Awaitable[None]],
 ) -> dict[str, object]:
+    campaign_started_at = monotonic_clock()
     response = await client.get(f"/monitoring/sessions/{session_id}")
     if response.status_code == 404:
         response = await client.post(
@@ -107,6 +128,9 @@ async def _run_full_session_review_cycle_with_client(
 
     reviews_by_trigger: dict[str, dict[str, object]] = {}
     steps_applied = 0
+    pacing_wait_count = 0
+    pacing_elapsed_seconds = 0.0
+    heartbeat_count = 0
 
     while True:
         await _collect_existing_terminal_reviews(
@@ -153,6 +177,7 @@ async def _run_full_session_review_cycle_with_client(
                 "kind": "review_dispatching",
                 "session_id": session_id,
                 "trigger_id": str(trigger["trigger_id"]),
+                "trigger_event_id": str(trigger["event_id"]),
                 "trigger_type": str(trigger["trigger_type"]),
                 "cutoff_cursor": trigger.get("cutoff_cursor"),
                 "child_run_id": child_run_id,
@@ -183,6 +208,20 @@ async def _run_full_session_review_cycle_with_client(
             break
 
         revision = int(state["revision"])
+        if steps_applied > 0 and step_interval_seconds > 0:
+            wait_elapsed, wait_heartbeats = await _wait_before_replay_step(
+                session_id=session_id,
+                revision=revision,
+                step_interval_seconds=step_interval_seconds,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                campaign_started_at=campaign_started_at,
+                progress_callback=progress_callback,
+                monotonic_clock=monotonic_clock,
+                sleep=sleep,
+            )
+            pacing_wait_count += 1
+            pacing_elapsed_seconds += wait_elapsed
+            heartbeat_count += wait_heartbeats
         stepped = await client.post(
             f"/monitoring/sessions/{session_id}/step",
             json={
@@ -218,9 +257,79 @@ async def _run_full_session_review_cycle_with_client(
         "review_count": len(reviews),
         "reviews": reviews,
         "terminal_counts": dict(sorted(lifecycle_counts.items())),
+        "runtime_elapsed_seconds": max(
+            monotonic_clock() - campaign_started_at,
+            0.0,
+        ),
+        "step_interval_seconds": step_interval_seconds,
+        "heartbeat_interval_seconds": heartbeat_interval_seconds,
+        "pacing_wait_count": pacing_wait_count,
+        "pacing_elapsed_seconds": pacing_elapsed_seconds,
+        "heartbeat_count": heartbeat_count,
         "memory_mode": "off",
         "policy_application_status": "not_applied",
     }
+
+
+async def _wait_before_replay_step(
+    *,
+    session_id: str,
+    revision: int,
+    step_interval_seconds: float,
+    heartbeat_interval_seconds: float,
+    campaign_started_at: float,
+    progress_callback: Callable[[dict[str, object]], object] | None,
+    monotonic_clock: Callable[[], float],
+    sleep: Callable[[float], Awaitable[None]],
+) -> tuple[float, int]:
+    """Espera entre ticks sin retrasar el dispatch de un trigger ya emitido."""
+
+    wait_started_at = monotonic_clock()
+    await _emit_progress(
+        progress_callback,
+        {
+            "kind": "pacing_wait_started",
+            "session_id": session_id,
+            "revision": revision,
+            "wait_seconds": step_interval_seconds,
+            "runtime_elapsed_seconds": max(
+                wait_started_at - campaign_started_at,
+                0.0,
+            ),
+        },
+    )
+
+    remaining = step_interval_seconds
+    heartbeat_count = 0
+    while remaining > 0:
+        chunk = (
+            min(remaining, heartbeat_interval_seconds)
+            if heartbeat_interval_seconds > 0
+            else remaining
+        )
+        await sleep(chunk)
+        remaining = max(remaining - chunk, 0.0)
+        if heartbeat_interval_seconds <= 0:
+            continue
+        heartbeat_count += 1
+        now = monotonic_clock()
+        await _emit_progress(
+            progress_callback,
+            {
+                "kind": "campaign_heartbeat",
+                "session_id": session_id,
+                "revision": revision,
+                "heartbeat_index": heartbeat_count,
+                "wait_elapsed_seconds": max(now - wait_started_at, 0.0),
+                "wait_remaining_seconds": remaining,
+                "runtime_elapsed_seconds": max(
+                    now - campaign_started_at,
+                    0.0,
+                ),
+            },
+        )
+
+    return max(monotonic_clock() - wait_started_at, 0.0), heartbeat_count
 
 
 async def _wait_for_child_terminal(
@@ -308,21 +417,47 @@ def _review_record(
         .get("origin")
         for event in decision_events
     ]
+    validation_statuses = [
+        event.get("payload", {})
+        .get("decision", {})
+        .get("generation_trace", {})
+        .get("validation_status")
+        for event in decision_events
+    ]
+    proposal_events = [
+        event for event in events if event.get("kind") == "policy_proposal"
+    ]
+    proposal = (
+        proposal_events[-1].get("payload", {}).get("policy_proposal", {})
+        if proposal_events
+        else {}
+    )
     child_run_id = str(attempt["child_run_id"])
     return {
         "trigger_id": str(trigger["trigger_id"]),
         "trigger_event_id": str(trigger["event_id"]),
         "trigger_sequence": int(trigger["sequence"]),
         "trigger_type": str(trigger["trigger_type"]),
+        "reason_code": str(trigger["reason_code"]),
+        "condition_start_cursor": int(trigger["condition_start_cursor"]),
         "cutoff_cursor": trigger.get("cutoff_cursor"),
         "child_run_id": child_run_id,
         "child_lifecycle": str(attempt["lifecycle_status"]),
         "job_status": None if job is None else job.get("status"),
         "decision_count": len(decision_events),
         "decision_origins": origins,
+        "llm_origin_count": sum(origin == "llm" for origin in origins),
+        "repaired_count": sum(
+            status == "repaired" for status in validation_statuses
+        ),
         "fallback_count": sum(
             origin == "guardrail_fallback" for origin in origins
         ),
+        "proposal_id": proposal.get("proposal_id"),
+        "proposal_sha256": proposal.get("proposal_sha256"),
+        "proposal_status": proposal.get("status"),
+        "proposal_agreement_status": proposal.get("agreement_status"),
+        "proposal_application_status": proposal.get("application_status"),
         "error": attempt.get("error"),
         "resumed": resumed,
         "run_dir": (Path("codigo/reports/runs") / child_run_id).as_posix(),
@@ -338,11 +473,23 @@ def _review_progress_event(
         "kind": kind,
         "session_id": session_id,
         "trigger_id": record["trigger_id"],
+        "trigger_event_id": record["trigger_event_id"],
         "trigger_type": record["trigger_type"],
         "cutoff_cursor": record["cutoff_cursor"],
         "child_run_id": record["child_run_id"],
         "child_lifecycle": record["child_lifecycle"],
         "job_status": record["job_status"],
+        "decision_count": record["decision_count"],
+        "llm_origin_count": record["llm_origin_count"],
+        "repaired_count": record["repaired_count"],
+        "fallback_count": record["fallback_count"],
+        "proposal_id": record["proposal_id"],
+        "proposal_sha256": record["proposal_sha256"],
+        "proposal_status": record["proposal_status"],
+        "proposal_application_status": record[
+            "proposal_application_status"
+        ],
+        "error": record["error"],
     }
 
 

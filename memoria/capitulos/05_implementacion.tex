@@ -1032,6 +1032,69 @@ incremento no incorpora un \texttt{ValidationRecord}. Tampoco incorpora
 aprobación humana, \texttt{ApplicationRecord}, una versión candidata ni
 mutación de scoring, activación o replay.
 
+\subsection{Campaña histórica acelerada de evidencia agentiva}
+
+Para cerrar el experimento sin rediseñar el contrato se incorporó una campaña
+que orquesta una única sesión P3 completa sobre las piezas anteriores. El
+servicio no implementa otro replay ni otro grafo: prerregistra la identidad, los
+cursores, el ritmo, los cuatro contextos y las huellas del modelo, el contrato y
+las fuentes críticas; después resume el ledger, las hijas, las observaciones de
+fiabilidad y las propuestas ya persistidas.
+
+El recorrido mantiene los 689 ticks de monitorización. Los cursores
+\texttt{0..352}, 353 snapshots, forman un pre-roll causal necesario para
+reconstruir el estado que origina la primera transición. La ventana agentiva
+abarca \texttt{353..688}, 336 snapshots, entre
+\texttt{2004-02-16T22:32:39} y \texttt{2004-02-19T06:22:39}. Esa diferencia es
+201.000 segundos, o 55~h~50~min de tiempo de la fuente sin zona declarada. El
+plan espera las transiciones 353 y 499, la persistencia confirmada en 498 y el
+cierre 688: cuatro hijas, 28 decisiones y cuatro propuestas consultivas.
+
+El runner común se extendió de forma compatible con
+\texttt{step\_interval\_seconds} y
+\texttt{heartbeat\_interval\_seconds}, ambos desactivados por defecto en los
+usos históricos. La primera orden de una invocación es inmediata. Las siguientes
+esperas solo ocurren cuando no existe un trigger pendiente ni una hija activa;
+así, pacing y heartbeat no retrasan el dispatch ni cambian single-flight. La
+campaña usa por defecto cadencia fuente de 600 segundos, aceleración
+$60\times$, intervalo de step de 10 segundos y heartbeat de 5 segundos.
+
+Los contratos específicos de campaña separan plan inmutable, progreso y cierre.
+El plan-only publica un estado preparado sin crear FastAPI, sesión o cliente
+Ollama. La ejecución explícita comprueba primero hashes de fuente y digest del
+modelo. El estado incremental diferencia pre-roll, ventana agentiva y cierre, y
+conserva lifecycle, decisiones, reparaciones, fallbacks, propuestas y duración
+runtime mediante una publicación hasheada.
+
+La autoridad de publicación se mantiene por identidad de campaña y no solo en
+el puntero global de la interfaz. Un bloqueo de fichero excluye ejecuciones
+concurrentes; los estados posteriores no pueden reducir cursor, contadores ni
+expedientes ya terminales. El modo \texttt{execute} rechaza una sesión
+preexistente, de modo que no incorpora trabajo anterior al prerregistro. El
+resultado enlaza prerregistro, plan, matriz exacta de cuatro contextos por siete
+roles y llamadas físicas al modelo. Estas últimas se sellan sin conservar el
+payload de la respuesta y un mismo intento no puede atribuirse a dos roles.
+
+El resultado tiene dos dictámenes. El operativo comprueba sesión completa, 689
+ticks, los 14 eventos P3, diez supresiones, tres slots variables, cuatro
+contextos exactos y cuatro expedientes. El agentivo exige 28
+observaciones, cuatro hijas resueltas, cobertura contractual completa, ausencia
+de fallback, salida no agentiva o error, cuatro propuestas no aplicadas y al
+menos un 90~\% de primera pasada. La evidencia conjunta solo pasa cuando ambos
+dictámenes pasan. Un resultado adverso se conserva en vez de repetir una hija
+selectivamente.
+
+La API expone una proyección estrecha y verificada de la publicación. La sala
+de monitorización la consume en modo observador: puede abrir la sesión y mostrar
+fase, progreso y cuatro revisiones, pero el navegador no avanza el replay ni
+despacha sus triggers. En el cierre de implementación descrito aquí solo se han
+ejecutado pruebas focales con relojes, clientes y artefactos controlados, más un
+smoke diagnóstico separado sobre el primer trigger. En este último, los siete
+roles produjeron salidas LLM validadas en el primer intento contractual, sin
+fallback, con selección del catálogo causal y una propuesta no aplicada. No se
+ha lanzado todavía la campaña oficial; su plan se ha materializado y publicado
+en estado \texttt{planned}, revisión cero y sin crear la sesión.
+
 \subsection{Interfaz de usuario}
 
 La interfaz web permite configurar una ejecución, realizar la verificación previa,
