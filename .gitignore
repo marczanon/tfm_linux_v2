@@ -30,6 +30,10 @@ codigo/reports/*
 /Guia-Normas-APA-7ma-edicion.pdf:Zone.Identifier
 /Plantilla TFM 2025-26.docx
 
+# Hojas de ruta internas
+/HOJA_RUTA_TFM.md
+/codigo/docs/*hoja_ruta*.md
+
 # Frontend local
 codigo/frontend/node_modules/
 codigo/frontend/dist/
