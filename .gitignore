@@ -23,18 +23,8 @@ codigo/experiments/*
 codigo/models/*
 codigo/reports/*
 
-# LaTeX
-memoria/*.aux
-memoria/*.bbl
-memoria/*.blg
-memoria/*.lof
-memoria/*.log
-memoria/*.lot
-memoria/*.out
-memoria/*.toc
-memoria/*.fls
-memoria/*.fdb_latexmk
-memoria/*.synctex.gz
+# Memoria académica privada
+/memoria/
 
 # Frontend local
 codigo/frontend/node_modules/
