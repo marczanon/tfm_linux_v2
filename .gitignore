@@ -25,6 +25,10 @@ codigo/reports/*
 
 # Memoria académica privada
 /memoria/
+/Documento TFM_ Arquitectura y Hoja de Ruta.pdf
+/Guia-Normas-APA-7ma-edicion.pdf
+/Guia-Normas-APA-7ma-edicion.pdf:Zone.Identifier
+/Plantilla TFM 2025-26.docx
 
 # Frontend local
 codigo/frontend/node_modules/
